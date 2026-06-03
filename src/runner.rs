@@ -1,11 +1,6 @@
-use std::{
-    ffi::OsStr,
-    io::{BufRead, BufWriter, Write},
-    os::unix::process::CommandExt,
-    path::Path,
-};
+use std::{ffi::OsStr, os::unix::process::CommandExt, path::Path};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub fn exec(
     command: &Path,
@@ -43,24 +38,13 @@ pub fn exec(
     Err(anyhow::Error::from(err).context("failed to exec systemd-run"))
 }
 
-/// Ask the user for confirmation on /dev/tty. Returns true if confirmed.
+/// Ask the user for confirmation on stdin. Returns true if confirmed.
 fn prompt_confirm(cmdline: &str) -> Result<bool> {
-    let tty_out = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .context("cannot open /dev/tty")?;
-    let tty_in = std::fs::OpenOptions::new()
-        .read(true)
-        .open("/dev/tty")
-        .context("cannot open /dev/tty")?;
-
-    let mut out = BufWriter::new(tty_out);
-    writeln!(out, "{cmdline}")?;
-    write!(out, "Proceed? [y/N] ")?;
-    out.flush()?;
+    eprintln!("{cmdline}\nProceed? [y/N] ");
 
     let mut line = String::new();
-    std::io::BufReader::new(tty_in).read_line(&mut line)?;
+    let stdin = std::io::stdin();
+    stdin.read_line(&mut line)?;
 
     Ok(matches!(
         line.trim().to_ascii_lowercase().as_str(),
