@@ -9,9 +9,16 @@ use crate::config::{CommandPattern, ValidatedConfigMap, ValidatedProfileConfig};
 pub struct ResolvedProfile {
     pub systemd_args: Vec<String>,
     pub debug: bool,
+    pub confirm: bool,
 }
 
 type Properties = HashMap<String, Value>;
+
+#[derive(Default)]
+struct ProfileMeta {
+    debug: Option<bool>,
+    confirm: Option<bool>,
+}
 
 /// Collect all profiles that match `command`, merge them in priority order
 /// (regex < glob < exact), and build the systemd-run argument list.
@@ -42,28 +49,29 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     }
 
     let mut merged = Properties::new();
-    let mut debug: Option<bool> = None;
+    let mut meta = ProfileMeta::default();
     for profile in glob_matches
         .iter()
         .chain(regex_matches.iter())
         .chain(exact_matches.iter())
     {
-        let (props, d) = expand_extend(configs, profile, &mut Vec::new())?;
+        let (props, m) = expand_extend(configs, profile, &mut Vec::new())?;
         merge_into(&mut merged, props)?;
-        debug = d.or(debug);
+        meta.debug = m.debug.or(meta.debug);
+        meta.confirm = m.confirm.or(meta.confirm);
     }
 
-    build_args(merged, debug)
+    build_args(merged, meta)
 }
 
 /// Recursively resolve `extend`, returning the fully-merged property map and
-/// the OR-aggregated debug flag for this profile's chain.
+/// the metadata flags for this profile's chain.
 fn expand_extend(
     configs: &ValidatedConfigMap,
     profile: &ValidatedProfileConfig,
     visited: &mut Vec<String>,
-) -> Result<(Properties, Option<bool>)> {
-    let (mut base, parent_debug) = if let Some(parent_name) = &profile.extend {
+) -> Result<(Properties, ProfileMeta)> {
+    let (mut base, parent_meta) = if let Some(parent_name) = &profile.extend {
         if visited.contains(parent_name) {
             bail!("circular profile extension: {}", parent_name);
         }
@@ -74,13 +82,16 @@ fn expand_extend(
         visited.push(parent_name.clone());
         expand_extend(configs, parent, visited)?
     } else {
-        (Properties::new(), None)
+        (Properties::new(), ProfileMeta::default())
     };
 
     // Child's explicit Some overrides parent; None falls back to parent's value.
-    let debug = profile.debug.or(parent_debug);
+    let meta = ProfileMeta {
+        debug: profile.debug.or(parent_meta.debug),
+        confirm: profile.confirm.or(parent_meta.confirm),
+    };
     merge_into(&mut base, profile.properties.clone())?;
-    Ok((base, debug))
+    Ok((base, meta))
 }
 
 /// Merge `src` into `dst`.
@@ -119,7 +130,7 @@ fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
     Ok(())
 }
 
-fn build_args(properties: Properties, debug: Option<bool>) -> Result<ResolvedProfile> {
+fn build_args(properties: Properties, meta: ProfileMeta) -> Result<ResolvedProfile> {
     let mut args: Vec<String> = Vec::new();
 
     for (key, val) in &properties {
@@ -129,7 +140,11 @@ fn build_args(properties: Properties, debug: Option<bool>) -> Result<ResolvedPro
         }
     }
 
-    Ok(ResolvedProfile { systemd_args: args, debug: debug.unwrap_or(false) })
+    Ok(ResolvedProfile {
+        systemd_args: args,
+        debug: meta.debug.unwrap_or(false),
+        confirm: meta.confirm.unwrap_or(false),
+    })
 }
 
 /// Convert a TOML value to one or more strings for systemd-run `-p` arguments.
@@ -192,6 +207,7 @@ mod tests {
         ValidatedProfileConfig {
             extend: None,
             debug: None,
+            confirm: None,
             pattern,
             properties: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         }

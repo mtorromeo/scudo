@@ -42,6 +42,7 @@ Each TOML section defines a profile. The section name is also the default match 
 | `match` | `exact` | `glob` | `regex` | `never` | Matching strategy (default: `exact`) |
 | `extend` | string | Name of another profile to inherit properties from |
 | `debug` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
+| `confirm` | bool | Prompt for interactive confirmation on `/dev/tty` before executing (default: `false`) |
 
 All other keys are passed directly to `systemd-run` as `-p Key=value` properties. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays.
 

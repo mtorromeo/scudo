@@ -67,5 +67,5 @@ fn run() -> Result<()> {
     let configs = config::load_configs()?;
     let resolved = profile::resolve(&configs, &command)?;
 
-    runner::exec(&bin, &command_args, &resolved.systemd_args, resolved.debug)
+    runner::exec(&bin, &command_args, &resolved.systemd_args, resolved.debug, resolved.confirm)
 }
