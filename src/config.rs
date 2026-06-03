@@ -87,18 +87,19 @@ fn parse_pattern(
     pattern: Option<String>,
     match_type: MatchType,
 ) -> Result<CommandPattern> {
-    let Some(p) = pattern else {
+    if matches!(match_type, MatchType::Never) {
         return Ok(CommandPattern::Never);
-    };
+    }
+    let p = pattern.unwrap_or_else(|| name.to_owned());
     match match_type {
+        MatchType::Exact => Ok(CommandPattern::Exact(p)),
         MatchType::Glob => Pattern::new(&p)
             .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
             .map(CommandPattern::Glob),
-        MatchType::Exact => Ok(CommandPattern::Exact(p)),
         MatchType::Regex => Regex::new(&p)
             .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
             .map(CommandPattern::Regex),
-        MatchType::Never => Ok(CommandPattern::Never),
+        MatchType::Never => unreachable!(),
     }
 }
 
