@@ -41,6 +41,7 @@ Each TOML section defines a profile. The section name is also the default match 
 | `pattern` | string | Pattern to match against the command name (default: section name) |
 | `match` | `exact` \| `glob` \| `regex` \| `never` | Matching strategy (default: `exact`) |
 | `extend` | string | Name of another profile to inherit properties from |
+| `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `debug` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`) |
 
@@ -91,6 +92,7 @@ By default an array value replaces the one defined in the extended profile. Plac
 ```toml
 [my-curl]
 extend = "curl"
+exec = "/usr/bin/curl"
 ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
 #                 ^ prepend               ^ base  ^ append
 ```

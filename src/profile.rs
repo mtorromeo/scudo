@@ -8,6 +8,7 @@ use crate::config::{CommandPattern, ValidatedConfigMap, ValidatedProfileConfig};
 
 pub struct ResolvedProfile {
     pub systemd_args: Vec<String>,
+    pub exec: Option<String>,
     pub debug: bool,
     pub confirm: bool,
 }
@@ -16,6 +17,7 @@ type Properties = HashMap<String, Value>;
 
 #[derive(Default)]
 struct ProfileMeta {
+    exec: Option<String>,
     debug: Option<bool>,
     confirm: Option<bool>,
 }
@@ -57,6 +59,7 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     {
         let (props, m) = expand_extend(configs, profile, &mut Vec::new())?;
         merge_into(&mut merged, props)?;
+        meta.exec = m.exec.or(meta.exec);
         meta.debug = m.debug.or(meta.debug);
         meta.confirm = m.confirm.or(meta.confirm);
     }
@@ -87,6 +90,7 @@ fn expand_extend(
 
     // Child's explicit Some overrides parent; None falls back to parent's value.
     let meta = ProfileMeta {
+        exec: profile.exec.clone().or(parent_meta.exec),
         debug: profile.debug.or(parent_meta.debug),
         confirm: profile.confirm.or(parent_meta.confirm),
     };
@@ -142,6 +146,7 @@ fn build_args(properties: Properties, meta: ProfileMeta) -> Result<ResolvedProfi
 
     Ok(ResolvedProfile {
         systemd_args: args,
+        exec: meta.exec,
         debug: meta.debug.unwrap_or(false),
         confirm: meta.confirm.unwrap_or(false),
     })
@@ -206,6 +211,7 @@ mod tests {
     fn profile(pattern: CommandPattern, props: Vec<(&str, Value)>) -> ValidatedProfileConfig {
         ValidatedProfileConfig {
             extend: None,
+            exec: None,
             debug: None,
             confirm: None,
             pattern,

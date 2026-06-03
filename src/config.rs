@@ -28,6 +28,7 @@ pub struct ProfileConfig {
     #[serde(rename = "match", default = "default_match_type")]
     pub r#match: MatchType,
     pub extend: Option<String>,
+    pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
     /// All systemd unit properties, keyed by their exact systemd name (PascalCase).
@@ -45,6 +46,7 @@ pub type ConfigMap = HashMap<String, ProfileConfig>;
 pub struct ValidatedProfileConfig {
     pub pattern: CommandPattern,
     pub extend: Option<String>,
+    pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
     pub properties: HashMap<String, toml::Value>,
@@ -65,6 +67,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                     ValidatedProfileConfig {
                         pattern,
                         extend: config.extend,
+                        exec: config.exec,
                         debug: config.debug,
                         confirm: config.confirm,
                         properties: config.properties,
