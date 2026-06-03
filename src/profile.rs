@@ -50,6 +50,10 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
         }
     }
 
+    if exact_matches.is_empty() && glob_matches.is_empty() && regex_matches.is_empty() {
+        eprintln!("scudo: warning: no profile matched '{command}'");
+    }
+
     let mut merged = Properties::new();
     let mut meta = ProfileMeta::default();
     for profile in glob_matches
