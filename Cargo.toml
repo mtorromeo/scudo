@@ -2,6 +2,9 @@
 name = "scudo"
 version = "0.1.0"
 edition = "2024"
+authors = ["Massimiliano Torromeo <massimiliano.torromeo@gmail.com>"]
+description = "Run commands sandboxed via systemd-run with per-command resource and permission profiles"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1"
