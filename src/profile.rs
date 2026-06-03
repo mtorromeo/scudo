@@ -11,6 +11,7 @@ pub struct ResolvedProfile {
     pub exec: Option<String>,
     pub debug: bool,
     pub confirm: bool,
+    pub match_log: Vec<String>,
 }
 
 type Properties = HashMap<String, Value>;
@@ -23,30 +24,25 @@ struct ProfileMeta {
 }
 
 /// Collect all profiles that match `command`, merge them in priority order
-/// (regex < glob < exact), and build the systemd-run argument list.
+/// (glob < regex < exact), and build the systemd-run argument list.
 pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedProfile> {
-    let mut exact_matches: Vec<&ValidatedProfileConfig> = Vec::new();
-    let mut glob_matches: Vec<&ValidatedProfileConfig> = Vec::new();
-    let mut regex_matches: Vec<&ValidatedProfileConfig> = Vec::new();
+    let mut exact_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
+    let mut glob_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
+    let mut regex_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
 
-    for profile in configs.0.values() {
+    for (name, profile) in &configs.0 {
         match &profile.pattern {
             CommandPattern::Never => {}
-            CommandPattern::Exact(name) => {
-                if name == command {
-                    exact_matches.push(profile);
-                }
+            CommandPattern::Exact(p) if p == command => {
+                exact_matches.push((name, profile));
             }
-            CommandPattern::Glob(pattern) => {
-                if pattern.matches(command) {
-                    glob_matches.push(profile);
-                }
+            CommandPattern::Glob(p) if p.matches(command) => {
+                glob_matches.push((name, profile));
             }
-            CommandPattern::Regex(regex) => {
-                if regex.is_match(command) {
-                    regex_matches.push(profile);
-                }
+            CommandPattern::Regex(p) if p.is_match(command) => {
+                regex_matches.push((name, profile));
             }
+            _ => {}
         }
     }
 
@@ -54,13 +50,21 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
         eprintln!("scudo: warning: no profile matched '{command}'");
     }
 
+    let mut match_log: Vec<String> = Vec::new();
     let mut merged = Properties::new();
     let mut meta = ProfileMeta::default();
-    for profile in glob_matches
+
+    for (name, profile) in glob_matches
         .iter()
         .chain(regex_matches.iter())
         .chain(exact_matches.iter())
     {
+        let (kind, pattern) = match_description(&profile.pattern);
+        match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
+        if let Some(ref parent) = profile.extend {
+            match_log.push(format!("  extends '{parent}'"));
+        }
+
         let (props, m) = expand_extend(configs, profile, &mut Vec::new())?;
         merge_into(&mut merged, props)?;
         meta.exec = m.exec.or(meta.exec);
@@ -68,7 +72,16 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
         meta.confirm = m.confirm.or(meta.confirm);
     }
 
-    build_args(merged, meta)
+    build_args(merged, meta, match_log)
+}
+
+fn match_description(pattern: &CommandPattern) -> (&'static str, String) {
+    match pattern {
+        CommandPattern::Exact(p) => ("exact", p.clone()),
+        CommandPattern::Glob(p) => ("glob", p.as_str().to_owned()),
+        CommandPattern::Regex(p) => ("regex", p.as_str().to_owned()),
+        CommandPattern::Never => ("never", String::new()),
+    }
 }
 
 /// Recursively resolve `extend`, returning the fully-merged property map and
@@ -138,7 +151,11 @@ fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
     Ok(())
 }
 
-fn build_args(properties: Properties, meta: ProfileMeta) -> Result<ResolvedProfile> {
+fn build_args(
+    properties: Properties,
+    meta: ProfileMeta,
+    match_log: Vec<String>,
+) -> Result<ResolvedProfile> {
     let mut args: Vec<String> = Vec::new();
 
     for (key, val) in &properties {
@@ -153,6 +170,7 @@ fn build_args(properties: Properties, meta: ProfileMeta) -> Result<ResolvedProfi
         exec: meta.exec,
         debug: meta.debug.unwrap_or(false),
         confirm: meta.confirm.unwrap_or(false),
+        match_log,
     })
 }
 

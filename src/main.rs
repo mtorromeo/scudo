@@ -67,10 +67,22 @@ fn run() -> Result<()> {
     let configs = config::load_configs()?;
     let resolved = profile::resolve(&configs, &command)?;
 
+    if resolved.debug {
+        for line in &resolved.match_log {
+            eprintln!("scudo: {line}");
+        }
+    }
+
     let bin = match resolved.exec {
         Some(ref path) => PathBuf::from(path),
         None => bin,
     };
 
-    runner::exec(&bin, &command_args, &resolved.systemd_args, resolved.debug, resolved.confirm)
+    runner::exec(
+        &bin,
+        &command_args,
+        &resolved.systemd_args,
+        resolved.debug,
+        resolved.confirm,
+    )
 }

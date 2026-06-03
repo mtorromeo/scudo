@@ -15,10 +15,11 @@ pub enum MatchType {
     Never,
 }
 
+#[derive(Debug, Clone)]
 pub enum CommandPattern {
-    Glob(Pattern),
     Exact(String),
     Regex(Regex),
+    Glob(Pattern),
     Never,
 }
 
@@ -43,6 +44,7 @@ fn default_match_type() -> MatchType {
 
 pub type ConfigMap = HashMap<String, ProfileConfig>;
 
+#[derive(Debug, Clone)]
 pub struct ValidatedProfileConfig {
     pub pattern: CommandPattern,
     pub extend: Option<String>,
@@ -52,6 +54,7 @@ pub struct ValidatedProfileConfig {
     pub properties: HashMap<String, toml::Value>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ValidatedConfigMap(pub HashMap<String, ValidatedProfileConfig>);
 
 impl TryFrom<ConfigMap> for ValidatedConfigMap {
