@@ -61,9 +61,7 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     {
         let (kind, pattern) = match_description(&profile.pattern);
         match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
-        if let Some(ref parent) = profile.extend {
-            match_log.push(format!("  extends '{parent}'"));
-        }
+        extend_chain_log(configs, name, 0, &mut match_log);
 
         let (props, m) = expand_extend(configs, profile, &mut Vec::new())?;
         merge_into(&mut merged, props)?;
@@ -73,6 +71,23 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     }
 
     build_args(merged, meta, match_log)
+}
+
+fn extend_chain_log(
+    configs: &ValidatedConfigMap,
+    profile_name: &str,
+    depth: usize,
+    log: &mut Vec<String>,
+) {
+    let Some(profile) = configs.0.get(profile_name) else {
+        return;
+    };
+    let Some(ref parent_name) = profile.extend else {
+        return;
+    };
+    let indent = " ".repeat(2 + depth * 3);
+    log.push(format!("{indent}└─ extends '{parent_name}'"));
+    extend_chain_log(configs, parent_name, depth + 1, log);
 }
 
 fn match_description(pattern: &CommandPattern) -> (&'static str, String) {
