@@ -8,6 +8,7 @@ use crate::config::{CommandPattern, ValidatedConfigMap, ValidatedProfileConfig};
 
 pub struct ResolvedProfile {
     pub systemd_args: Vec<String>,
+    pub debug: bool,
 }
 
 type Properties = HashMap<String, Value>;
@@ -41,26 +42,28 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     }
 
     let mut merged = Properties::new();
+    let mut debug: Option<bool> = None;
     for profile in glob_matches
         .iter()
         .chain(regex_matches.iter())
         .chain(exact_matches.iter())
     {
-        let props = expand_extend(configs, profile, &mut Vec::new())?;
+        let (props, d) = expand_extend(configs, profile, &mut Vec::new())?;
         merge_into(&mut merged, props)?;
+        debug = d.or(debug);
     }
 
-    build_args(merged)
+    build_args(merged, debug)
 }
 
-/// Recursively resolve `extend`, returning the fully-merged property map for
-/// this profile (parent properties under child properties).
+/// Recursively resolve `extend`, returning the fully-merged property map and
+/// the OR-aggregated debug flag for this profile's chain.
 fn expand_extend(
     configs: &ValidatedConfigMap,
     profile: &ValidatedProfileConfig,
     visited: &mut Vec<String>,
-) -> Result<Properties> {
-    let mut base = if let Some(parent_name) = &profile.extend {
+) -> Result<(Properties, Option<bool>)> {
+    let (mut base, parent_debug) = if let Some(parent_name) = &profile.extend {
         if visited.contains(parent_name) {
             bail!("circular profile extension: {}", parent_name);
         }
@@ -71,11 +74,13 @@ fn expand_extend(
         visited.push(parent_name.clone());
         expand_extend(configs, parent, visited)?
     } else {
-        Properties::new()
+        (Properties::new(), None)
     };
 
+    // Child's explicit Some overrides parent; None falls back to parent's value.
+    let debug = profile.debug.or(parent_debug);
     merge_into(&mut base, profile.properties.clone())?;
-    Ok(base)
+    Ok((base, debug))
 }
 
 /// Merge `src` into `dst`.
@@ -114,7 +119,7 @@ fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
     Ok(())
 }
 
-fn build_args(properties: Properties) -> Result<ResolvedProfile> {
+fn build_args(properties: Properties, debug: Option<bool>) -> Result<ResolvedProfile> {
     let mut args: Vec<String> = Vec::new();
 
     for (key, val) in &properties {
@@ -124,7 +129,7 @@ fn build_args(properties: Properties) -> Result<ResolvedProfile> {
         }
     }
 
-    Ok(ResolvedProfile { systemd_args: args })
+    Ok(ResolvedProfile { systemd_args: args, debug: debug.unwrap_or(false) })
 }
 
 /// Convert a TOML value to one or more strings for systemd-run `-p` arguments.
@@ -186,6 +191,7 @@ mod tests {
     fn profile(pattern: CommandPattern, props: Vec<(&str, Value)>) -> ValidatedProfileConfig {
         ValidatedProfileConfig {
             extend: None,
+            debug: None,
             pattern,
             properties: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         }

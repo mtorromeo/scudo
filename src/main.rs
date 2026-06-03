@@ -20,9 +20,7 @@ fn help() -> ! {
     std::process::exit(1);
 }
 
-/// Resolve argv[0] to a canonical path the same way the shell does:
-/// paths containing '/' are canonicalized directly; bare names are searched
-/// through PATH entries in order.
+/// Find the canonicalized command searching in PATH, skipping any entries that are the same as the current executable.
 fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
     if command.contains('/') {
         if let Ok(candidate) = std::fs::canonicalize(command)
@@ -69,5 +67,5 @@ fn run() -> Result<()> {
     let configs = config::load_configs()?;
     let resolved = profile::resolve(&configs, &command)?;
 
-    runner::exec(&bin, &command_args, &resolved.systemd_args)
+    runner::exec(&bin, &command_args, &resolved.systemd_args, resolved.debug)
 }
