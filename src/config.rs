@@ -136,7 +136,12 @@ fn config_search_paths() -> Vec<PathBuf> {
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        paths.push(cwd.join(".scudo.toml"));
+        let mut local: Vec<PathBuf> = cwd
+            .ancestors()
+            .map(|dir| dir.join(".scudo.toml"))
+            .collect();
+        local.reverse(); // root first → $PWD last (highest priority)
+        paths.extend(local);
     }
 
     paths

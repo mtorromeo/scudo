@@ -30,7 +30,7 @@ pub fn exec(
                 anyhow::bail!("aborted");
             }
         } else {
-            eprintln!("+ {cmdline}");
+            eprintln!("scudo: running command: {cmdline}");
         }
     }
 
