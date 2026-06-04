@@ -74,8 +74,14 @@ When multiple profiles match the same command, they are merged in order of incre
 [sandboxed]
 match = "never"
 ReadOnlyPaths = ["/"]
-ReadWritePaths = ["/tmp", "/run/user/$UID"]
+ReadWritePaths = ["/tmp", "$XDG_RUNTIME_DIR"]
 PrivateTmp = true
+
+[sandboxed-home]
+match = "never"
+extend = "sandboxed-home"
+TemporaryFileSystem = "$HOME"
+BindPaths = ["$HOME/.cache"]
 
 # curl: exact match, extends the base sandbox
 [curl]
@@ -83,19 +89,31 @@ extend = "sandboxed"
 PrivateNetwork = false
 MemoryMax = "256M"
 
-# All *-browser commands: add GPU and display access on top of sandboxed
-[browsers]
-pattern = "*-browser"
-match = "glob"
-extend = "sandboxed"
-ReadWritePaths = ["...", "/dev/dri", "$XDG_RUNTIME_DIR"]
+# code: match VS Code and variants via regex, extend the sandboxed profile with code-specific paths
+[code]
+pattern = "^(vs)?cod(e|e-oss|ium)?$"
+match = "regex"
+extend = "sandboxed-home"
+ReadWritePaths = ["...", "/proc", "/dev/shm", "/dev/dri"]
+BindPaths = [
+  "...",
+  "$HOME/.vscode",
+  "$HOME/.vscode-insiders",
+  "$HOME/.vscode-insiders-shared",
+  "$HOME/.vscode-oss",
+  "$HOME/.vscode-oss-shared",
+  "$HOME/.vscode-remote-workspace",
+  "$HOME/.config/Code",
+  "$HOME/.config/code-oss",
+  "$HOME/.config/Code - OSS",
+  "$HOME/.config/Code - Insiders",
+  "$PWD",
+]
 
-# npm: extend the sandboxed profile with npm-specific paths, including $HOME/.npm and $HOME/.npmrc and the current working directory
+# npm: extend the sandboxed-home profile with npm-specific paths, including $HOME/.npm and $HOME/.npmrc and the current working directory
 [npm]
-extend = "sandboxed"
-ReadWritePaths = ["...", "$XDG_RUNTIME_DIR"]
-TemporaryFileSystem = "$HOME"
-BindPaths = ["$HOME/.npm", "$PWD"]
+extend = "sandboxed-home"
+BindPaths = ["...", "$HOME/.npm", "$PWD"]
 BindReadOnlyPaths = ["$HOME/.npmrc"]
 
 [pnpm]
