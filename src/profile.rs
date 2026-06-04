@@ -176,7 +176,7 @@ fn build_args(
     for (key, val) in &properties {
         for str_val in value_to_strings(val)? {
             args.push("-p".into());
-            args.push(format!("{key}={str_val}"));
+            args.push(format_property(key, &str_val));
         }
     }
 
@@ -187,6 +187,19 @@ fn build_args(
         confirm: meta.confirm.unwrap_or(false),
         match_log,
     })
+}
+
+/// Format a `Key=value` property for systemd-run.
+///
+/// systemd parses path-list properties using space as a separator, so values
+/// containing spaces must be wrapped in double quotes (C-style quoting).
+fn format_property(key: &str, val: &str) -> String {
+    if val.contains(' ') {
+        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("{key}=\"{escaped}\"")
+    } else {
+        format!("{key}={val}")
+    }
 }
 
 /// Convert a TOML value to one or more strings for systemd-run `-p` arguments.
@@ -436,6 +449,22 @@ mod tests {
             .rfind(|w| w[0] == "-p" && w[1].starts_with("MemoryMax="))
             .map(|w| w[1].as_str());
         assert_eq!(last_mem, Some("MemoryMax=2G"));
+    }
+
+    #[test]
+    fn test_path_with_spaces_is_quoted() {
+        let configs = make_configs(vec![(
+            "app",
+            profile(
+                CommandPattern::Exact("app".to_owned()),
+                vec![("BindPaths", str("/home/user/My Documents"))],
+            ),
+        )]);
+        let r = resolve(&configs, "app").unwrap();
+        assert!(has_arg(
+            &r.systemd_args,
+            "BindPaths=\"/home/user/My Documents\""
+        ));
     }
 
     #[test]
