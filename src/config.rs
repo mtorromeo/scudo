@@ -1,9 +1,11 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, env::VarError, path::PathBuf};
 
 use anyhow::{Context, Result};
 use glob::Pattern;
 use regex::Regex;
 use serde::Deserialize;
+
+use crate::trust;
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +115,12 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
 
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
+
+        if path.file_name().is_some_and(|n| n == ".scudo.toml") {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            trust::check_and_confirm(&canonical, &content)?;
+        }
+
         let file_configs: ConfigMap =
             toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
         merged.extend(file_configs);
@@ -120,26 +128,27 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
     merged.try_into()
 }
 
-fn config_search_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    paths.push(PathBuf::from("/etc/scudo/config.toml"));
-
-    if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME")
+pub fn user_path() -> Result<PathBuf, VarError> {
+    std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|_| match std::env::var("HOME") {
             Ok(home) => Ok(PathBuf::from(home).join(".config")),
             Err(err) => Err(err),
         })
-    {
-        paths.push(xdg_config.join("scudo/config.toml"));
+        .map(|p| p.join("scudo"))
+}
+
+fn config_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    paths.push(PathBuf::from("/etc/scudo/config.toml"));
+
+    if let Ok(path) = user_path() {
+        paths.push(path.join("config.toml"));
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        let mut local: Vec<PathBuf> = cwd
-            .ancestors()
-            .map(|dir| dir.join(".scudo.toml"))
-            .collect();
+        let mut local: Vec<PathBuf> = cwd.ancestors().map(|dir| dir.join(".scudo.toml")).collect();
         local.reverse(); // root first → $PWD last (highest priority)
         paths.extend(local);
     }

@@ -3,6 +3,7 @@
 mod config;
 mod profile;
 mod runner;
+mod trust;
 
 use std::path::PathBuf;
 

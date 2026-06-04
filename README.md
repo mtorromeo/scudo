@@ -34,9 +34,25 @@ Profiles are loaded from the following paths in order, with later files taking p
 
 For the per-directory tier, scudo walks every ancestor of `$PWD` from the filesystem root down to the current directory, loading each `.scudo.toml` it finds. This lets a project directory override settings defined higher up the tree. For example, with `$PWD` set to `/home/user/projects/myapp`, the lookup order is `/.scudo.toml`, `/home/.scudo.toml`, `/home/user/.scudo.toml`, `/home/user/projects/.scudo.toml`, `/home/user/projects/myapp/.scudo.toml`.
 
-Each TOML section defines a profile. The section name is also the default match pattern.
+### Trust confirmation for per-directory configs
 
-### Profile fields
+Because `.scudo.toml` files can be committed to a repository and may arrive from external sources, scudo requires explicit user approval before loading them. On first encounter scudo prints the full file contents and asks for confirmation. When a previously approved file changes, scudo shows a unified diff against the trusted version and asks again.
+
+```
+New config file: /home/user/projects/myapp/.scudo.toml
+
+  [curl]
+  PrivateNetwork = true
+  MemoryMax = "256M"
+
+Trust this config file? [y/N]
+```
+
+Approved files are recorded in `$XDG_CONFIG_HOME/scudo/trusted.toml`. Matching is done on the canonical absolute path and the exact file contents. If the user declines, scudo exits with an error rather than running the command without the intended sandboxing constraints.
+
+### Profiles
+
+Each TOML section defines a profile. The section name is also the default match pattern.
 
 | Field | Type | Description |
 |-------|------|-------------|

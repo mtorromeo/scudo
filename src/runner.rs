@@ -26,7 +26,7 @@ pub fn exec(
             .join(" ");
 
         if confirm {
-            if !prompt_confirm(&cmdline)? {
+            if !prompt_confirm(format!("{cmdline}\nProceed?"))? {
                 anyhow::bail!("aborted");
             }
         } else {
@@ -39,8 +39,8 @@ pub fn exec(
 }
 
 /// Ask the user for confirmation on stdin. Returns true if confirmed.
-fn prompt_confirm(cmdline: &str) -> Result<bool> {
-    eprintln!("{cmdline}\nProceed? [y/N] ");
+pub fn prompt_confirm(question: impl AsRef<str>) -> Result<bool> {
+    eprint!("{} [y/N] ", question.as_ref());
 
     let mut line = String::new();
     let stdin = std::io::stdin();
@@ -54,12 +54,12 @@ fn prompt_confirm(cmdline: &str) -> Result<bool> {
 
 /// Wrap a token in single quotes if it contains characters unsafe in shell.
 fn shell_quote(s: &OsStr) -> String {
-    let s = s.to_string_lossy();
+    let s = s.display().to_string();
     if s.chars().all(|c| {
         c.is_alphanumeric()
             || matches!(c, '-' | '_' | '.' | '/' | '=' | ':' | '@' | '%' | '+' | ',')
     }) {
-        s.to_string()
+        s
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
