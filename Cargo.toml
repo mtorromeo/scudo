@@ -6,6 +6,48 @@ authors = ["Massimiliano Torromeo <massimiliano.torromeo@gmail.com>"]
 description = "Run commands sandboxed via systemd-run with per-command resource and permission profiles"
 license = "MIT OR Apache-2.0"
 
+[lints.clippy]
+absolute_paths = "allow"
+allow_attributes_without_reason = "allow"
+arbitrary_source_item_ordering = "allow"
+as_conversions = "allow"
+big_endian_bytes = "allow"
+blanket_clippy_restriction_lints = "allow"
+disallowed_script_idents = "allow"
+enum_glob_use = "allow"
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+expect_used = "allow"
+expl_impl_clone_on_copy = "allow"
+implicit_return = "allow"
+iter_over_hash_type = "allow"
+mem_forget = "allow"
+min_ident_chars = "allow"
+missing_docs_in_private_items = "allow"
+missing_errors_doc = "allow"
+missing_inline_in_public_items = "allow"
+missing_panics_doc = "allow"
+missing_trait_methods = "allow"
+mixed_read_write_in_expression = "allow"
+module_name_repetitions = "allow"
+partial_pub_fields = "allow"
+pattern_type_mismatch = "allow"
+pedantic = { level = "warn", priority = -1 }
+print_stderr = "allow"
+pub_use = "allow"
+pub_with_shorthand = "allow"
+question_mark_used = "allow"
+restriction = { level = "warn", priority = -2 }
+self_named_module_files = "allow"
+shadow_reuse = "allow"
+shadow_unrelated = "allow"
+single_call_fn = "allow"
+single_char_lifetime_names = "allow"
+size_of_in_element_count = "allow"
+string_slice = "allow"
+too_many_lines = "allow"
+unseparated_literal_suffix = "allow"
+
 [dependencies]
 anyhow = "1"
 glob = "0.3"
@@ -13,3 +55,13 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 similar = "2"
 toml = { version = "0.8", features = ["display"] }
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+debug = 0

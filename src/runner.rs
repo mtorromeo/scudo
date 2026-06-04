@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, os::unix::process::CommandExt, path::Path};
+use std::{ffi::OsStr, os::unix::process::CommandExt as _, path::Path};
 
 use anyhow::Result;
 
@@ -19,7 +19,7 @@ pub fn exec(
     cmd.arg("--").arg(command).args(args);
 
     if debug || confirm {
-        let cmdline = std::iter::once(cmd.get_program())
+        let cmdline = core::iter::once(cmd.get_program())
             .chain(cmd.get_args())
             .map(shell_quote)
             .collect::<Vec<_>>()
@@ -39,7 +39,7 @@ pub fn exec(
 }
 
 /// Ask the user for confirmation on stdin. Returns true if confirmed.
-pub fn prompt_confirm(question: impl AsRef<str>) -> Result<bool> {
+pub fn prompt_confirm<S: AsRef<str>>(question: S) -> Result<bool> {
     eprint!("{} [y/N] ", question.as_ref());
 
     let mut line = String::new();

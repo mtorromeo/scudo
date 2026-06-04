@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 
@@ -79,13 +79,15 @@ pub fn check_and_confirm(file_path: &Path, content: &str) -> Result<()> {
         bail!("Untrusted config file: {path_str}");
     }
 
+    let content = content.to_owned();
+
     // Persist the trusted content
     if let Some(entry) = db.entries.iter_mut().find(|e| e.path == path_str) {
-        entry.content = content.to_string();
+        entry.content = content;
     } else {
         db.entries.push(TrustEntry {
             path: path_str,
-            content: content.to_string(),
+            content,
         });
     }
     save_trust_db(&db_path, &db)

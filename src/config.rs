@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env::VarError, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use glob::Pattern;
 use regex::Regex;
 use serde::Deserialize;
@@ -34,7 +34,7 @@ pub struct ProfileConfig {
     pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
-    /// All systemd unit properties, keyed by their exact systemd name (PascalCase).
+    /// All systemd unit properties, keyed by their exact systemd name.
     /// Values are either a single string/bool/integer or an array thereof.
     #[serde(flatten)]
     pub properties: HashMap<String, toml::Value>,
@@ -66,7 +66,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
         let map = value
             .into_iter()
             .map(|(name, config)| {
-                let pattern = parse_pattern(&name, config.pattern, config.r#match)?;
+                let pattern = parse_pattern(&name, config.pattern, &config.r#match)?;
                 Ok((
                     name,
                     ValidatedProfileConfig {
@@ -87,7 +87,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
 fn parse_pattern(
     name: &str,
     pattern: Option<String>,
-    match_type: MatchType,
+    match_type: &MatchType,
 ) -> Result<CommandPattern> {
     if matches!(match_type, MatchType::Never) {
         return Ok(CommandPattern::Never);
@@ -101,7 +101,7 @@ fn parse_pattern(
         MatchType::Regex => Regex::new(&p)
             .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
             .map(CommandPattern::Regex),
-        MatchType::Never => unreachable!(),
+        MatchType::Never => Ok(CommandPattern::Never),
     }
 }
 

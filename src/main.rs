@@ -9,13 +9,15 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-fn main() {
+fn main() -> Result<(), i32> {
     if let Err(e) = run() {
         eprintln!("scudo: {e:#}");
-        std::process::exit(1);
+        return Err(1);
     }
+    Ok(())
 }
 
+#[expect(clippy::exit)]
 fn help() -> ! {
     eprintln!("usage: scudo <command> [args...]");
     std::process::exit(1);
@@ -75,7 +77,7 @@ fn run() -> Result<()> {
     }
 
     let bin = match resolved.exec {
-        Some(ref path) => PathBuf::from(path),
+        Some(path) => PathBuf::from(&path),
         None => bin,
     };
 

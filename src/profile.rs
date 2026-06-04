@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::OnceLock};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use regex::Regex;
 use toml::Value;
 
@@ -32,7 +32,6 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
 
     for (name, profile) in &configs.0 {
         match &profile.pattern {
-            CommandPattern::Never => {}
             CommandPattern::Exact(p) if p == command => {
                 exact_matches.push((name, profile));
             }
@@ -42,7 +41,10 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
             CommandPattern::Regex(p) if p.is_match(command) => {
                 regex_matches.push((name, profile));
             }
-            _ => {}
+            CommandPattern::Never
+            | CommandPattern::Exact(_)
+            | CommandPattern::Glob(_)
+            | CommandPattern::Regex(_) => {}
         }
     }
 
@@ -70,7 +72,7 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
         meta.confirm = m.confirm.or(meta.confirm);
     }
 
-    build_args(merged, meta, match_log)
+    build_args(&merged, meta, match_log)
 }
 
 fn extend_chain_log(
@@ -82,12 +84,12 @@ fn extend_chain_log(
     let Some(profile) = configs.0.get(profile_name) else {
         return;
     };
-    let Some(ref parent_name) = profile.extend else {
+    let Some(parent_name) = &profile.extend else {
         return;
     };
-    let indent = " ".repeat(2 + depth * 3);
+    let indent = " ".repeat(depth.saturating_mul(3).saturating_add(2));
     log.push(format!("{indent}└─ extends '{parent_name}'"));
-    extend_chain_log(configs, parent_name, depth + 1, log);
+    extend_chain_log(configs, parent_name, depth.saturating_add(1), log);
 }
 
 fn match_description(pattern: &CommandPattern) -> (&'static str, String) {
@@ -108,12 +110,12 @@ fn expand_extend(
 ) -> Result<(Properties, ProfileMeta)> {
     let (mut base, parent_meta) = if let Some(parent_name) = &profile.extend {
         if visited.contains(parent_name) {
-            bail!("circular profile extension: {}", parent_name);
+            bail!("circular profile extension: {parent_name}");
         }
         let parent = configs
             .0
             .get(parent_name)
-            .with_context(|| format!("extended profile '{}' not found", parent_name))?;
+            .with_context(|| format!("extended profile '{parent_name}' not found"))?;
         visited.push(parent_name.clone());
         expand_extend(configs, parent, visited)?
     } else {
@@ -146,7 +148,12 @@ fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
                         Some(Value::Array(arr)) => arr.clone(),
                         _ => vec![],
                     };
-                    let mut merged = Vec::with_capacity(src_arr.len() - 1 + base_items.len());
+                    let mut merged = Vec::with_capacity(
+                        src_arr
+                            .len()
+                            .saturating_sub(1)
+                            .saturating_add(base_items.len()),
+                    );
                     for v in src_arr {
                         if v == sentinel {
                             merged.extend(base_items.iter().cloned());
@@ -167,13 +174,13 @@ fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
 }
 
 fn build_args(
-    properties: Properties,
+    properties: &Properties,
     meta: ProfileMeta,
     match_log: Vec<String>,
 ) -> Result<ResolvedProfile> {
     let mut args: Vec<String> = Vec::new();
 
-    for (key, val) in &properties {
+    for (key, val) in properties {
         for str_val in value_to_strings(val)? {
             args.push("-p".into());
             args.push(format_property(key, &str_val));
@@ -207,7 +214,7 @@ fn format_property(key: &str, val: &str) -> String {
 fn value_to_strings(val: &Value) -> Result<Vec<String>> {
     match val {
         Value::String(s) => Ok(vec![expand_env(s)?]),
-        Value::Boolean(b) => Ok(vec![if *b { "yes" } else { "no" }.to_string()]),
+        Value::Boolean(b) => Ok(vec![if *b { "yes" } else { "no" }.to_owned()]),
         Value::Integer(n) => Ok(vec![n.to_string()]),
         Value::Float(f) => Ok(vec![f.to_string()]),
         Value::Array(arr) => arr
@@ -224,15 +231,17 @@ fn value_to_strings(val: &Value) -> Result<Vec<String>> {
 /// Returns an error if a referenced variable is not set.
 fn expand_env(s: &str) -> Result<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)").unwrap());
+    let re = RE.get_or_init(|| {
+        Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)").expect("regex is valid")
+    });
 
     let mut result = String::with_capacity(s.len());
     let mut last_end = 0;
 
     for cap in re.captures_iter(s) {
-        let m = cap.get(0).unwrap();
+        let m = cap.get(0).expect("match should not fail");
         result.push_str(&s[last_end..m.start()]);
-        let name = cap.get(1).or(cap.get(2)).map(|m| m.as_str()).unwrap_or("");
+        let name = cap.get(1).or(cap.get(2)).map_or("", |m| m.as_str());
         let val = std::env::var(name)
             .with_context(|| format!("undefined environment variable '${name}'"))?;
         result.push_str(&val);
@@ -253,7 +262,7 @@ mod tests {
         ValidatedConfigMap(
             profiles
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
+                .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
         )
     }
@@ -265,7 +274,7 @@ mod tests {
             debug: None,
             confirm: None,
             pattern,
-            properties: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         }
     }
 
@@ -275,12 +284,13 @@ mod tests {
     fn arr(items: &[&str]) -> Value {
         Value::Array(items.iter().map(|s| str(s)).collect())
     }
+    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
     fn has_arg(args: &[String], kv: &str) -> bool {
         args.windows(2).any(|w| w[0] == "-p" && w[1] == kv)
     }
 
     #[test]
-    fn test_exact_match() {
+    fn exact_match() {
         let configs = make_configs(vec![(
             "curl",
             profile(
@@ -293,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_no_match() {
+    fn exact_no_match() {
         let configs = make_configs(vec![(
             "curl",
             profile(
@@ -306,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glob_match() {
+    fn glob_match() {
         let configs = make_configs(vec![(
             "browsers",
             profile(
@@ -319,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_never_skipped() {
+    fn never_skipped() {
         let configs = make_configs(vec![(
             "base",
             profile(CommandPattern::Never, vec![("CPUQuota", str("50%"))]),
@@ -329,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extend() {
+    fn extend() {
         let base = profile(
             CommandPattern::Never,
             vec![("CPUQuota", str("50%")), ("ReadOnlyPaths", arr(&["/"]))],
@@ -349,7 +359,8 @@ mod tests {
     }
 
     #[test]
-    fn test_array_replaces_by_default() {
+    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    fn array_replaces_by_default() {
         let base = profile(
             CommandPattern::Never,
             vec![("ReadOnlyPaths", arr(&["/", "/etc"]))],
@@ -373,7 +384,8 @@ mod tests {
     }
 
     #[test]
-    fn test_array_extend_with_sentinel() {
+    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    fn array_extend_with_sentinel() {
         let base = profile(CommandPattern::Never, vec![("ReadOnlyPaths", arr(&["/"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
@@ -396,7 +408,8 @@ mod tests {
     }
 
     #[test]
-    fn test_array_sentinel_in_middle() {
+    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    fn array_sentinel_in_middle() {
         let base = profile(CommandPattern::Never, vec![("Paths", arr(&["/base"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
@@ -417,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_duplicate_sentinel_errors() {
+    fn array_duplicate_sentinel_errors() {
         let base = profile(CommandPattern::Never, vec![("Paths", arr(&["/base"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
@@ -430,7 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_overrides_glob() {
+    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    fn exact_overrides_glob() {
         let glob_p = profile(
             CommandPattern::Glob(Pattern::new("cu*").unwrap()),
             vec![("MemoryMax", str("512M"))],
@@ -452,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_with_spaces_is_quoted() {
+    fn path_with_spaces_is_quoted() {
         let configs = make_configs(vec![(
             "app",
             profile(
@@ -468,14 +482,15 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_env() {
-        unsafe { std::env::set_var("SCUDO_TEST_VAR", "hello") };
+    fn expand_var() {
+        // SAFETY: Setting an environment variable is safe here as it is only used for testing.
+        unsafe { std::env::set_var("SCUDO_TEST_VAR", "hello") }
         assert_eq!(expand_env("$SCUDO_TEST_VAR/world").unwrap(), "hello/world");
         assert_eq!(
             expand_env("${SCUDO_TEST_VAR}/world").unwrap(),
             "hello/world"
         );
         assert_eq!(expand_env("/no/vars").unwrap(), "/no/vars");
-        assert!(expand_env("$SCUDO_UNDEFINED_XYZ_VAR").is_err());
+        expand_env("$SCUDO_UNDEFINED_XYZ_VAR").unwrap_err();
     }
 }
