@@ -34,14 +34,8 @@ fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
     } else {
         for dir in std::env::var("PATH").unwrap_or_default().split(':') {
             let candidate = PathBuf::from(dir).join(command);
-            if candidate.is_file() {
-                let Ok(candidate) = std::fs::canonicalize(&candidate) else {
-                    continue;
-                };
-
-                if candidate != *self_exe {
-                    return Ok(candidate);
-                }
+            if candidate.is_file() && matches!(std::fs::canonicalize(&candidate), Ok(canonical) if canonical != *self_exe) {
+                return Ok(candidate);
             }
         }
     }

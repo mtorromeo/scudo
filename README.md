@@ -79,7 +79,7 @@ PrivateTmp = true
 
 [sandboxed-home]
 match = "never"
-extend = "sandboxed-home"
+extend = "sandboxed"
 TemporaryFileSystem = "$HOME"
 BindPaths = ["$HOME/.cache"]
 

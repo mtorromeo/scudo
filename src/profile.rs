@@ -6,6 +6,7 @@ use toml::Value;
 
 use crate::config::{CommandPattern, ValidatedConfigMap, ValidatedProfileConfig};
 
+#[derive(Debug)]
 pub struct ResolvedProfile {
     pub systemd_args: Vec<String>,
     pub exec: Option<String>,
@@ -16,7 +17,7 @@ pub struct ResolvedProfile {
 
 type Properties = HashMap<String, Value>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ProfileMeta {
     exec: Option<String>,
     debug: Option<bool>,
@@ -63,9 +64,8 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     {
         let (kind, pattern) = match_description(&profile.pattern);
         match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
-        extend_chain_log(configs, name, 0, &mut match_log);
 
-        let (props, m) = expand_extend(configs, profile, &mut Vec::new())?;
+        let (props, m) = expand_extend(configs, profile, &mut Vec::new(), &mut match_log, 0)?;
         merge_into(&mut merged, props)?;
         meta.exec = m.exec.or(meta.exec);
         meta.debug = m.debug.or(meta.debug);
@@ -73,23 +73,6 @@ pub fn resolve(configs: &ValidatedConfigMap, command: &str) -> Result<ResolvedPr
     }
 
     build_args(&merged, meta, match_log)
-}
-
-fn extend_chain_log(
-    configs: &ValidatedConfigMap,
-    profile_name: &str,
-    depth: usize,
-    log: &mut Vec<String>,
-) {
-    let Some(profile) = configs.0.get(profile_name) else {
-        return;
-    };
-    let Some(parent_name) = &profile.extend else {
-        return;
-    };
-    let indent = " ".repeat(depth.saturating_mul(3).saturating_add(2));
-    log.push(format!("{indent}└─ extends '{parent_name}'"));
-    extend_chain_log(configs, parent_name, depth.saturating_add(1), log);
 }
 
 fn match_description(pattern: &CommandPattern) -> (&'static str, String) {
@@ -107,6 +90,8 @@ fn expand_extend(
     configs: &ValidatedConfigMap,
     profile: &ValidatedProfileConfig,
     visited: &mut Vec<String>,
+    log: &mut Vec<String>,
+    depth: usize,
 ) -> Result<(Properties, ProfileMeta)> {
     let (mut base, parent_meta) = if let Some(parent_name) = &profile.extend {
         if visited.contains(parent_name) {
@@ -117,7 +102,11 @@ fn expand_extend(
             .get(parent_name)
             .with_context(|| format!("extended profile '{parent_name}' not found"))?;
         visited.push(parent_name.clone());
-        expand_extend(configs, parent, visited)?
+
+        let indent = " ".repeat(depth.saturating_mul(3).saturating_add(2));
+        log.push(format!("{indent}└─ extends '{parent_name}'"));
+
+        expand_extend(configs, parent, visited, log, depth.saturating_add(1))?
     } else {
         (Properties::new(), ProfileMeta::default())
     };
