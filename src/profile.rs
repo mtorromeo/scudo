@@ -428,7 +428,7 @@ mod tests {
         child.extend = Some("base".into());
 
         let configs = make_configs(vec![("base", base), ("app", child)]);
-        assert!(resolve(&configs, "app").is_err());
+        resolve(&configs, "app").unwrap_err();
     }
 
     #[test]

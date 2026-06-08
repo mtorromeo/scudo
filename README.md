@@ -22,6 +22,41 @@ alias curl='scudo curl'
 alias wget='scudo wget'
 ```
 
+**Via FUSE shim** — a virtual filesystem that intercepts every command automatically, with no per-command setup:
+
+```bash
+scudo-fuse ~/.scudo/shims /usr/bin/scudo
+export PATH="$HOME/.scudo/shims:$PATH"
+```
+
+`scudo-fuse` mounts a read-only virtual directory. Every executable found in `PATH` appears there as a symlink pointing to the target binary (`/usr/bin/scudo`). Commands not present in the real `PATH` remain invisible, so tab-completion and `ls` only show entries that actually exist. Placing the shims directory first in `PATH` causes any command with a matching profile to be dispatched through scudo automatically, with no aliases or individual symlinks needed.
+
+The shims directory itself is excluded from the PATH search used for the existence check, which prevents FUSE re-entrancy deadlocks when the shims directory is already in `PATH`.
+
+> **Warning:** When using the FUSE shim, avoid broad matchers (`glob`, `regex`) that match large numbers of commands in combination with `confirm = true` or `debug = true`. Because the shim intercepts every command in your session — including those run by scripts, your shell itself, and every subprocess — an overly wide profile with interactive options will trigger a confirmation prompt or dump debug output for each of them, making the environment unusable. Reserve `confirm` and `debug` for profiles with narrow, exact-match patterns, and validate broad profiles without those options first.
+
+By default the command search path is read from the `PATH` environment variable; pass `--path` / `-p` to override it:
+
+```bash
+scudo-fuse ~/.scudo/shims /usr/bin/scudo --path /usr/local/bin:/usr/bin:/bin
+```
+
+**Autostart with systemd (user service)**
+
+A ready-made unit file is included in the repository as `scudo-fuse.service`. It uses `RuntimeDirectory=scudo` so the shims directory is created automatically under `$XDG_RUNTIME_DIR` (e.g. `/run/user/1000/scudo/shims`).
+
+```bash
+cp scudo-fuse.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now scudo-fuse
+```
+
+Add the `PATH` export to your shell's init file (`.bashrc`, `.zshrc`, …):
+
+```bash
+export PATH="${XDG_RUNTIME_DIR}/scudo/shims:$PATH"
+```
+
 ## Configuration
 
 Profiles are loaded from the following paths in order, with later files taking precedence over earlier ones:
@@ -61,7 +96,7 @@ Each TOML section defines a profile. The section name is also the default match 
 | `extend` | string | Name of another profile to inherit properties from |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `debug` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
-| `confirm` | bool | Prompt for confirmation before executing (default: `false`) |
+| `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
 
 All other keys are passed directly to `systemd-run` as `-p Key=value` properties. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays.
 

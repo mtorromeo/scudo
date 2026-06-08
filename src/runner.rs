@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, os::unix::process::CommandExt as _, path::Path};
+use std::{ffi::OsStr, io::IsTerminal as _, os::unix::process::CommandExt as _, path::Path};
 
 use anyhow::Result;
 
@@ -9,7 +9,7 @@ pub fn exec(
     debug: bool,
     confirm: bool,
 ) -> Result<()> {
-    let mut cmd = std::process::Command::new("systemd-run");
+    let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
     cmd.args(["--user", "--wait", "-Pdt"]).args(systemd_args);
 
     if !debug {
@@ -18,14 +18,16 @@ pub fn exec(
 
     cmd.arg("--").arg(command).args(args);
 
-    if debug || confirm {
+    let interactive = std::io::stdin().is_terminal();
+
+    if debug || (confirm && interactive) {
         let cmdline = core::iter::once(cmd.get_program())
             .chain(cmd.get_args())
             .map(shell_quote)
             .collect::<Vec<_>>()
             .join(" ");
 
-        if confirm {
+        if confirm && interactive {
             if !prompt_confirm(format!("{cmdline}\nProceed?"))? {
                 anyhow::bail!("aborted");
             }

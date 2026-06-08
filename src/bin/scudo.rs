@@ -1,10 +1,5 @@
 #![cfg(target_os = "linux")]
 
-mod config;
-mod profile;
-mod runner;
-mod trust;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -34,7 +29,9 @@ fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
     } else {
         for dir in std::env::var("PATH").unwrap_or_default().split(':') {
             let candidate = PathBuf::from(dir).join(command);
-            if candidate.is_file() && matches!(std::fs::canonicalize(&candidate), Ok(canonical) if canonical != *self_exe) {
+            if candidate.is_file()
+                && matches!(std::fs::canonicalize(&candidate), Ok(canonical) if canonical != *self_exe)
+            {
                 return Ok(candidate);
             }
         }
@@ -61,8 +58,8 @@ fn run() -> Result<()> {
 
     let command_args = args.collect::<Vec<_>>();
 
-    let configs = config::load_configs()?;
-    let resolved = profile::resolve(&configs, &command)?;
+    let configs = scudo::config::load_configs()?;
+    let resolved = scudo::profile::resolve(&configs, &command)?;
 
     if resolved.debug {
         for line in &resolved.match_log {
@@ -75,7 +72,7 @@ fn run() -> Result<()> {
         None => bin,
     };
 
-    runner::exec(
+    scudo::runner::exec(
         &bin,
         &command_args,
         &resolved.systemd_args,

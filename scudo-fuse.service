@@ -1,0 +1,13 @@
+[Unit]
+Description=scudo FUSE shim filesystem
+After=default.target
+
+[Service]
+Type=simple
+RuntimeDirectory=scudo
+ExecStart=/usr/bin/scudo-fuse %t/scudo/shims /usr/bin/scudo
+ExecStop=/bin/fusermount3 -u %t/scudo/shims
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

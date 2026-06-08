@@ -56,6 +56,11 @@ serde = { version = "1", features = ["derive"] }
 similar = "2"
 toml = { version = "0.8", features = ["display"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+fuser = "0.14"
+libc = "0.2"
+
 [profile.release]
 opt-level = "z"
 strip = true
