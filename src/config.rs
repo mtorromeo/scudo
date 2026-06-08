@@ -3,7 +3,7 @@ use std::{collections::HashMap, env::VarError, path::PathBuf};
 use anyhow::{Context as _, Result};
 use glob::Pattern;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 pub type ArgAliases = HashMap<String, ArgAliasDecl>;
 
@@ -35,6 +35,22 @@ impl ArgAliasDecl {
     }
 }
 
+fn deserialize_extend<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    match OneOrMany::deserialize(de)? {
+        OneOrMany::One(s) => Ok(vec![s]),
+        OneOrMany::Many(v) => Ok(v),
+    }
+}
+
 use crate::trust;
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -60,7 +76,16 @@ pub struct ProfileConfig {
     pub pattern: Option<String>,
     #[serde(rename = "match", default = "default_match_type")]
     pub r#match: MatchType,
-    pub extend: Option<String>,
+    /// Profiles to inherit from, in left-to-right order (later entries take precedence).
+    /// Accepts a single string or an array. Including this profile's own name extends from
+    /// the same-named profile in lower-priority config files.
+    #[serde(default, deserialize_with = "deserialize_extend")]
+    pub extend: Vec<String>,
+    /// When `true`, prevents this profile from being used as a base by a higher-priority
+    /// config file that self-extends (the self-extend is silently dropped).
+    /// Higher-priority files can still replace this profile outright.
+    #[serde(default)]
+    pub r#final: bool,
     pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
@@ -85,7 +110,7 @@ pub type ConfigMap = HashMap<String, ProfileConfig>;
 #[derive(Debug, Clone)]
 pub struct ValidatedProfileConfig {
     pub pattern: CommandPattern,
-    pub extend: Option<String>,
+    pub extend: Vec<String>,
     pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
@@ -163,7 +188,30 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
 
         let file_configs: ConfigMap =
             toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
-        merged.extend(file_configs);
+
+        let mut synthetic_counter: HashMap<String, usize> = HashMap::new();
+        for (name, mut new_profile) in file_configs {
+            // Check for self-reference in extend list.
+            let self_pos = new_profile.extend.iter().position(|e| e == &name);
+            if let Some(pos) = self_pos {
+                // Inherit from the lower-priority same-named profile, unless it is `final`.
+                let inheritable = merged.get(&name).is_some_and(|e| !e.r#final);
+                if inheritable {
+                    let mut existing = merged.remove(&name).expect("just checked");
+                    let n = synthetic_counter.entry(name.clone()).or_insert(0);
+                    let synthetic = format!("\x00{name}\x00{n}");
+                    *n = n.saturating_add(1);
+                    existing.r#match = MatchType::Never; // prevent direct command matching
+                    merged.insert(synthetic.clone(), existing);
+                    if let Some(slot) = new_profile.extend.get_mut(pos) {
+                        *slot = synthetic;
+                    }
+                } else {
+                    new_profile.extend.remove(pos); // final or absent — drop self-ref silently
+                }
+            }
+            merged.insert(name, new_profile);
+        }
     }
     merged.try_into()
 }
@@ -194,4 +242,131 @@ fn config_search_paths() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Simulate loading two config layers (lower-priority first, then higher-priority)
+    /// and return the resulting `ValidatedConfigMap`.
+    fn merge_layers(lower: ConfigMap, higher: ConfigMap) -> Result<ValidatedConfigMap> {
+        let mut merged: ConfigMap = HashMap::new();
+        let mut synthetic_counter: HashMap<String, usize> = HashMap::new();
+        for layer in [lower, higher] {
+            for (name, mut new_profile) in layer {
+                let self_pos = new_profile.extend.iter().position(|e| e == &name);
+                if let Some(pos) = self_pos {
+                    let inheritable = merged.get(&name).is_some_and(|e| !e.r#final);
+                    if inheritable {
+                        let mut existing = merged.remove(&name).expect("just checked");
+                        let n = synthetic_counter.entry(name.clone()).or_insert(0);
+                        let synthetic = format!("\x00{name}\x00{n}");
+                        *n = n.saturating_add(1);
+                        existing.r#match = MatchType::Never;
+                        merged.insert(synthetic.clone(), existing);
+                        if let Some(slot) = new_profile.extend.get_mut(pos) {
+                            *slot = synthetic;
+                        }
+                    } else {
+                        new_profile.extend.remove(pos);
+                    }
+                }
+                merged.insert(name, new_profile);
+            }
+        }
+        merged.try_into()
+    }
+
+    fn simple_profile(cpu: &str) -> ProfileConfig {
+        let mut props = HashMap::new();
+        props.insert("CPUQuota".to_owned(), toml::Value::String(cpu.to_owned()));
+        ProfileConfig {
+            properties: props,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn final_allows_replace() {
+        // A `final` lower-priority profile can still be replaced outright.
+        let mut lower = simple_profile("10%");
+        lower.r#final = true;
+        let higher = simple_profile("50%");
+
+        let configs = merge_layers(
+            HashMap::from([("app".to_owned(), lower)]),
+            HashMap::from([("app".to_owned(), higher)]),
+        )
+        .unwrap();
+
+        let p = configs.0.get("app").unwrap();
+        assert_eq!(
+            p.properties.get("CPUQuota"),
+            Some(&toml::Value::String("50%".to_owned()))
+        );
+    }
+
+    #[test]
+    fn final_blocks_self_extend() {
+        // A `final` lower-priority profile is not usable as a base for self-extend.
+        // The self-reference is silently dropped; the higher-priority profile still wins.
+        let mut lower = simple_profile("10%");
+        lower.r#final = true;
+
+        let mut higher = simple_profile("50%");
+        higher.extend = vec!["app".to_owned()]; // self-extend
+
+        let configs = merge_layers(
+            HashMap::from([("app".to_owned(), lower)]),
+            HashMap::from([("app".to_owned(), higher)]),
+        )
+        .unwrap();
+
+        let p = configs.0.get("app").unwrap();
+        // Self-ref was dropped → extend is empty → only higher's own property
+        assert!(p.extend.is_empty());
+        assert_eq!(
+            p.properties.get("CPUQuota"),
+            Some(&toml::Value::String("50%".to_owned()))
+        );
+    }
+
+    #[test]
+    fn self_extend_inherits_lower_priority() {
+        // Higher-priority profile self-extends → lower-priority properties are inherited.
+        let lower = simple_profile("10%");
+
+        let mut higher_props = HashMap::new();
+        higher_props.insert(
+            "MemoryMax".to_owned(),
+            toml::Value::String("256M".to_owned()),
+        );
+        let higher = ProfileConfig {
+            extend: vec!["app".to_owned()],
+            properties: higher_props,
+            ..Default::default()
+        };
+
+        let configs = merge_layers(
+            HashMap::from([("app".to_owned(), lower)]),
+            HashMap::from([("app".to_owned(), higher)]),
+        )
+        .unwrap();
+
+        let p = configs.0.get("app").unwrap();
+        // extend should now reference the synthetic key (not "app")
+        assert!(!p.extend.is_empty());
+        assert_ne!(p.extend.first().map(String::as_str), Some("app"));
+
+        // When resolved, both properties should appear
+        let r = crate::profile::resolve(&configs, "app", &[]).unwrap();
+        let has = |kv: &str| {
+            r.systemd_args
+                .windows(2)
+                .any(|w| w[0] == "-p" && w[1] == kv)
+        };
+        assert!(has("CPUQuota=10%"), "inherited from lower");
+        assert!(has("MemoryMax=256M"), "from higher");
+    }
 }

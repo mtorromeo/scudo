@@ -93,7 +93,8 @@ Each TOML section defines a profile. The section name is also the default match 
 |-------|------|-------------|
 | `pattern` | string | Pattern to match against the command name (default: section name) |
 | `match` | `exact` \| `glob` \| `regex` \| `never` | Matching strategy (default: `exact`) |
-| `extend` | string | Name of another profile to inherit properties from |
+| `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
+| `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `debug` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
@@ -171,6 +172,21 @@ ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
 ```
 
 `"..."` may appear at most once per array.
+
+### Cross-file profile inheritance
+
+By default a profile in a higher-priority config file completely replaces any same-named profile in lower-priority files. To layer on top of it instead, include the profile's own name in `extend`:
+
+```toml
+# ~/.config/scudo/config.toml
+[curl]
+extend = ["curl", "sandboxed"]   # inherit system curl, then also apply sandboxed
+MemoryMax = "512M"               # override or add properties on top
+```
+
+When scudo loads this file and finds an existing `[curl]` from `/etc/scudo/config.toml`, it renames the system profile to an internal key and rewrites the self-reference, so the resolution chain becomes: system curl → sandboxed → user curl. Without the self-reference, the system `[curl]` would be silently discarded.
+
+If the lower-priority profile has `final = true`, it cannot be used as a base. The self-reference is silently dropped and the higher-priority profile stands on its own, but it still replaces the lower-priority profile.
 
 ### Environment variables
 

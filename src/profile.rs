@@ -96,6 +96,11 @@ fn match_description(pattern: &CommandPattern) -> (&'static str, String) {
 
 /// Recursively resolve `extend`, returning the fully-merged property map and
 /// the metadata flags for this profile's chain.
+///
+/// Multiple parents are resolved left-to-right; later entries take precedence.
+/// `visited` tracks the current resolution path for cycle detection; it is
+/// push/popped per branch so that diamond inheritance (A → [B, C] where B and C
+/// both extend D) works correctly.
 fn expand_extend(
     configs: &ValidatedConfigMap,
     profile: &ValidatedProfileConfig,
@@ -103,7 +108,10 @@ fn expand_extend(
     log: &mut Vec<String>,
     depth: usize,
 ) -> Result<(Properties, ProfileMeta)> {
-    let (mut base, parent_meta) = if let Some(parent_name) = &profile.extend {
+    let mut base = Properties::new();
+    let mut base_meta = ProfileMeta::default();
+
+    for parent_name in &profile.extend {
         if visited.contains(parent_name) {
             bail!("circular profile extension: {parent_name}");
         }
@@ -111,28 +119,34 @@ fn expand_extend(
             .0
             .get(parent_name)
             .with_context(|| format!("extended profile '{parent_name}' not found"))?;
-        visited.push(parent_name.clone());
 
         let indent = " ".repeat(depth.saturating_mul(3).saturating_add(2));
         log.push(format!("{indent}└─ extends '{parent_name}'"));
 
-        expand_extend(configs, parent, visited, log, depth.saturating_add(1))?
-    } else {
-        (Properties::new(), ProfileMeta::default())
-    };
+        visited.push(parent_name.clone());
+        let (parent_props, parent_meta) =
+            expand_extend(configs, parent, visited, log, depth.saturating_add(1))?;
+        visited.pop(); // restore so sibling branches can share the same parents
 
-    // Child's explicit Some overrides parent; None falls back to parent's value.
-    // arg_aliases: child keys override parent keys.
-    // arg_flags: union (dedup not strictly necessary but harmless).
-    let mut merged_aliases = parent_meta.arg_aliases;
+        merge_into(&mut base, parent_props)?;
+        // Later parent (rightmost) wins for scalar meta fields.
+        base_meta.exec = parent_meta.exec.or(base_meta.exec);
+        base_meta.debug = parent_meta.debug.or(base_meta.debug);
+        base_meta.confirm = parent_meta.confirm.or(base_meta.confirm);
+        base_meta.arg_aliases.extend(parent_meta.arg_aliases);
+        base_meta.arg_flags.extend(parent_meta.arg_flags);
+    }
+
+    // Current profile's values override everything inherited from parents.
+    let mut merged_aliases = base_meta.arg_aliases;
     merged_aliases.extend(profile.arg_aliases.clone());
-    let mut merged_flags = parent_meta.arg_flags;
+    let mut merged_flags = base_meta.arg_flags;
     merged_flags.extend(profile.arg_flags.iter().cloned());
 
     let meta = ProfileMeta {
-        exec: profile.exec.clone().or(parent_meta.exec),
-        debug: profile.debug.or(parent_meta.debug),
-        confirm: profile.confirm.or(parent_meta.confirm),
+        exec: profile.exec.clone().or(base_meta.exec),
+        debug: profile.debug.or(base_meta.debug),
+        confirm: profile.confirm.or(base_meta.confirm),
         arg_aliases: merged_aliases,
         arg_flags: merged_flags,
     };
@@ -285,11 +299,7 @@ fn parse_command_args(args: &[String], aliases: &ArgAliases, bool_flags: &[Strin
     // Build rest from positionals.
     if positional_index > 0 {
         let rest: Vec<String> = (1..=positional_index)
-            .filter_map(|n| {
-                vars.get(&format!("{n}"))
-                    .and_then(|v| v.first())
-                    .cloned()
-            })
+            .filter_map(|n| vars.get(&format!("{n}")).and_then(|v| v.first()).cloned())
             .collect();
         if !rest.is_empty() {
             vars.insert("rest".to_owned(), vec![rest.join(" ")]);
@@ -310,8 +320,7 @@ fn auto_derive_var_name(flag: &str) -> Option<String> {
 /// Uses `std::path::absolute` which normalises `.` components lexically
 /// without requiring the path to exist.
 fn make_absolute(path: &str) -> String {
-    std::path::absolute(path)
-        .map_or_else(|_| path.to_owned(), |p| p.to_string_lossy().into_owned())
+    std::path::absolute(path).map_or_else(|_| path.to_owned(), |p| p.to_string_lossy().into_owned())
 }
 
 /// Returns `true` for systemd unit properties whose values are filesystem paths.
@@ -471,7 +480,8 @@ fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>
                 }
                 array_var_seen = true;
                 // Explode: for each existing partial result × each value
-                let mut new_results = Vec::with_capacity(results.len().saturating_mul(expand_vals.len()));
+                let mut new_results =
+                    Vec::with_capacity(results.len().saturating_mul(expand_vals.len()));
                 for existing in &results {
                     for val in &expand_vals {
                         let mut new = existing.clone();
@@ -533,7 +543,7 @@ mod tests {
 
     fn profile(pattern: CommandPattern, props: Vec<(&str, Value)>) -> ValidatedProfileConfig {
         ValidatedProfileConfig {
-            extend: None,
+            extend: vec![],
             exec: None,
             debug: None,
             confirm: None,
@@ -614,7 +624,7 @@ mod tests {
             CommandPattern::Exact("curl".to_owned()),
             vec![("ReadWritePaths", arr(&["/tmp"]))],
         );
-        child.extend = Some("base".into());
+        child.extend = vec!["base".into()];
 
         let configs = make_configs(vec![("base", base), ("curl", child)]);
         let r = resolve(&configs, "curl", &[]).unwrap();
@@ -635,7 +645,7 @@ mod tests {
             CommandPattern::Exact("app".to_owned()),
             vec![("ReadOnlyPaths", arr(&["/usr"]))],
         );
-        child.extend = Some("base".into());
+        child.extend = vec!["base".into()];
 
         let configs = make_configs(vec![("base", base), ("app", child)]);
         let r = resolve(&configs, "app", &[]).unwrap();
@@ -657,7 +667,7 @@ mod tests {
             CommandPattern::Exact("app".to_owned()),
             vec![("ReadOnlyPaths", arr(&["...", "/etc"]))],
         );
-        child.extend = Some("base".into());
+        child.extend = vec!["base".into()];
 
         let configs = make_configs(vec![("base", base), ("app", child)]);
         let r = resolve(&configs, "app", &[]).unwrap();
@@ -681,7 +691,7 @@ mod tests {
             CommandPattern::Exact("app".to_owned()),
             vec![("Paths", arr(&["/before", "...", "/after"]))],
         );
-        child.extend = Some("base".into());
+        child.extend = vec!["base".into()];
 
         let configs = make_configs(vec![("base", base), ("app", child)]);
         let r = resolve(&configs, "app", &[]).unwrap();
@@ -702,7 +712,7 @@ mod tests {
             CommandPattern::Exact("app".to_owned()),
             vec![("Paths", arr(&["...", "/mid", "..."]))],
         );
-        child.extend = Some("base".into());
+        child.extend = vec!["base".into()];
 
         let configs = make_configs(vec![("base", base), ("app", child)]);
         resolve(&configs, "app", &[]).unwrap_err();
@@ -799,11 +809,7 @@ mod tests {
             "include".to_owned(),
             ArgAliasDecl::Simple(vec!["--include".to_owned()]),
         );
-        let vars = parse_command_args(
-            &args(&["--include", "a", "--include", "b"]),
-            &aliases,
-            &[],
-        );
+        let vars = parse_command_args(&args(&["--include", "a", "--include", "b"]), &aliases, &[]);
         assert_eq!(
             vars.get("include"),
             Some(&vec!["a".to_owned(), "b".to_owned()])
@@ -862,12 +868,7 @@ mod tests {
         );
         p.arg_aliases = aliases;
         let configs = make_configs(vec![("app", p)]);
-        let r = resolve(
-            &configs,
-            "app",
-            &args(&["--inc", "/a", "--inc", "/b"]),
-        )
-        .unwrap();
+        let r = resolve(&configs, "app", &args(&["--inc", "/a", "--inc", "/b"])).unwrap();
         assert!(has_arg(&r.systemd_args, "BindPaths=/a"));
         assert!(has_arg(&r.systemd_args, "BindPaths=/b"));
     }
@@ -919,16 +920,17 @@ mod tests {
             ArgAliasDecl::Simple(vec!["-t".to_owned()]),
         );
         let vars = parse_command_args(&args(&["-t", "dir", "file1"]), &aliases, &[]);
-        assert_eq!(
-            vars.get("target_directory"),
-            Some(&vec!["dir".to_owned()])
-        );
+        assert_eq!(vars.get("target_directory"), Some(&vec!["dir".to_owned()]));
         assert_eq!(vars.get("1"), Some(&vec!["file1".to_owned()]));
     }
 
     #[test]
     fn arg_rest() {
-        let vars = parse_command_args(&args(&["-p", "dir1", "dir2"]), &HashMap::new(), &args(&["-p"]));
+        let vars = parse_command_args(
+            &args(&["-p", "dir1", "dir2"]),
+            &HashMap::new(),
+            &args(&["-p"]),
+        );
         assert_eq!(vars.get("1"), Some(&vec!["dir1".to_owned()]));
         assert_eq!(vars.get("2"), Some(&vec!["dir2".to_owned()]));
         assert_eq!(vars.get("rest"), Some(&vec!["dir1 dir2".to_owned()]));
@@ -1019,6 +1021,74 @@ mod tests {
         let configs = path_profile("ReadWritePaths", "-$SCUDO_TEST_DASH_PATH");
         let r = resolve(&configs, "app", &[]).unwrap();
         let expected = format!("-{}", cwd.join("some/dir").to_string_lossy());
-        assert!(has_arg(&r.systemd_args, &format!("ReadWritePaths={expected}")));
+        assert!(has_arg(
+            &r.systemd_args,
+            &format!("ReadWritePaths={expected}")
+        ));
+    }
+
+    // ── multi-extend tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn multi_extend_priority() {
+        // extend = ["a", "b"]: b overrides a; current profile overrides b.
+        let a = profile(
+            CommandPattern::Never,
+            vec![("CPUQuota", str("10%")), ("MemoryMax", str("128M"))],
+        );
+        let b = profile(
+            CommandPattern::Never,
+            vec![("CPUQuota", str("20%")), ("MemoryHigh", str("256M"))],
+        );
+        let mut child = profile(
+            CommandPattern::Exact("app".to_owned()),
+            vec![("CPUQuota", str("50%"))],
+        );
+        child.extend = vec!["a".into(), "b".into()];
+
+        let configs = make_configs(vec![("a", a), ("b", b), ("app", child)]);
+        let r = resolve(&configs, "app", &[]).unwrap();
+
+        // child wins for CPUQuota
+        assert!(has_arg(&r.systemd_args, "CPUQuota=50%"));
+        // b wins over a for CPUQuota (but child wins overall)
+        // MemoryMax from a is present (b didn't override it)
+        assert!(has_arg(&r.systemd_args, "MemoryMax=128M"));
+        // MemoryHigh from b is present
+        assert!(has_arg(&r.systemd_args, "MemoryHigh=256M"));
+    }
+
+    #[test]
+    fn multi_extend_diamond() {
+        // A extends [B, C]; B and C both extend D.
+        // Diamond inheritance must not cause a circular-extend error.
+        let d = profile(CommandPattern::Never, vec![("MemoryMax", str("64M"))]);
+        let mut b = profile(CommandPattern::Never, vec![("CPUQuota", str("10%"))]);
+        b.extend = vec!["d".into()];
+        let mut c = profile(CommandPattern::Never, vec![("CPUQuota", str("20%"))]);
+        c.extend = vec!["d".into()];
+        let mut a = profile(CommandPattern::Exact("app".to_owned()), vec![]);
+        a.extend = vec!["b".into(), "c".into()];
+
+        let configs = make_configs(vec![("d", d), ("b", b), ("c", c), ("app", a)]);
+        let r = resolve(&configs, "app", &[]).unwrap();
+
+        // D's property visible; no error
+        assert!(has_arg(&r.systemd_args, "MemoryMax=64M"));
+        // C (rightmost) wins over B for CPUQuota
+        assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
+    }
+
+    #[test]
+    fn extend_circular_still_detected() {
+        let mut a = profile(CommandPattern::Never, vec![]);
+        a.extend = vec!["b".into()];
+        let mut b = profile(CommandPattern::Never, vec![]);
+        b.extend = vec!["a".into()];
+        let mut child = profile(CommandPattern::Exact("app".to_owned()), vec![]);
+        child.extend = vec!["a".into()];
+
+        let configs = make_configs(vec![("a", a), ("b", b), ("app", child)]);
+        assert!(resolve(&configs, "app", &[]).is_err());
     }
 }
