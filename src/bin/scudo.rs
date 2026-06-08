@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use std::path::PathBuf;
+use std::{os::unix::process::CommandExt as _, path::PathBuf};
 
 use anyhow::Result;
 
@@ -71,6 +71,16 @@ fn run() -> Result<()> {
         Some(path) => PathBuf::from(&path),
         None => bin,
     };
+
+    if resolved.systemd_args.is_empty() {
+        if resolved.debug {
+            eprintln!(
+                "scudo: warning: no profile matched or empty systemd-run options for '{command}'"
+            );
+        }
+        let err = std::process::Command::new(&bin).args(&command_args).exec();
+        return Err(anyhow::Error::from(err).context("exec failed"));
+    }
 
     scudo::runner::exec(
         &bin,
