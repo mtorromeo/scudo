@@ -53,29 +53,71 @@ where
 
 use crate::trust;
 
+/// Match type for a pattern entry. Defaults to `exact` when unspecified.
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchType {
     #[default]
-    Glob,
     Exact,
+    Glob,
     Regex,
-    Never,
 }
 
+/// Compiled match pattern stored on a validated profile.
+/// `Sentinel` represents `"..."` — replaced with the parent profile's patterns at resolve time.
 #[derive(Debug, Clone)]
 pub enum CommandPattern {
     Exact(String),
     Regex(Regex),
     Glob(Pattern),
-    Never,
+    /// `"..."` — splices the first parent's patterns in at this position during resolve.
+    Sentinel,
+}
+
+/// A single raw match entry as written in TOML.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum MatchEntry {
+    /// Bare string: `"curl"` → exact match; `"..."` → Sentinel.
+    Simple(String),
+    /// Table form: `{ pattern = "curl*", type = "glob" }`.
+    Extended {
+        pattern: Option<String>,
+        #[serde(rename = "type", default)]
+        match_type: MatchType,
+    },
+}
+
+/// Deserialize the `match` field.
+///
+/// - field absent → `None`  (serde `default` handles this; use section name, exact)
+/// - `[]`         → `Some(vec![])` (never match)
+/// - single entry → `Some(vec![entry])`
+/// - array        → `Some(entries)`
+fn deserialize_match_field<'de, D>(de: D) -> Result<Option<Vec<MatchEntry>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MatchDecl {
+        One(MatchEntry),
+        Many(Vec<MatchEntry>),
+    }
+    let decl = MatchDecl::deserialize(de)?;
+    Ok(Some(match decl {
+        MatchDecl::One(e) => vec![e],
+        MatchDecl::Many(v) => v,
+    }))
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ProfileConfig {
-    pub pattern: Option<String>,
-    #[serde(rename = "match", default = "default_match_type")]
-    pub r#match: MatchType,
+    /// `None` = absent (use section name, exact).
+    /// `Some([])` = never match.
+    /// `Some([…])` = match with the listed pattern(s).
+    #[serde(rename = "match", default, deserialize_with = "deserialize_match_field")]
+    pub r#match: Option<Vec<MatchEntry>>,
     /// Profiles to inherit from, in left-to-right order (later entries take precedence).
     /// Accepts a single string or an array. Including this profile's own name extends from
     /// the same-named profile in lower-priority config files.
@@ -101,15 +143,11 @@ pub struct ProfileConfig {
     pub properties: HashMap<String, toml::Value>,
 }
 
-fn default_match_type() -> MatchType {
-    MatchType::Exact
-}
-
 pub type ConfigMap = HashMap<String, ProfileConfig>;
 
 #[derive(Debug, Clone)]
 pub struct ValidatedProfileConfig {
-    pub pattern: CommandPattern,
+    pub pattern: Vec<CommandPattern>,
     pub extend: Vec<String>,
     pub exec: Option<String>,
     pub debug: Option<bool>,
@@ -129,7 +167,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
         let map = value
             .into_iter()
             .map(|(name, config)| {
-                let pattern = parse_pattern(&name, config.pattern, &config.r#match)?;
+                let pattern = build_patterns(&name, config.r#match)?;
                 Ok((
                     name,
                     ValidatedProfileConfig {
@@ -149,24 +187,41 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
     }
 }
 
-fn parse_pattern(
-    name: &str,
-    pattern: Option<String>,
-    match_type: &MatchType,
-) -> Result<CommandPattern> {
-    if matches!(match_type, MatchType::Never) {
-        return Ok(CommandPattern::Never);
-    }
-    let p = pattern.unwrap_or_else(|| name.to_owned());
-    match match_type {
-        MatchType::Exact => Ok(CommandPattern::Exact(p)),
-        MatchType::Glob => Pattern::new(&p)
-            .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
-            .map(CommandPattern::Glob),
-        MatchType::Regex => Regex::new(&p)
-            .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
-            .map(CommandPattern::Regex),
-        MatchType::Never => Ok(CommandPattern::Never),
+/// Convert the raw `match` field into a vec of compiled patterns.
+///
+/// - `None` (field absent) → `[Exact(section_name)]`
+/// - `Some([])` (`[]`) → `[]` (never matches)
+/// - `Some([…])` → compiled entries
+fn build_patterns(name: &str, decl: Option<Vec<MatchEntry>>) -> Result<Vec<CommandPattern>> {
+    let Some(entries) = decl else {
+        return Ok(vec![CommandPattern::Exact(name.to_owned())]);
+    };
+    entries.into_iter().map(|e| compile_entry(name, e)).collect()
+}
+
+fn compile_entry(name: &str, e: MatchEntry) -> Result<CommandPattern> {
+    match e {
+        MatchEntry::Simple(s) if s == "..." => Ok(CommandPattern::Sentinel),
+        MatchEntry::Simple(s) => Ok(CommandPattern::Exact(s)),
+        MatchEntry::Extended { pattern, match_type } => match match_type {
+            MatchType::Exact => {
+                Ok(CommandPattern::Exact(pattern.unwrap_or_else(|| name.to_owned())))
+            }
+            MatchType::Glob => {
+                let p = pattern
+                    .with_context(|| format!("profile '{name}': glob match requires a pattern"))?;
+                Pattern::new(&p)
+                    .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
+                    .map(CommandPattern::Glob)
+            }
+            MatchType::Regex => {
+                let p = pattern
+                    .with_context(|| format!("profile '{name}': regex match requires a pattern"))?;
+                Regex::new(&p)
+                    .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
+                    .map(CommandPattern::Regex)
+            }
+        },
     }
 }
 
@@ -201,7 +256,7 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
                     let n = synthetic_counter.entry(name.clone()).or_insert(0);
                     let synthetic = format!("\x00{name}\x00{n}");
                     *n = n.saturating_add(1);
-                    existing.r#match = MatchType::Never; // prevent direct command matching
+                    existing.r#match = Some(vec![]); // prevent direct command matching
                     merged.insert(synthetic.clone(), existing);
                     if let Some(slot) = new_profile.extend.get_mut(pos) {
                         *slot = synthetic;
@@ -263,7 +318,7 @@ mod tests {
                         let n = synthetic_counter.entry(name.clone()).or_insert(0);
                         let synthetic = format!("\x00{name}\x00{n}");
                         *n = n.saturating_add(1);
-                        existing.r#match = MatchType::Never;
+                        existing.r#match = Some(vec![]);
                         merged.insert(synthetic.clone(), existing);
                         if let Some(slot) = new_profile.extend.get_mut(pos) {
                             *slot = synthetic;

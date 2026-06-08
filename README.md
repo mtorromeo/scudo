@@ -91,8 +91,7 @@ Each TOML section defines a profile. The section name is also the default match 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `pattern` | string | Pattern to match against the command name (default: section name) |
-| `match` | `exact` \| `glob` \| `regex` \| `never` | Matching strategy (default: `exact`) |
+| `match` | see [Match patterns](#match-patterns) | Pattern(s) to match against the command name. Absent = use section name (exact). `null` or `[]` = never match directly (base profile only). |
 | `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
 | `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
@@ -103,20 +102,18 @@ Each TOML section defines a profile. The section name is also the default match 
 
 All other keys are passed directly to `systemd-run` as `-p Key=value` properties. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays.
 
-When multiple profiles match the same command, they are merged in order of increasing specificity: glob < regex < exact. Within each tier, the last match wins for scalar values.
-
 ### Example
 
 ```toml
 # Base profile — never matched directly, only used via extend
 [sandboxed]
-match = "never"
+match = []
 ReadOnlyPaths = ["/"]
 ReadWritePaths = ["/tmp", "$XDG_RUNTIME_DIR"]
 PrivateTmp = true
 
 [sandboxed-home]
-match = "never"
+match = []
 extend = "sandboxed"
 TemporaryFileSystem = "$HOME"
 BindPaths = ["$HOME/.cache"]
@@ -129,8 +126,7 @@ MemoryMax = "256M"
 
 # code: match VS Code and variants via regex, extend the sandboxed profile with code-specific paths
 [code]
-pattern = "^(vs)?cod(e|e-oss|ium)?$"
-match = "regex"
+match = { pattern = "^(vs)?cod(e|e-oss|ium)?$", type = "regex" }
 extend = "sandboxed-home"
 ReadWritePaths = ["...", "/proc", "/dev/shm", "/dev/dri"]
 BindPaths = [
@@ -158,6 +154,24 @@ BindReadOnlyPaths = ["$HOME/.npmrc"]
 extend = "npm"
 BindPaths = ["...", "$HOME/.pnpm-store"]
 ```
+
+### Match patterns
+
+The `match` field controls which commands a profile applies to:
+
+| Form | Meaning |
+|------|---------|
+| absent | section name, exact match |
+| `match = []` | never match — base profile usable only via `extend` |
+| `match = "curl"` | exact match for `curl` |
+| `match = { pattern = "curl" }` | same, explicit table form |
+| `match = { pattern = "curl*", type = "glob" }` | glob match |
+| `match = { pattern = "^curl", type = "regex" }` | regex match |
+| `match = [...]` | array of any of the above forms |
+
+The `type` field accepts `exact` (default), `glob`, or `regex`. When the `match` field is an array, `"..."` splices the first parent profile's patterns at that position — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
+
+When multiple profiles match the same command, they are merged in order of increasing specificity: glob < regex < exact. Within each tier, the last match wins for scalar values.
 
 ### Array extension
 

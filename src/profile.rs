@@ -42,21 +42,27 @@ pub fn resolve(
     let mut glob_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
     let mut regex_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
 
+    let matches_cmd = |p: &CommandPattern| match p {
+        CommandPattern::Exact(s) => s == command,
+        CommandPattern::Glob(g) => g.matches(command),
+        CommandPattern::Regex(r) => r.is_match(command),
+        CommandPattern::Sentinel => false,
+    };
+
     for (name, profile) in &configs.0 {
-        match &profile.pattern {
-            CommandPattern::Exact(p) if p == command => {
-                exact_matches.push((name, profile));
-            }
-            CommandPattern::Glob(p) if p.matches(command) => {
-                glob_matches.push((name, profile));
-            }
-            CommandPattern::Regex(p) if p.is_match(command) => {
-                regex_matches.push((name, profile));
-            }
-            CommandPattern::Never
-            | CommandPattern::Exact(_)
-            | CommandPattern::Glob(_)
-            | CommandPattern::Regex(_) => {}
+        let resolved = if profile.pattern.iter().any(|p| matches!(p, CommandPattern::Sentinel)) {
+            resolve_patterns(configs, profile, &mut vec![])?
+        } else {
+            profile.pattern.clone()
+        };
+        if !resolved.iter().any(matches_cmd) {
+            continue;
+        }
+        match resolved.iter().find(|p| !matches!(p, CommandPattern::Sentinel)) {
+            Some(CommandPattern::Exact(_)) => exact_matches.push((name, profile)),
+            Some(CommandPattern::Glob(_)) => glob_matches.push((name, profile)),
+            Some(CommandPattern::Regex(_)) => regex_matches.push((name, profile)),
+            _ => {}
         }
     }
 
@@ -85,13 +91,66 @@ pub fn resolve(
     build_args(&merged, meta, match_log, &arg_vars)
 }
 
-fn match_description(pattern: &CommandPattern) -> (&'static str, String) {
-    match pattern {
-        CommandPattern::Exact(p) => ("exact", p.clone()),
-        CommandPattern::Glob(p) => ("glob", p.as_str().to_owned()),
-        CommandPattern::Regex(p) => ("regex", p.as_str().to_owned()),
-        CommandPattern::Never => ("never", String::new()),
+fn match_description(patterns: &[CommandPattern]) -> (&'static str, String) {
+    let kind = match patterns.iter().find(|p| !matches!(p, CommandPattern::Sentinel)) {
+        Some(CommandPattern::Exact(_)) => "exact",
+        Some(CommandPattern::Glob(_)) => "glob",
+        Some(CommandPattern::Regex(_)) => "regex",
+        _ => "never",
+    };
+    let joined = patterns
+        .iter()
+        .filter_map(|p| match p {
+            CommandPattern::Exact(s) => Some(s.as_str()),
+            CommandPattern::Glob(g) => Some(g.as_str()),
+            CommandPattern::Regex(r) => Some(r.as_str()),
+            CommandPattern::Sentinel => None,
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    (kind, joined)
+}
+
+/// Resolve `CommandPattern::Sentinel` entries by splicing in the first parent's
+/// resolved patterns. Returns a sentinel-free pattern list.
+fn resolve_patterns(
+    configs: &ValidatedConfigMap,
+    profile: &ValidatedProfileConfig,
+    visited: &mut Vec<String>,
+) -> Result<Vec<CommandPattern>> {
+    if !profile.pattern.iter().any(|p| matches!(p, CommandPattern::Sentinel)) {
+        return Ok(profile.pattern.clone());
     }
+    let parent_patterns = profile
+        .extend
+        .iter()
+        .find_map(|parent_name| configs.0.get(parent_name.as_str()).map(|p| (parent_name, p)))
+        .map(|(parent_name, parent)| {
+            if visited.contains(parent_name) {
+                bail!("circular pattern extension: {parent_name}");
+            }
+            visited.push(parent_name.clone());
+            let result = resolve_patterns(configs, parent, visited);
+            visited.pop();
+            result
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let mut result = Vec::new();
+    for p in &profile.pattern {
+        if matches!(p, CommandPattern::Sentinel) {
+            result.extend(
+                parent_patterns
+                    .iter()
+                    .filter(|p| !matches!(p, CommandPattern::Sentinel))
+                    .cloned(),
+            );
+        } else {
+            result.push(p.clone());
+        }
+    }
+    Ok(result)
 }
 
 /// Recursively resolve `extend`, returning the fully-merged property map and
@@ -547,7 +606,20 @@ mod tests {
             exec: None,
             debug: None,
             confirm: None,
-            pattern,
+            pattern: vec![pattern],
+            arg_aliases: HashMap::new(),
+            arg_flags: vec![],
+            properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+        }
+    }
+
+    fn never_profile(props: Vec<(&str, Value)>) -> ValidatedProfileConfig {
+        ValidatedProfileConfig {
+            pattern: vec![],
+            extend: vec![],
+            exec: None,
+            debug: None,
+            confirm: None,
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
@@ -608,7 +680,7 @@ mod tests {
     fn never_skipped() {
         let configs = make_configs(vec![(
             "base",
-            profile(CommandPattern::Never, vec![("CPUQuota", str("50%"))]),
+            never_profile(vec![("CPUQuota", str("50%"))]),
         )]);
         let r = resolve(&configs, "base", &[]).unwrap();
         assert!(r.systemd_args.is_empty());
@@ -616,10 +688,7 @@ mod tests {
 
     #[test]
     fn extend() {
-        let base = profile(
-            CommandPattern::Never,
-            vec![("CPUQuota", str("50%")), ("ReadOnlyPaths", arr(&["/"]))],
-        );
+        let base = never_profile(vec![("CPUQuota", str("50%")), ("ReadOnlyPaths", arr(&["/"]))]);
         let mut child = profile(
             CommandPattern::Exact("curl".to_owned()),
             vec![("ReadWritePaths", arr(&["/tmp"]))],
@@ -637,10 +706,7 @@ mod tests {
     #[test]
     #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
     fn array_replaces_by_default() {
-        let base = profile(
-            CommandPattern::Never,
-            vec![("ReadOnlyPaths", arr(&["/", "/etc"]))],
-        );
+        let base = never_profile(vec![("ReadOnlyPaths", arr(&["/", "/etc"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
             vec![("ReadOnlyPaths", arr(&["/usr"]))],
@@ -662,7 +728,7 @@ mod tests {
     #[test]
     #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
     fn array_extend_with_sentinel() {
-        let base = profile(CommandPattern::Never, vec![("ReadOnlyPaths", arr(&["/"]))]);
+        let base = never_profile(vec![("ReadOnlyPaths", arr(&["/"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
             vec![("ReadOnlyPaths", arr(&["...", "/etc"]))],
@@ -686,7 +752,7 @@ mod tests {
     #[test]
     #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
     fn array_sentinel_in_middle() {
-        let base = profile(CommandPattern::Never, vec![("Paths", arr(&["/base"]))]);
+        let base = never_profile(vec![("Paths", arr(&["/base"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
             vec![("Paths", arr(&["/before", "...", "/after"]))],
@@ -707,7 +773,7 @@ mod tests {
 
     #[test]
     fn array_duplicate_sentinel_errors() {
-        let base = profile(CommandPattern::Never, vec![("Paths", arr(&["/base"]))]);
+        let base = never_profile(vec![("Paths", arr(&["/base"]))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
             vec![("Paths", arr(&["...", "/mid", "..."]))],
@@ -1032,14 +1098,8 @@ mod tests {
     #[test]
     fn multi_extend_priority() {
         // extend = ["a", "b"]: b overrides a; current profile overrides b.
-        let a = profile(
-            CommandPattern::Never,
-            vec![("CPUQuota", str("10%")), ("MemoryMax", str("128M"))],
-        );
-        let b = profile(
-            CommandPattern::Never,
-            vec![("CPUQuota", str("20%")), ("MemoryHigh", str("256M"))],
-        );
+        let a = never_profile(vec![("CPUQuota", str("10%")), ("MemoryMax", str("128M"))]);
+        let b = never_profile(vec![("CPUQuota", str("20%")), ("MemoryHigh", str("256M"))]);
         let mut child = profile(
             CommandPattern::Exact("app".to_owned()),
             vec![("CPUQuota", str("50%"))],
@@ -1062,10 +1122,10 @@ mod tests {
     fn multi_extend_diamond() {
         // A extends [B, C]; B and C both extend D.
         // Diamond inheritance must not cause a circular-extend error.
-        let d = profile(CommandPattern::Never, vec![("MemoryMax", str("64M"))]);
-        let mut b = profile(CommandPattern::Never, vec![("CPUQuota", str("10%"))]);
+        let d = never_profile(vec![("MemoryMax", str("64M"))]);
+        let mut b = never_profile(vec![("CPUQuota", str("10%"))]);
         b.extend = vec!["d".into()];
-        let mut c = profile(CommandPattern::Never, vec![("CPUQuota", str("20%"))]);
+        let mut c = never_profile(vec![("CPUQuota", str("20%"))]);
         c.extend = vec!["d".into()];
         let mut a = profile(CommandPattern::Exact("app".to_owned()), vec![]);
         a.extend = vec!["b".into(), "c".into()];
@@ -1081,9 +1141,9 @@ mod tests {
 
     #[test]
     fn extend_circular_still_detected() {
-        let mut a = profile(CommandPattern::Never, vec![]);
+        let mut a = never_profile(vec![]);
         a.extend = vec!["b".into()];
-        let mut b = profile(CommandPattern::Never, vec![]);
+        let mut b = never_profile(vec![]);
         b.extend = vec!["a".into()];
         let mut child = profile(CommandPattern::Exact("app".to_owned()), vec![]);
         child.extend = vec!["a".into()];
