@@ -63,13 +63,24 @@ pub enum MatchType {
     Regex,
 }
 
+/// What a pattern is compared against.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchTarget {
+    /// Compare against the command name only (default).
+    #[default]
+    Command,
+    /// Compare against the full command line: command name and all arguments joined with spaces.
+    FullCommand,
+}
+
 /// Compiled match pattern stored on a validated profile.
 /// `Sentinel` represents `"..."` — replaced with the parent profile's patterns at resolve time.
 #[derive(Debug, Clone)]
 pub enum CommandPattern {
-    Exact(String),
-    Regex(Regex),
-    Glob(Pattern),
+    Exact(String, MatchTarget),
+    Regex(Regex, MatchTarget),
+    Glob(Pattern, MatchTarget),
     /// `"..."` — splices the first parent's patterns in at this position during resolve.
     Sentinel,
 }
@@ -78,13 +89,15 @@ pub enum CommandPattern {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum MatchEntry {
-    /// Bare string: `"curl"` → exact match; `"..."` → Sentinel.
+    /// Bare string: `"curl"` → exact match against command name; `"..."` → Sentinel.
     Simple(String),
-    /// Table form: `{ pattern = "curl*", type = "glob" }`.
+    /// Table form: `{ pattern = "curl*", type = "glob", target = "full_command" }`.
     Extended {
         pattern: Option<String>,
         #[serde(rename = "type", default)]
         match_type: MatchType,
+        #[serde(default)]
+        target: MatchTarget,
     },
 }
 
@@ -194,7 +207,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
 /// - `Some([…])` → compiled entries
 fn build_patterns(name: &str, decl: Option<Vec<MatchEntry>>) -> Result<Vec<CommandPattern>> {
     let Some(entries) = decl else {
-        return Ok(vec![CommandPattern::Exact(name.to_owned())]);
+        return Ok(vec![CommandPattern::Exact(name.to_owned(), MatchTarget::Command)]);
     };
     entries.into_iter().map(|e| compile_entry(name, e)).collect()
 }
@@ -202,24 +215,24 @@ fn build_patterns(name: &str, decl: Option<Vec<MatchEntry>>) -> Result<Vec<Comma
 fn compile_entry(name: &str, e: MatchEntry) -> Result<CommandPattern> {
     match e {
         MatchEntry::Simple(s) if s == "..." => Ok(CommandPattern::Sentinel),
-        MatchEntry::Simple(s) => Ok(CommandPattern::Exact(s)),
-        MatchEntry::Extended { pattern, match_type } => match match_type {
+        MatchEntry::Simple(s) => Ok(CommandPattern::Exact(s, MatchTarget::Command)),
+        MatchEntry::Extended { pattern, match_type, target } => match match_type {
             MatchType::Exact => {
-                Ok(CommandPattern::Exact(pattern.unwrap_or_else(|| name.to_owned())))
+                Ok(CommandPattern::Exact(pattern.unwrap_or_else(|| name.to_owned()), target))
             }
             MatchType::Glob => {
                 let p = pattern
                     .with_context(|| format!("profile '{name}': glob match requires a pattern"))?;
                 Pattern::new(&p)
                     .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
-                    .map(CommandPattern::Glob)
+                    .map(|pat| CommandPattern::Glob(pat, target))
             }
             MatchType::Regex => {
                 let p = pattern
                     .with_context(|| format!("profile '{name}': regex match requires a pattern"))?;
                 Regex::new(&p)
                     .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
-                    .map(CommandPattern::Regex)
+                    .map(|r| CommandPattern::Regex(r, target))
             }
         },
     }

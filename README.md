@@ -167,11 +167,20 @@ The `match` field controls which commands a profile applies to:
 | `match = { pattern = "curl" }` | same, explicit table form |
 | `match = { pattern = "curl*", type = "glob" }` | glob match |
 | `match = { pattern = "^curl", type = "regex" }` | regex match |
+| `match = { pattern = "git commit*", type = "glob", target = "full_command" }` | glob match against full command line |
 | `match = [...]` | array of any of the above forms |
 
-The `type` field accepts `exact` (default), `glob`, or `regex`. When the `match` field is an array, `"..."` splices the first parent profile's patterns at that position — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
+The `type` field accepts `exact` (default), `glob`, or `regex`. The `target` field accepts `command` (default, matches against the command name only) or `full_command` (matches against the command name and all arguments joined with spaces). `target` is only available in the table form; the simple string form always targets the command name. When the `match` field is an array, `"..."` splices the first parent profile's patterns at that position — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
 
 When multiple profiles match the same command, they are merged in order of increasing specificity: glob < regex < exact. Within each tier, the last match wins for scalar values.
+
+> **Tip — matching a subcommand precisely.** `{ pattern = "git commit*", type = "glob", target = "full_command" }` looks right but breaks whenever git options precede the subcommand — `git -c user.name=x commit -m "msg"` produces a full command of `git -c user.name=x commit -m msg`, which does not start with `git commit`. A more robust alternative splits the command-name check from the subcommand check using an array:
+>
+> ```toml
+> match = ["git", { pattern = "\\bcommit\\b", type = "regex", target = "full_command" }]
+> ```
+>
+> The `"git"` entry matches exactly the `git` binary (command name only). The regex entry then checks whether the word `commit` appears anywhere in the full command line, regardless of any flags that precede it. `\bcommit\b` uses word boundaries so it does not accidentally match similar words like `commitlint` or `committed`. Of course this can still erroneously match when the word `commit` appears in other contexts but security-wise it is better to err on the side of caution and assume the word `commit` is a command name.
 
 ### Array extension
 

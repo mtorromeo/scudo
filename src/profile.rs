@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, bail};
 use regex::Regex;
 use toml::Value;
 
-use crate::config::{ArgAliases, CommandPattern, ValidatedConfigMap, ValidatedProfileConfig};
+use crate::config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig};
 
 #[derive(Debug)]
 pub struct ResolvedProfile {
@@ -42,11 +42,22 @@ pub fn resolve(
     let mut glob_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
     let mut regex_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
 
-    let matches_cmd = |p: &CommandPattern| match p {
-        CommandPattern::Exact(s) => s == command,
-        CommandPattern::Glob(g) => g.matches(command),
-        CommandPattern::Regex(r) => r.is_match(command),
-        CommandPattern::Sentinel => false,
+    let full_command: String = core::iter::once(command)
+        .chain(command_args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let matches_cmd = |p: &CommandPattern| {
+        let subject = |t: &MatchTarget| match t {
+            MatchTarget::Command => command,
+            MatchTarget::FullCommand => full_command.as_str(),
+        };
+        match p {
+            CommandPattern::Exact(s, t) => s == subject(t),
+            CommandPattern::Glob(g, t) => g.matches(subject(t)),
+            CommandPattern::Regex(r, t) => r.is_match(subject(t)),
+            CommandPattern::Sentinel => false,
+        }
     };
 
     for (name, profile) in &configs.0 {
@@ -59,9 +70,9 @@ pub fn resolve(
             continue;
         }
         match resolved.iter().find(|p| !matches!(p, CommandPattern::Sentinel)) {
-            Some(CommandPattern::Exact(_)) => exact_matches.push((name, profile)),
-            Some(CommandPattern::Glob(_)) => glob_matches.push((name, profile)),
-            Some(CommandPattern::Regex(_)) => regex_matches.push((name, profile)),
+            Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
+            Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
+            Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
             _ => {}
         }
     }
@@ -93,17 +104,17 @@ pub fn resolve(
 
 fn match_description(patterns: &[CommandPattern]) -> (&'static str, String) {
     let kind = match patterns.iter().find(|p| !matches!(p, CommandPattern::Sentinel)) {
-        Some(CommandPattern::Exact(_)) => "exact",
-        Some(CommandPattern::Glob(_)) => "glob",
-        Some(CommandPattern::Regex(_)) => "regex",
+        Some(CommandPattern::Exact(_, _)) => "exact",
+        Some(CommandPattern::Glob(_, _)) => "glob",
+        Some(CommandPattern::Regex(_, _)) => "regex",
         _ => "never",
     };
     let joined = patterns
         .iter()
         .filter_map(|p| match p {
-            CommandPattern::Exact(s) => Some(s.as_str()),
-            CommandPattern::Glob(g) => Some(g.as_str()),
-            CommandPattern::Regex(r) => Some(r.as_str()),
+            CommandPattern::Exact(s, _) => Some(s.as_str()),
+            CommandPattern::Glob(g, _) => Some(g.as_str()),
+            CommandPattern::Regex(r, _) => Some(r.as_str()),
             CommandPattern::Sentinel => None,
         })
         .collect::<Vec<_>>()
@@ -642,7 +653,7 @@ mod tests {
         let configs = make_configs(vec![(
             "curl",
             profile(
-                CommandPattern::Exact("curl".to_owned()),
+                CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
                 vec![("MemoryMax", str("1G"))],
             ),
         )]);
@@ -655,7 +666,7 @@ mod tests {
         let configs = make_configs(vec![(
             "curl",
             profile(
-                CommandPattern::Exact("curl".to_owned()),
+                CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
                 vec![("MemoryMax", str("1G"))],
             ),
         )]);
@@ -668,7 +679,7 @@ mod tests {
         let configs = make_configs(vec![(
             "browsers",
             profile(
-                CommandPattern::Glob(Pattern::new("*browser*").unwrap()),
+                CommandPattern::Glob(Pattern::new("*browser*").unwrap(), MatchTarget::Command),
                 vec![("PrivateNetwork", Value::Boolean(true))],
             ),
         )]);
@@ -690,7 +701,7 @@ mod tests {
     fn extend() {
         let base = never_profile(vec![("CPUQuota", str("50%")), ("ReadOnlyPaths", arr(&["/"]))]);
         let mut child = profile(
-            CommandPattern::Exact("curl".to_owned()),
+            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
             vec![("ReadWritePaths", arr(&["/tmp"]))],
         );
         child.extend = vec!["base".into()];
@@ -708,7 +719,7 @@ mod tests {
     fn array_replaces_by_default() {
         let base = never_profile(vec![("ReadOnlyPaths", arr(&["/", "/etc"]))]);
         let mut child = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("ReadOnlyPaths", arr(&["/usr"]))],
         );
         child.extend = vec!["base".into()];
@@ -730,7 +741,7 @@ mod tests {
     fn array_extend_with_sentinel() {
         let base = never_profile(vec![("ReadOnlyPaths", arr(&["/"]))]);
         let mut child = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("ReadOnlyPaths", arr(&["...", "/etc"]))],
         );
         child.extend = vec!["base".into()];
@@ -754,7 +765,7 @@ mod tests {
     fn array_sentinel_in_middle() {
         let base = never_profile(vec![("Paths", arr(&["/base"]))]);
         let mut child = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("Paths", arr(&["/before", "...", "/after"]))],
         );
         child.extend = vec!["base".into()];
@@ -775,7 +786,7 @@ mod tests {
     fn array_duplicate_sentinel_errors() {
         let base = never_profile(vec![("Paths", arr(&["/base"]))]);
         let mut child = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("Paths", arr(&["...", "/mid", "..."]))],
         );
         child.extend = vec!["base".into()];
@@ -788,11 +799,11 @@ mod tests {
     #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
     fn exact_overrides_glob() {
         let glob_p = profile(
-            CommandPattern::Glob(Pattern::new("cu*").unwrap()),
+            CommandPattern::Glob(Pattern::new("cu*").unwrap(), MatchTarget::Command),
             vec![("MemoryMax", str("512M"))],
         );
         let exact_p = profile(
-            CommandPattern::Exact("curl".to_owned()),
+            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
             vec![("MemoryMax", str("2G"))],
         );
 
@@ -812,7 +823,7 @@ mod tests {
         let configs = make_configs(vec![(
             "app",
             profile(
-                CommandPattern::Exact("app".to_owned()),
+                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
                 vec![("BindPaths", str("/home/user/My Documents"))],
             ),
         )]);
@@ -904,7 +915,7 @@ mod tests {
         let configs = make_configs(vec![(
             "app",
             profile(
-                CommandPattern::Exact("app".to_owned()),
+                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
                 vec![("BindPaths", arr(&["/always", "$arg_optional"]))],
             ),
         )]);
@@ -929,7 +940,7 @@ mod tests {
             ArgAliasDecl::Simple(vec!["--inc".to_owned()]),
         );
         let mut p = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("BindPaths", arr(&["$arg_inc"]))],
         );
         p.arg_aliases = aliases;
@@ -951,7 +962,7 @@ mod tests {
             ArgAliasDecl::Simple(vec!["--bb".to_owned()]),
         );
         let mut p = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("BindPaths", str("$arg_a/$arg_b"))],
         );
         p.arg_aliases = aliases;
@@ -1021,7 +1032,7 @@ mod tests {
         make_configs(vec![(
             "app",
             profile(
-                CommandPattern::Exact("app".to_owned()),
+                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
                 vec![(key, str(template))],
             ),
         )])
@@ -1061,7 +1072,7 @@ mod tests {
     fn path_arg_relative_made_absolute() {
         let cwd = std::env::current_dir().unwrap();
         let p = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("BindPaths", str("$arg_1"))],
         );
         let configs = make_configs(vec![("app", p)]);
@@ -1101,7 +1112,7 @@ mod tests {
         let a = never_profile(vec![("CPUQuota", str("10%")), ("MemoryMax", str("128M"))]);
         let b = never_profile(vec![("CPUQuota", str("20%")), ("MemoryHigh", str("256M"))]);
         let mut child = profile(
-            CommandPattern::Exact("app".to_owned()),
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
             vec![("CPUQuota", str("50%"))],
         );
         child.extend = vec!["a".into(), "b".into()];
@@ -1127,7 +1138,7 @@ mod tests {
         b.extend = vec!["d".into()];
         let mut c = never_profile(vec![("CPUQuota", str("20%"))]);
         c.extend = vec!["d".into()];
-        let mut a = profile(CommandPattern::Exact("app".to_owned()), vec![]);
+        let mut a = profile(CommandPattern::Exact("app".to_owned(), MatchTarget::Command), vec![]);
         a.extend = vec!["b".into(), "c".into()];
 
         let configs = make_configs(vec![("d", d), ("b", b), ("c", c), ("app", a)]);
@@ -1145,10 +1156,34 @@ mod tests {
         a.extend = vec!["b".into()];
         let mut b = never_profile(vec![]);
         b.extend = vec!["a".into()];
-        let mut child = profile(CommandPattern::Exact("app".to_owned()), vec![]);
+        let mut child = profile(CommandPattern::Exact("app".to_owned(), MatchTarget::Command), vec![]);
         child.extend = vec!["a".into()];
 
         let configs = make_configs(vec![("a", a), ("b", b), ("app", child)]);
         assert!(resolve(&configs, "app", &[]).is_err());
+    }
+
+    #[test]
+    fn full_command_target_match() {
+        use crate::config::MatchTarget;
+        use glob::Pattern;
+        // Profile matches only when "commit" appears in the full command line.
+        let p = profile(
+            CommandPattern::Glob(Pattern::new("git commit*").unwrap(), MatchTarget::FullCommand),
+            vec![("CPUQuota", str("10%"))],
+        );
+        let configs = make_configs(vec![("git-commit-sandbox", p)]);
+
+        // Matches when "commit" is the first argument.
+        let r = resolve(&configs, "git", &args(&["commit", "-m", "msg"])).unwrap();
+        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
+
+        // Does not match when no arguments contain "commit".
+        let r = resolve(&configs, "git", &args(&["status"])).unwrap();
+        assert!(r.systemd_args.is_empty());
+
+        // Does not match on command name alone (without matching args).
+        let r = resolve(&configs, "git", &[]).unwrap();
+        assert!(r.systemd_args.is_empty());
     }
 }
