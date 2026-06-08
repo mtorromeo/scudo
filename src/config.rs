@@ -5,6 +5,36 @@ use glob::Pattern;
 use regex::Regex;
 use serde::Deserialize;
 
+pub type ArgAliases = HashMap<String, ArgAliasDecl>;
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ArgAliasDecl {
+    /// Simple form: `foo = ["-f", "--foo"]`.
+    Simple(Vec<String>),
+    /// Extended form: `foo = { flags = ["-f", "--foo"], nargs = "+" }`.
+    Extended {
+        flags: Vec<String>,
+        nargs: Option<String>,
+    },
+}
+
+impl ArgAliasDecl {
+    #[must_use]
+    pub fn flags(&self) -> &[String] {
+        match self {
+            ArgAliasDecl::Simple(v) => v,
+            ArgAliasDecl::Extended { flags, .. } => flags,
+        }
+    }
+
+    /// Returns `true` if this alias consumes all following non-flag args as values.
+    #[must_use]
+    pub fn is_multi_value(&self) -> bool {
+        matches!(self, ArgAliasDecl::Extended { nargs: Some(n), .. } if n == "+")
+    }
+}
+
 use crate::trust;
 
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -34,6 +64,12 @@ pub struct ProfileConfig {
     pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
+    /// Maps variable names to the flag(s) that populate them.
+    #[serde(default)]
+    pub arg_aliases: ArgAliases,
+    /// Flags that take no value (boolean flags); prevents consuming the next arg.
+    #[serde(default)]
+    pub arg_flags: Vec<String>,
     /// All systemd unit properties, keyed by their exact systemd name.
     /// Values are either a single string/bool/integer or an array thereof.
     #[serde(flatten)]
@@ -53,6 +89,8 @@ pub struct ValidatedProfileConfig {
     pub exec: Option<String>,
     pub debug: Option<bool>,
     pub confirm: Option<bool>,
+    pub arg_aliases: ArgAliases,
+    pub arg_flags: Vec<String>,
     pub properties: HashMap<String, toml::Value>,
 }
 
@@ -75,6 +113,8 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                         exec: config.exec,
                         debug: config.debug,
                         confirm: config.confirm,
+                        arg_aliases: config.arg_aliases,
+                        arg_flags: config.arg_flags,
                         properties: config.properties,
                     },
                 ))

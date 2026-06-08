@@ -65,7 +65,7 @@ fn run() -> Result<()> {
     let command_args = args.collect::<Vec<_>>();
 
     let configs = scudo::config::load_configs()?;
-    let resolved = scudo::profile::resolve(&configs, &command)?;
+    let resolved = scudo::profile::resolve(&configs, &command, &command_args)?;
 
     if resolved.debug {
         for line in &resolved.match_log {

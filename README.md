@@ -97,6 +97,8 @@ Each TOML section defines a profile. The section name is also the default match 
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `debug` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
+| `arg_aliases` | table | Maps variable names to the flag(s) that populate them; see [Command argument variables](#command-argument-variables) |
+| `arg_flags` | array of strings | Flags that take no value (boolean flags); needed for correct positional detection |
 
 All other keys are passed directly to `systemd-run` as `-p Key=value` properties. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays.
 
@@ -173,6 +175,89 @@ ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
 ### Environment variables
 
 String values (including array elements) support `$VAR` and `${VAR}` expansion using the environment of the calling process. A reference to an undefined variable is an error.
+
+### Command argument variables
+
+Profile values can also reference the arguments of the command being run. These variables all start with `$arg_` and are silently empty if the corresponding argument was not passed (unlike environment variables, which are an error when undefined). Empty strings produced by absent argument variables are filtered out from arrays.
+
+#### Named flag variables
+
+Long options are detected automatically: `--foo-bar` becomes `$arg_foo_bar` (dashes converted to underscores). The value can be passed as `--foo-bar value` (space-separated) or `--foo-bar=value` (equals form).
+
+Short options and custom variable names require an `arg_aliases` declaration:
+
+```toml
+[install]
+arg_aliases = { target_directory = ["-t", "--target-directory"] }
+BindPaths = ["$HOME/.cache", "$arg_target_directory"]
+```
+
+Named flag variables **accumulate** across multiple occurrences — `--flag a --flag b` produces a two-element array that, when used in a `BindPaths` array, expands to two separate entries.
+
+If an `arg_aliases` entry should consume all consecutive non-flag arguments after the flag (instead of just one), use the extended form with `nargs = "+"`:
+
+```toml
+[rsync]
+arg_aliases = { include = { flags = ["-I", "--include"], nargs = "+" } }
+# --include a b c  →  $arg_include = ["a", "b", "c"]
+```
+
+#### Boolean flags and positional variables
+
+Flags listed in `arg_flags` are treated as boolean (they never consume the next argument). This is necessary to correctly identify positional arguments when boolean short options are present:
+
+```toml
+[mkdir]
+arg_flags = ["-p", "--parents", "-v", "--verbose"]
+BindPaths = ["$arg_1"]   # first positional argument
+```
+
+With this profile, `mkdir -p /my/dir` correctly sets `$arg_1 = /my/dir`.
+
+Positional variables:
+
+| Variable | Value |
+|----------|-------|
+| `$arg_1` | first positional argument |
+| `$arg_2` | second positional argument |
+| `$arg_N` | Nth positional argument |
+| `$arg_rest` | all positionals space-joined (like `$*`) |
+
+`--` terminates option parsing; all subsequent arguments are treated as positional.
+
+#### Array expansion in string templates
+
+When a named flag variable holds multiple values and appears inside a string template, the template is replicated once per value:
+
+```toml
+[rsync]
+arg_aliases = { include = ["-I", "--include"] }
+BindReadOnlyPaths = ["/prefix/$arg_include"]
+# -I a -I b  →  ["/prefix/a", "/prefix/b"]
+```
+
+Using more than one multi-value argument variable inside the same string template is an error; use separate array entries instead.
+
+### Path canonicalization
+
+When a variable (`$arg_*` or `$VAR`) is used inside a systemd property that expects filesystem paths (such as `BindPaths`, `ReadWritePaths`, `WorkingDirectory`, etc.), its expanded value is automatically made absolute relative to `$PWD`. This handles the common case where the user passes a relative path on the command line:
+
+```toml
+[rsync]
+arg_aliases = { include = ["-I", "--include"] }
+BindReadOnlyPaths = ["$arg_include"]
+# rsync -I ./src  →  BindReadOnlyPaths=/abs/cwd/src
+```
+
+Only the **expanded variable value** is canonicalized — literal text in the template is left untouched. This means systemd special prefix characters (`-`, `+`, `!`, `!!`) can be used freely in the literal part:
+
+```toml
+[app]
+ReadWritePaths = ["-$arg_1"]
+# ./relative  →  -/abs/cwd/relative   ('-' is literal, path is made absolute)
+```
+
+Absolute paths are passed through unchanged. Canonicalization is purely lexical (it does not require the path to exist).
 
 ## Building
 

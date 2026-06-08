@@ -2,6 +2,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    hash::DefaultHasher,
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::PathBuf,
 };
@@ -31,11 +32,14 @@ struct Args {
     /// Colon-separated list of directories to search for executables.
     #[arg(short = 'p', long, env = "PATH")]
     path: String,
+    /// Do not enumerate executables in readdir; only respond to explicit lookups.
+    #[arg(long)]
+    disable_listing: bool,
 }
 
 /// Derive a stable inode number from a filename. Avoids 0 (invalid) and 1 (root).
 fn name_to_ino(name: &OsStr) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = DefaultHasher::new();
     name.hash(&mut h);
     #[expect(clippy::integer_division_remainder_used)]
     let n = h.finish() % (u64::MAX - 2);
@@ -83,6 +87,7 @@ struct ScudoShimsFS {
     path_dirs: Vec<PathBuf>,
     /// Basenames that are never exposed as shims, regardless of PATH contents.
     excluded: std::collections::HashSet<OsString>,
+    disable_listing: bool,
 }
 
 impl ScudoShimsFS {
@@ -173,6 +178,10 @@ impl Filesystem for ScudoShimsFS {
             reply.error(libc::ENOTDIR);
             return;
         }
+        if self.disable_listing {
+            reply.ok();
+            return;
+        }
         let start = usize::try_from(offset).unwrap_or(0);
         for (idx, (name, entry_ino, kind)) in
             self.list_entries().into_iter().enumerate().skip(start)
@@ -194,7 +203,7 @@ impl Filesystem for ScudoShimsFS {
     }
 }
 
-fn main() {
+fn main() -> Result<(), i32> {
     let args = Args::parse();
 
     let target = args
@@ -231,8 +240,7 @@ fn main() {
     //   - systemd-run: the tool scudo invokes internally
     //   - basename of target (e.g. "scudo"): would create a shim pointing to itself
     //   - basename of current exe (e.g. "scudo-fuse"): the FUSE process itself
-    let mut excluded: std::collections::HashSet<OsString> =
-        [OsString::from("systemd-run")].into();
+    let mut excluded: std::collections::HashSet<OsString> = [OsString::from("systemd-run")].into();
     if let Some(name) = args.target.file_name() {
         excluded.insert(name.to_owned());
     }
@@ -247,11 +255,14 @@ fn main() {
             target,
             path_dirs,
             excluded,
+            disable_listing: args.disable_listing,
         },
         &args.mountpoint,
         &options,
     ) {
         eprintln!("scudo-fuse: mount failed: {e}");
-        std::process::exit(1);
+        return Err(1);
     }
+
+    Ok(())
 }
