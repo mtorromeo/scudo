@@ -45,6 +45,12 @@ fn run() -> Result<()> {
     let Some(mut command) = args.next() else {
         help();
     };
+    if let Some(basename) = PathBuf::from(&command).file_name() {
+        basename
+            .to_str()
+            .ok_or(anyhow::anyhow!("invalid command: {command}"))?
+            .clone_into(&mut command);
+    }
 
     let self_exe = std::env::current_exe().and_then(std::fs::canonicalize)?;
     let bin = which(&command, &self_exe).or_else(|_| {
