@@ -12,10 +12,11 @@ Arguments:
   [COMMAND_ARGS]...  
 
 Options:
-      --debug    Enable debug output
-      --confirm  Confirm before running the command
-  -h, --help     Print help
-  -V, --version  Print version
+      --debug                      Enable debug output
+      --confirm                    Confirm before running the command
+  -p, --property <PROPERTY=VALUE>  Set a property for the systemd-run command
+  -h, --help                       Print help
+  -V, --version                    Print version
 ```
 
 **Via symlink** — scudo detects it is being called through a symlink and selects the matching profile automatically:

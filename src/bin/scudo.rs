@@ -17,6 +17,10 @@ struct Args {
     #[arg(long)]
     confirm: bool,
 
+    /// Set a property for the systemd-run command.
+    #[arg(short, long, value_name = "PROPERTY=VALUE")]
+    property: Vec<String>,
+
     #[arg()]
     command: String,
 
@@ -97,6 +101,10 @@ fn run() -> Result<()> {
         Some(path) => PathBuf::from(&path),
         None => bin,
     };
+
+    resolved
+        .systemd_args
+        .extend(args.property.iter().map(|p| format!("--property={p}")));
 
     if resolved.systemd_args.is_empty() {
         if resolved.debug {
