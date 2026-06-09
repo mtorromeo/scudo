@@ -4,7 +4,9 @@ use anyhow::{Context as _, Result, bail};
 use regex::Regex;
 use toml::Value;
 
-use crate::config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig};
+use crate::config::{
+    ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig,
+};
 
 #[derive(Debug)]
 pub struct ResolvedProfile {
@@ -61,15 +63,22 @@ pub fn resolve(
     };
 
     for (name, profile) in &configs.0 {
-        let resolved = if profile.pattern.iter().any(|p| matches!(p, CommandPattern::Sentinel)) {
+        let resolved = if profile
+            .pattern
+            .iter()
+            .any(|p| matches!(p, CommandPattern::Sentinel))
+        {
             resolve_patterns(configs, profile, &mut vec![])?
         } else {
             profile.pattern.clone()
         };
-        if !resolved.iter().any(matches_cmd) {
+        if !resolved.iter().all(matches_cmd) {
             continue;
         }
-        match resolved.iter().find(|p| !matches!(p, CommandPattern::Sentinel)) {
+        match resolved
+            .iter()
+            .find(|p| !matches!(p, CommandPattern::Sentinel))
+        {
             Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
             Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
             Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
@@ -103,7 +112,10 @@ pub fn resolve(
 }
 
 fn match_description(patterns: &[CommandPattern]) -> (&'static str, String) {
-    let kind = match patterns.iter().find(|p| !matches!(p, CommandPattern::Sentinel)) {
+    let kind = match patterns
+        .iter()
+        .find(|p| !matches!(p, CommandPattern::Sentinel))
+    {
         Some(CommandPattern::Exact(_, _)) => "exact",
         Some(CommandPattern::Glob(_, _)) => "glob",
         Some(CommandPattern::Regex(_, _)) => "regex",
@@ -129,13 +141,22 @@ fn resolve_patterns(
     profile: &ValidatedProfileConfig,
     visited: &mut Vec<String>,
 ) -> Result<Vec<CommandPattern>> {
-    if !profile.pattern.iter().any(|p| matches!(p, CommandPattern::Sentinel)) {
+    if !profile
+        .pattern
+        .iter()
+        .any(|p| matches!(p, CommandPattern::Sentinel))
+    {
         return Ok(profile.pattern.clone());
     }
     let parent_patterns = profile
         .extend
         .iter()
-        .find_map(|parent_name| configs.0.get(parent_name.as_str()).map(|p| (parent_name, p)))
+        .find_map(|parent_name| {
+            configs
+                .0
+                .get(parent_name.as_str())
+                .map(|parent| (parent_name, parent))
+        })
         .map(|(parent_name, parent)| {
             if visited.contains(parent_name) {
                 bail!("circular pattern extension: {parent_name}");
@@ -596,6 +617,7 @@ fn expand_env(s: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+#[expect(clippy::indexing_slicing)]
 mod tests {
     use glob::Pattern;
 
@@ -699,7 +721,10 @@ mod tests {
 
     #[test]
     fn extend() {
-        let base = never_profile(vec![("CPUQuota", str("50%")), ("ReadOnlyPaths", arr(&["/"]))]);
+        let base = never_profile(vec![
+            ("CPUQuota", str("50%")),
+            ("ReadOnlyPaths", arr(&["/"])),
+        ]);
         let mut child = profile(
             CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
             vec![("ReadWritePaths", arr(&["/tmp"]))],
@@ -850,7 +875,7 @@ mod tests {
     // ── arg variable tests ────────────────────────────────────────────────────
 
     fn args(s: &[&str]) -> Vec<String> {
-        s.iter().map(|s| s.to_string()).collect()
+        s.iter().map(ToString::to_string).collect()
     }
 
     #[test]
@@ -925,7 +950,10 @@ mod tests {
         let count = r
             .systemd_args
             .windows(2)
-            .filter(|w| w[0] == "-p" && w[1].starts_with("BindPaths="))
+            .filter(|w| {
+                assert!(w.len() == 2);
+                w[0] == "-p" && w[1].starts_with("BindPaths=")
+            })
             .count();
         assert_eq!(count, 1);
     }
@@ -973,7 +1001,7 @@ mod tests {
             "app",
             &args(&["--aa", "x", "--aa", "y", "--bb", "1", "--bb", "2"]),
         );
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     #[test]
@@ -1130,6 +1158,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::many_single_char_names)]
     fn multi_extend_diamond() {
         // A extends [B, C]; B and C both extend D.
         // Diamond inheritance must not cause a circular-extend error.
@@ -1138,7 +1167,10 @@ mod tests {
         b.extend = vec!["d".into()];
         let mut c = never_profile(vec![("CPUQuota", str("20%"))]);
         c.extend = vec!["d".into()];
-        let mut a = profile(CommandPattern::Exact("app".to_owned(), MatchTarget::Command), vec![]);
+        let mut a = profile(
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
+            vec![],
+        );
         a.extend = vec!["b".into(), "c".into()];
 
         let configs = make_configs(vec![("d", d), ("b", b), ("c", c), ("app", a)]);
@@ -1156,11 +1188,14 @@ mod tests {
         a.extend = vec!["b".into()];
         let mut b = never_profile(vec![]);
         b.extend = vec!["a".into()];
-        let mut child = profile(CommandPattern::Exact("app".to_owned(), MatchTarget::Command), vec![]);
+        let mut child = profile(
+            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
+            vec![],
+        );
         child.extend = vec!["a".into()];
 
         let configs = make_configs(vec![("a", a), ("b", b), ("app", child)]);
-        assert!(resolve(&configs, "app", &[]).is_err());
+        resolve(&configs, "app", &[]).unwrap_err();
     }
 
     #[test]
@@ -1169,7 +1204,10 @@ mod tests {
         use glob::Pattern;
         // Profile matches only when "commit" appears in the full command line.
         let p = profile(
-            CommandPattern::Glob(Pattern::new("git commit*").unwrap(), MatchTarget::FullCommand),
+            CommandPattern::Glob(
+                Pattern::new("git commit*").unwrap(),
+                MatchTarget::FullCommand,
+            ),
             vec![("CPUQuota", str("10%"))],
         );
         let configs = make_configs(vec![("git-commit-sandbox", p)]);

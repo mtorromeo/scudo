@@ -129,7 +129,11 @@ pub struct ProfileConfig {
     /// `None` = absent (use section name, exact).
     /// `Some([])` = never match.
     /// `Some([…])` = match with the listed pattern(s).
-    #[serde(rename = "match", default, deserialize_with = "deserialize_match_field")]
+    #[serde(
+        rename = "match",
+        default,
+        deserialize_with = "deserialize_match_field"
+    )]
     pub r#match: Option<Vec<MatchEntry>>,
     /// Profiles to inherit from, in left-to-right order (later entries take precedence).
     /// Accepts a single string or an array. Including this profile's own name extends from
@@ -207,19 +211,30 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
 /// - `Some([…])` → compiled entries
 fn build_patterns(name: &str, decl: Option<Vec<MatchEntry>>) -> Result<Vec<CommandPattern>> {
     let Some(entries) = decl else {
-        return Ok(vec![CommandPattern::Exact(name.to_owned(), MatchTarget::Command)]);
+        return Ok(vec![CommandPattern::Exact(
+            name.to_owned(),
+            MatchTarget::Command,
+        )]);
     };
-    entries.into_iter().map(|e| compile_entry(name, e)).collect()
+    entries
+        .into_iter()
+        .map(|e| compile_entry(name, e))
+        .collect()
 }
 
 fn compile_entry(name: &str, e: MatchEntry) -> Result<CommandPattern> {
     match e {
         MatchEntry::Simple(s) if s == "..." => Ok(CommandPattern::Sentinel),
         MatchEntry::Simple(s) => Ok(CommandPattern::Exact(s, MatchTarget::Command)),
-        MatchEntry::Extended { pattern, match_type, target } => match match_type {
-            MatchType::Exact => {
-                Ok(CommandPattern::Exact(pattern.unwrap_or_else(|| name.to_owned()), target))
-            }
+        MatchEntry::Extended {
+            pattern,
+            match_type,
+            target,
+        } => match match_type {
+            MatchType::Exact => Ok(CommandPattern::Exact(
+                pattern.unwrap_or_else(|| name.to_owned()),
+                target,
+            )),
             MatchType::Glob => {
                 let p = pattern
                     .with_context(|| format!("profile '{name}': glob match requires a pattern"))?;
@@ -313,6 +328,7 @@ fn config_search_paths() -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
+#[expect(clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -368,7 +384,7 @@ mod tests {
         )
         .unwrap();
 
-        let p = configs.0.get("app").unwrap();
+        let p = &configs.0["app"];
         assert_eq!(
             p.properties.get("CPUQuota"),
             Some(&toml::Value::String("50%".to_owned()))
@@ -391,7 +407,7 @@ mod tests {
         )
         .unwrap();
 
-        let p = configs.0.get("app").unwrap();
+        let p = &configs.0["app"];
         // Self-ref was dropped → extend is empty → only higher's own property
         assert!(p.extend.is_empty());
         assert_eq!(
@@ -422,7 +438,7 @@ mod tests {
         )
         .unwrap();
 
-        let p = configs.0.get("app").unwrap();
+        let p = &configs.0["app"];
         // extend should now reference the synthetic key (not "app")
         assert!(!p.extend.is_empty());
         assert_ne!(p.extend.first().map(String::as_str), Some("app"));
@@ -430,9 +446,10 @@ mod tests {
         // When resolved, both properties should appear
         let r = crate::profile::resolve(&configs, "app", &[]).unwrap();
         let has = |kv: &str| {
-            r.systemd_args
-                .windows(2)
-                .any(|w| w[0] == "-p" && w[1] == kv)
+            r.systemd_args.windows(2).any(|w| {
+                assert!(w.len() == 2);
+                w[0] == "-p" && w[1] == kv
+            })
         };
         assert!(has("CPUQuota=10%"), "inherited from lower");
         assert!(has("MemoryMax=256M"), "from higher");
