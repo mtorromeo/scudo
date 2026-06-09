@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 
-use std::{os::unix::process::CommandExt as _, path::PathBuf};
+use std::{
+    os::unix::process::CommandExt as _,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -38,23 +41,21 @@ fn main() -> Result<(), i32> {
 
 /// Find the canonicalized command searching in PATH, skipping any entries that are the same as the current executable.
 fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
-    if command.contains('/') {
-        if let Ok(candidate) = std::fs::canonicalize(command)
-            && candidate != *self_exe
+    let command = Path::new(command);
+    let command = command
+        .file_name()
+        .ok_or(anyhow::anyhow!("invalid command: {}", command.display()))?;
+
+    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
+        let candidate = PathBuf::from(dir).join(command);
+        if candidate.is_file()
+            && matches!(std::fs::canonicalize(&candidate), Ok(canonical) if canonical != *self_exe)
         {
             return Ok(candidate);
         }
-    } else {
-        for dir in std::env::var("PATH").unwrap_or_default().split(':') {
-            let candidate = PathBuf::from(dir).join(command);
-            if candidate.is_file()
-                && matches!(std::fs::canonicalize(&candidate), Ok(canonical) if canonical != *self_exe)
-            {
-                return Ok(candidate);
-            }
-        }
     }
-    anyhow::bail!("command not found: {command}")
+
+    anyhow::bail!("command not found: {}", command.display())
 }
 
 fn run() -> Result<()> {
