@@ -14,8 +14,9 @@ use core::{
 
 use clap::Parser;
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, Request,
+    AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
+    INodeNo, MountOption, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, Request, SessionACL,
 };
 
 const TTL: Duration = Duration::from_mins(1);
@@ -38,12 +39,12 @@ struct Args {
 }
 
 /// Derive a stable inode number from a filename. Avoids 0 (invalid) and 1 (root).
-fn name_to_ino(name: &OsStr) -> u64 {
+fn name_to_ino(name: &OsStr) -> INodeNo {
     let mut h = DefaultHasher::new();
     name.hash(&mut h);
     #[expect(clippy::integer_division_remainder_used)]
     let n = h.finish() % (u64::MAX - 2);
-    n.saturating_add(2)
+    INodeNo(n.saturating_add(2))
 }
 
 /// Returns true if `name` exists as an executable file in any of `dirs`.
@@ -64,7 +65,7 @@ fn gid() -> u32 {
 
 fn root_attr() -> FileAttr {
     FileAttr {
-        ino: 1,
+        ino: INodeNo(1),
         size: 0,
         blocks: 0,
         atime: std::time::UNIX_EPOCH,
@@ -93,10 +94,10 @@ struct ScudoShimsFS {
 impl ScudoShimsFS {
     /// Enumerate all executable files reachable via `path_dirs`, first-entry-wins per name.
     /// Returns tuples of `(filename, inode, kind)` including the `.` and `..` dot entries.
-    fn list_entries(&self) -> Vec<(OsString, u64, FileType)> {
+    fn list_entries(&self) -> Vec<(OsString, INodeNo, FileType)> {
         let mut entries = vec![
-            (OsString::from("."), 1u64, FileType::Directory),
-            (OsString::from(".."), 1u64, FileType::Directory),
+            (OsString::from("."), INodeNo(1), FileType::Directory),
+            (OsString::from(".."), INodeNo(1), FileType::Directory),
         ];
         let mut seen = std::collections::HashSet::new();
         for dir in &self.path_dirs {
@@ -119,7 +120,7 @@ impl ScudoShimsFS {
         entries
     }
 
-    fn symlink_attr(&self, ino: u64) -> FileAttr {
+    fn symlink_attr(&self, ino: INodeNo) -> FileAttr {
         FileAttr {
             ino,
             size: self.target.len() as u64,
@@ -142,40 +143,43 @@ impl ScudoShimsFS {
 
 impl Filesystem for ScudoShimsFS {
     /// Resolve a name in the root directory to a symlink only if the binary exists in path.
-    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        if parent != 1 || self.excluded.contains(name) || !find_in_path(name, &self.path_dirs) {
-            reply.error(libc::ENOENT);
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        if parent != INodeNo(1)
+            || self.excluded.contains(name)
+            || !find_in_path(name, &self.path_dirs)
+        {
+            reply.error(Errno::ENOENT);
             return;
         }
-        reply.entry(&TTL, &self.symlink_attr(name_to_ino(name)), 0);
+        reply.entry(&TTL, &self.symlink_attr(name_to_ino(name)), Generation(0));
     }
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
-        if ino == 1 {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        if ino == INodeNo(1) {
             reply.attr(&TTL, &root_attr());
         } else {
             reply.attr(&TTL, &self.symlink_attr(ino));
         }
     }
 
-    fn readlink(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyData) {
+    fn readlink(&self, _req: &Request, _ino: INodeNo, reply: ReplyData) {
         reply.data(self.target.as_bytes());
     }
 
-    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        reply.opened(0, 0);
+    fn opendir(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        reply.opened(FileHandle(0), FopenFlags::empty());
     }
 
     fn readdir(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        if ino != 1 {
-            reply.error(libc::ENOTDIR);
+        if ino != INodeNo(1) {
+            reply.error(Errno::ENOTDIR);
             return;
         }
         if self.disable_listing {
@@ -186,7 +190,7 @@ impl Filesystem for ScudoShimsFS {
         for (idx, (name, entry_ino, kind)) in
             self.list_entries().into_iter().enumerate().skip(start)
         {
-            let next_offset = i64::try_from(idx.saturating_add(1)).unwrap_or(i64::MAX);
+            let next_offset = u64::try_from(idx.saturating_add(1)).unwrap_or(u64::MAX);
             if reply.add(entry_ino, next_offset, kind, &name) {
                 break;
             }
@@ -194,11 +198,11 @@ impl Filesystem for ScudoShimsFS {
         reply.ok();
     }
 
-    fn access(&mut self, _req: &Request<'_>, _ino: u64, mask: i32, reply: ReplyEmpty) {
-        if mask & libc::W_OK != 0i32 {
-            reply.error(libc::EACCES);
-        } else {
+    fn access(&self, _req: &Request, _ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+        if mask & AccessFlags::W_OK == AccessFlags::F_OK {
             reply.ok();
+        } else {
+            reply.error(Errno::EACCES);
         }
     }
 }
@@ -230,11 +234,13 @@ fn main() -> Result<(), i32> {
         .filter(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) != mountpoint_real)
         .collect();
 
-    let options = [
+    let mut options = Config::default();
+    options.mount_options = vec![
         MountOption::RO,
         MountOption::FSName("scudo-shims".to_owned()),
         MountOption::AutoUnmount,
     ];
+    options.acl = SessionACL::All;
 
     // Build the set of basenames that must never be shimmed:
     //   - systemd-run: the tool scudo invokes internally

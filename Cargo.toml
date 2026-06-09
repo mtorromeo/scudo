@@ -53,12 +53,12 @@ anyhow = "1"
 glob = "0.3"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
-similar = "2"
-toml = { version = "0.8", features = ["display"] }
+similar = "3"
+toml = { version = "1", features = ["display"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-fuser = "0.14"
+fuser = "0.17"
 libc = "0.2"
 
 [profile.release]
