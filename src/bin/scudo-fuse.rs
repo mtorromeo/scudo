@@ -239,6 +239,9 @@ fn main() -> Result<(), i32> {
         MountOption::RO,
         MountOption::FSName("scudo-shims".to_owned()),
         MountOption::AutoUnmount,
+        MountOption::NoAtime,
+        MountOption::NoDev,
+        MountOption::NoExec,
     ];
     options.acl = SessionACL::All;
 
