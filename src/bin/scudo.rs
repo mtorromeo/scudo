@@ -3,6 +3,7 @@
 use std::{
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
+    process::exit,
 };
 
 use anyhow::Result;
@@ -31,12 +32,11 @@ struct Args {
     command_args: Vec<String>,
 }
 
-fn main() -> Result<(), i32> {
+fn main() {
     if let Err(e) = run() {
         eprintln!("scudo: {e:#}");
-        return Err(1);
+        exit(1);
     }
-    Ok(())
 }
 
 /// Find the canonicalized command searching in PATH, skipping any entries that are the same as the current executable.

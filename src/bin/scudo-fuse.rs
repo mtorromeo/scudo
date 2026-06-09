@@ -5,6 +5,7 @@ use std::{
     hash::DefaultHasher,
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::PathBuf,
+    process::exit,
 };
 
 use core::{
@@ -207,7 +208,7 @@ impl Filesystem for ScudoShimsFS {
     }
 }
 
-fn main() -> Result<(), i32> {
+fn main() {
     let args = Args::parse();
 
     let target = args
@@ -270,8 +271,6 @@ fn main() -> Result<(), i32> {
         &options,
     ) {
         eprintln!("scudo-fuse: mount failed: {e}");
-        return Err(1);
+        exit(1);
     }
-
-    Ok(())
 }
