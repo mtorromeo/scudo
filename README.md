@@ -5,7 +5,17 @@ scudo wraps commands with [`systemd-run`](https://www.freedesktop.org/software/s
 ## Usage
 
 ```
-scudo <command> [args...]
+Usage: scudo [OPTIONS] <COMMAND> [COMMAND_ARGS]...
+
+Arguments:
+  <COMMAND>          
+  [COMMAND_ARGS]...  
+
+Options:
+      --debug    Enable debug output
+      --confirm  Confirm before running the command
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 **Via symlink** — scudo detects it is being called through a symlink and selects the matching profile automatically:
