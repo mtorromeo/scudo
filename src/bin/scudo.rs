@@ -41,6 +41,16 @@ fn main() {
 
 /// Find the canonicalized command searching in PATH, skipping any entries that are the same as the current executable.
 fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
+    if command.contains('/')
+        && let Ok(candidate) = std::fs::canonicalize(command)
+        && candidate != *self_exe
+    {
+        if let Ok(absolute) = std::path::absolute(Path::new(command)) {
+            return Ok(absolute);
+        }
+        return Ok(candidate);
+    }
+
     let command = Path::new(command);
     let command = command
         .file_name()

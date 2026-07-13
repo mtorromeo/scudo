@@ -460,7 +460,7 @@ fn build_args(
     match_log: Vec<String>,
     arg_vars: &ArgVars,
 ) -> Result<ResolvedProfile> {
-    let mut args: Vec<String> = Vec::new();
+    let mut args = Vec::new();
 
     for (key, val) in properties {
         let path_prop = is_path_property(key);
