@@ -226,6 +226,18 @@ If the lower-priority profile has `final = true`, it cannot be used as a base. T
 
 String values (including array elements) support `$VAR` and `${VAR}` expansion using the environment of the calling process. A reference to an undefined variable is an error.
 
+#### `$SCUDO_CONFIG_DIR`
+
+Inside a profile, `$SCUDO_CONFIG_DIR` (also `${SCUDO_CONFIG_DIR}`) expands to the absolute path of the directory containing the config file that profile was defined in. This is resolved per file, so a profile in `/etc/scudo/config.toml` sees `/etc/scudo`, while one in a project's `.scudo.toml` sees that project directory. It is handy for referencing files that live next to the config:
+
+```toml
+[myapp]
+exec = "$SCUDO_CONFIG_DIR/wrapper.sh"
+BindReadOnlyPaths = ["$SCUDO_CONFIG_DIR/allowlist.txt"]
+```
+
+The value is substituted when the config is loaded, before `$arg_*` and other `$VAR` expansion. When a profile inherits values via `extend`, each inherited value keeps the config dir of the file it was written in.
+
 ### Command argument variables
 
 Profile values can also reference the arguments of the command being run. These variables all start with `$arg_` and are silently empty if the corresponding argument was not passed (unlike environment variables, which are an error when undefined). Empty strings produced by absent argument variables are filtered out from arrays.

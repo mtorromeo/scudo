@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::VarError, path::PathBuf};
+use std::{collections::HashMap, env::VarError, path::PathBuf, sync::OnceLock};
 
 use anyhow::{Context as _, Result};
 use glob::Pattern;
@@ -253,6 +253,64 @@ fn compile_entry(name: &str, e: MatchEntry) -> Result<CommandPattern> {
     }
 }
 
+/// The variable name that expands to the directory containing the config file a
+/// profile was defined in. Scudo-namespaced and uppercase to minimise the chance
+/// of colliding with a real environment variable.
+const CONFIG_DIR_VAR: &str = "SCUDO_CONFIG_DIR";
+
+/// Replace `$SCUDO_CONFIG_DIR` / `${SCUDO_CONFIG_DIR}` references in `s` with `dir`.
+///
+/// The `$SCUDO_CONFIG_DIR` (unbraced) form uses a trailing word boundary so it
+/// won't swallow a longer identifier such as `$SCUDO_CONFIG_DIRECTORY`. Uses a
+/// replacement closure so any `$` in `dir` is treated literally rather than as a
+/// capture reference.
+fn substitute_config_dir_str(s: &str, dir: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(&format!(r"\$\{{{CONFIG_DIR_VAR}\}}|\${CONFIG_DIR_VAR}\b"))
+            .expect("regex is valid")
+    });
+    re.replace_all(s, |_: &regex::Captures| dir.to_owned())
+        .into_owned()
+}
+
+/// Recursively substitute `$SCUDO_CONFIG_DIR` in every string within `value`.
+fn substitute_config_dir(value: &mut toml::Value, dir: &str) {
+    match value {
+        toml::Value::String(s) => {
+            if s.contains(CONFIG_DIR_VAR) {
+                *s = substitute_config_dir_str(s, dir);
+            }
+        }
+        toml::Value::Array(arr) => {
+            for item in arr {
+                substitute_config_dir(item, dir);
+            }
+        }
+        toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_)
+        | toml::Value::Table(_) => {}
+    }
+}
+
+/// Substitute the config-dir variable in all of a profile's string values.
+///
+/// Done eagerly, per config file, because once profiles from different files are
+/// merged (via `extend` or multiple matches) we can no longer tell which file a
+/// given property came from.
+fn substitute_profile_config_dir(profile: &mut ProfileConfig, dir: &str) {
+    for value in profile.properties.values_mut() {
+        substitute_config_dir(value, dir);
+    }
+    if let Some(exec) = profile.exec.as_mut()
+        && exec.contains(CONFIG_DIR_VAR)
+    {
+        *exec = substitute_config_dir_str(exec, dir);
+    }
+}
+
 /// Load and merge configs from all search paths (lowest to highest priority).
 pub fn load_configs() -> Result<ValidatedConfigMap> {
     let mut merged: ConfigMap = HashMap::new();
@@ -272,8 +330,16 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
         let file_configs: ConfigMap =
             toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
 
+        // Directory containing this config file — the value of `$SCUDO_CONFIG_DIR`
+        // for every profile defined in it.
+        let config_dir = path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
         let mut synthetic_counter: HashMap<String, usize> = HashMap::new();
         for (name, mut new_profile) in file_configs {
+            substitute_profile_config_dir(&mut new_profile, &config_dir);
             // Check for self-reference in extend list.
             let self_pos = new_profile.extend.iter().position(|e| e == &name);
             if let Some(pos) = self_pos {
@@ -414,6 +480,52 @@ mod tests {
             p.properties.get("CPUQuota"),
             Some(&toml::Value::String("50%".to_owned()))
         );
+    }
+
+    #[test]
+    fn config_dir_substitution() {
+        // The unbraced and braced forms both expand; a longer identifier that
+        // merely starts with the variable name is left untouched.
+        assert_eq!(
+            substitute_config_dir_str("$SCUDO_CONFIG_DIR/bin", "/etc/scudo"),
+            "/etc/scudo/bin"
+        );
+        assert_eq!(
+            substitute_config_dir_str("${SCUDO_CONFIG_DIR}/bin", "/etc/scudo"),
+            "/etc/scudo/bin"
+        );
+        assert_eq!(
+            substitute_config_dir_str("$SCUDO_CONFIG_DIRECTORY", "/etc/scudo"),
+            "$SCUDO_CONFIG_DIRECTORY"
+        );
+    }
+
+    #[test]
+    fn config_dir_substitution_in_profile() {
+        let mut props = HashMap::new();
+        props.insert(
+            "BindReadOnlyPaths".to_owned(),
+            toml::Value::Array(vec![
+                toml::Value::String("$SCUDO_CONFIG_DIR/allow.txt".to_owned()),
+                toml::Value::String("/other".to_owned()),
+            ]),
+        );
+        let mut profile = ProfileConfig {
+            exec: Some("$SCUDO_CONFIG_DIR/wrapper.sh".to_owned()),
+            properties: props,
+            ..Default::default()
+        };
+
+        substitute_profile_config_dir(&mut profile, "/home/user");
+
+        assert_eq!(
+            profile.properties.get("BindReadOnlyPaths"),
+            Some(&toml::Value::Array(vec![
+                toml::Value::String("/home/user/allow.txt".to_owned()),
+                toml::Value::String("/other".to_owned()),
+            ]))
+        );
+        assert_eq!(profile.exec.as_deref(), Some("/home/user/wrapper.sh"));
     }
 
     #[test]
