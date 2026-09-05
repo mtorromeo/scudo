@@ -184,3 +184,9 @@ else
     echo "installed without scudo-bpfd (built without the bpf feature)"
 fi
 '''
+
+[tasks.archive-source]
+description = "Archive the source code"
+category = "Development"
+script_runner = "@shell"
+script = 'git archive --format=tar.gz --prefix=scudo/ --output=packaging/scudo.tar.gz HEAD'

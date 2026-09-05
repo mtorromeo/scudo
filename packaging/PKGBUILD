@@ -6,18 +6,18 @@ pkgrel=1
 pkgdesc='Run commands sandboxed via systemd-run with per-command resource and permission profiles'
 arch=('x86_64')
 url='https://github.com/mtorromeo/scudo'
-license=('MIT OR Apache-2.0')
+license=('MIT' 'Apache-2.0')
 depends=('glibc' 'gcc-libs' 'systemd' 'fuse3')
 # rustup rather than rust: the eBPF programs are built with -Z build-std, which
 # needs a nightly toolchain with rust-src. The two packages conflict, so this
 # has to be the one that provides both.
-makedepends=('rustup' 'bpf-linker')
-install="$pkgname.install"
-source=("https://github.com/mtorromeo/scudo/archive/refs/tags/v$pkgver/$pkgname-$pkgver.tar.gz")
+makedepends=('rustup' 'cargo-binstall')
+# source=("https://github.com/mtorromeo/scudo/archive/refs/tags/v$pkgver/$pkgname-$pkgver.tar.gz")
+source=("$pkgname.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
-    cd $pkgname-$pkgver
+    cd $pkgname
 
     # scudo builds on stable; its build script shells out to nightly to compile
     # the eBPF crate for bpfel-unknown-none, a tier 3 target whose core has to be
@@ -25,11 +25,15 @@ prepare() {
     rustup toolchain install --profile minimal stable
     rustup toolchain install --profile minimal --component rust-src nightly
 
+    # arch's bpf-linker is linked against a different version of llvm then
+    # the one used by rust nightly, so we need to install from source.
+    cargo binstall --disable-telemetry --no-confirm bpf-linker
+
     cargo fetch --locked
 }
 
 build() {
-    cd $pkgname-$pkgver
+    cd $pkgname
 
     # `rustup run nightly`, which the build script uses for the eBPF crate, wins
     # over this, so pinning stable here does not get in its way.
@@ -38,7 +42,7 @@ build() {
 }
 
 check() {
-    cd $pkgname-$pkgver
+    cd $pkgname
 
     export RUSTUP_TOOLCHAIN=stable
     # The integration tests are #[ignore]d and stay that way here: they attach
@@ -47,15 +51,14 @@ check() {
 }
 
 package() {
-    cd $pkgname-$pkgver
+    cd $pkgname
 
     install -Dm0755 target/release/scudo "$pkgdir/usr/bin/scudo"
     install -Dm0755 target/release/scudo-fuse "$pkgdir/usr/bin/scudo-fuse"
     install -Dm0755 target/release/scudo-bpfd "$pkgdir/usr/bin/scudo-bpfd"
 
     # scudo-bpfd exists precisely because a user service manager may not load BPF
-    # programs, so without these capabilities it can do nothing at all. fakeroot
-    # records them and pacman puts them back on install.
+    # programs, so without these capabilities it can do nothing at all.
     setcap cap_bpf,cap_net_admin=ep "$pkgdir/usr/bin/scudo-bpfd"
 
     install -Dm0644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service \

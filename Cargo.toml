@@ -107,4 +107,4 @@ codegen-units = 1
 panic = "abort"
 
 [profile.dev]
-verbose = 0
+debug = 0
