@@ -12,7 +12,7 @@ use crate::config::{
 pub struct ResolvedProfile {
     pub systemd_args: Vec<String>,
     pub exec: Option<String>,
-    pub debug: bool,
+    pub verbose: bool,
     pub confirm: bool,
     pub match_log: Vec<String>,
 }
@@ -27,7 +27,7 @@ type ArgVars = HashMap<String, Vec<String>>;
 #[derive(Debug, Default)]
 struct ProfileMeta {
     exec: Option<String>,
-    debug: Option<bool>,
+    verbose: Option<bool>,
     confirm: Option<bool>,
     arg_aliases: ArgAliases,
     arg_flags: Vec<String>,
@@ -141,7 +141,7 @@ pub fn resolve_with(
         let (props, m) = expand_extend(configs, profile, &mut Vec::new(), &mut match_log, 0)?;
         merge_into(&mut merged, props)?;
         meta.exec = m.exec.or(meta.exec);
-        meta.debug = m.debug.or(meta.debug);
+        meta.verbose = m.verbose.or(meta.verbose);
         meta.confirm = m.confirm.or(meta.confirm);
         meta.arg_aliases.extend(m.arg_aliases);
         meta.arg_flags.extend(m.arg_flags);
@@ -286,7 +286,7 @@ fn expand_extend(
         merge_into(&mut base, parent_props)?;
         // Later parent (rightmost) wins for scalar meta fields.
         base_meta.exec = parent_meta.exec.or(base_meta.exec);
-        base_meta.debug = parent_meta.debug.or(base_meta.debug);
+        base_meta.verbose = parent_meta.verbose.or(base_meta.verbose);
         base_meta.confirm = parent_meta.confirm.or(base_meta.confirm);
         base_meta.arg_aliases.extend(parent_meta.arg_aliases);
         base_meta.arg_flags.extend(parent_meta.arg_flags);
@@ -300,7 +300,7 @@ fn expand_extend(
 
     let meta = ProfileMeta {
         exec: profile.exec.clone().or(base_meta.exec),
-        debug: profile.debug.or(base_meta.debug),
+        verbose: profile.verbose.or(base_meta.verbose),
         confirm: profile.confirm.or(base_meta.confirm),
         arg_aliases: merged_aliases,
         arg_flags: merged_flags,
@@ -537,7 +537,7 @@ fn build_args(
     Ok(ResolvedProfile {
         systemd_args: args,
         exec: meta.exec,
-        debug: meta.debug.unwrap_or(false),
+        verbose: meta.verbose.unwrap_or(false),
         confirm: meta.confirm.unwrap_or(false),
         match_log,
     })
@@ -701,7 +701,7 @@ mod tests {
         ValidatedProfileConfig {
             extend: vec![],
             exec: None,
-            debug: None,
+            verbose: None,
             confirm: None,
             pattern: vec![pattern],
             arg_aliases: HashMap::new(),
@@ -715,7 +715,7 @@ mod tests {
             pattern: vec![],
             extend: vec![],
             exec: None,
-            debug: None,
+            verbose: None,
             confirm: None,
             arg_aliases: HashMap::new(),
             arg_flags: vec![],

@@ -13,9 +13,9 @@ use clap::Parser;
 #[command(about, version, author)]
 #[expect(clippy::struct_field_names)]
 struct Args {
-    /// Enable debug output.
-    #[arg(long)]
-    debug: bool,
+    /// Enable verbose output.
+    #[arg(short, long)]
+    verbose: bool,
 
     /// Confirm before running the command.
     #[arg(long)]
@@ -110,15 +110,15 @@ fn run() -> Result<()> {
         },
     )?;
 
-    if args.debug {
-        resolved.debug = true;
+    if args.verbose {
+        resolved.verbose = true;
     }
 
     if args.confirm {
         resolved.confirm = true;
     }
 
-    if resolved.debug {
+    if resolved.verbose {
         for line in &resolved.match_log {
             eprintln!("scudo: {line}");
         }
@@ -134,7 +134,7 @@ fn run() -> Result<()> {
         .extend(args.property.iter().map(|p| format!("--property={p}")));
 
     if resolved.systemd_args.is_empty() {
-        if resolved.debug {
+        if resolved.verbose {
             eprintln!(
                 "scudo: warning: no profile matched or empty systemd-run options for '{}'",
                 args.command
@@ -150,7 +150,7 @@ fn run() -> Result<()> {
         &bin,
         &args.command_args,
         &resolved.systemd_args,
-        resolved.debug,
+        resolved.verbose,
         resolved.confirm,
     )
 }

@@ -146,7 +146,7 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub r#final: bool,
     pub exec: Option<String>,
-    pub debug: Option<bool>,
+    pub verbose: Option<bool>,
     pub confirm: Option<bool>,
     /// Maps variable names to the flag(s) that populate them.
     #[serde(default)]
@@ -167,7 +167,7 @@ pub struct ValidatedProfileConfig {
     pub pattern: Vec<CommandPattern>,
     pub extend: Vec<String>,
     pub exec: Option<String>,
-    pub debug: Option<bool>,
+    pub verbose: Option<bool>,
     pub confirm: Option<bool>,
     pub arg_aliases: ArgAliases,
     pub arg_flags: Vec<String>,
@@ -191,7 +191,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                         pattern,
                         extend: config.extend,
                         exec: config.exec,
-                        debug: config.debug,
+                        verbose: config.verbose,
                         confirm: config.confirm,
                         arg_aliases: config.arg_aliases,
                         arg_flags: config.arg_flags,

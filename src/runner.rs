@@ -6,13 +6,13 @@ pub fn exec(
     command: &Path,
     args: &[String],
     systemd_args: &[String],
-    debug: bool,
+    verbose: bool,
     confirm: bool,
 ) -> Result<()> {
     let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
     cmd.args(["--user", "--wait", "-Pdt"]).args(systemd_args);
 
-    if !debug {
+    if !verbose {
         cmd.arg("-q");
     }
 
@@ -20,7 +20,7 @@ pub fn exec(
 
     let interactive = std::io::stdin().is_terminal();
 
-    if debug || (confirm && interactive) {
+    if verbose || (confirm && interactive) {
         let cmdline = core::iter::once(cmd.get_program())
             .chain(cmd.get_args())
             .map(shell_quote)
