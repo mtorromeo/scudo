@@ -22,8 +22,16 @@ struct Args {
     confirm: bool,
 
     /// Set a property for the systemd-run command.
-    #[arg(short, long, value_name = "PROPERTY=VALUE")]
+    #[arg(short = 'P', long, value_name = "PROPERTY=VALUE")]
     property: Vec<String>,
+
+    /// Apply the named profile, ignoring its match rules (repeatable, comma-separated).
+    #[arg(short, long, value_name = "NAME", value_delimiter = ',')]
+    profile: Vec<String>,
+
+    /// Skip profile matching; apply only the profiles given with --profile.
+    #[arg(long)]
+    no_match: bool,
 
     #[arg()]
     command: String,
@@ -92,7 +100,15 @@ fn run() -> Result<()> {
     let bin = which(&args.command, &self_exe)?;
 
     let configs = scudo::config::load_configs()?;
-    let mut resolved = scudo::profile::resolve(&configs, &args.command, &args.command_args)?;
+    let mut resolved = scudo::profile::resolve_with(
+        &configs,
+        &args.command,
+        &args.command_args,
+        scudo::profile::ResolveOptions {
+            profiles: &args.profile,
+            no_match: args.no_match,
+        },
+    )?;
 
     if args.debug {
         resolved.debug = true;

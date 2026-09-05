@@ -33,6 +33,16 @@ struct ProfileMeta {
     arg_flags: Vec<String>,
 }
 
+/// Options controlling which profiles [`resolve_with`] applies.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResolveOptions<'a> {
+    /// Profiles selected explicitly on the command line. They are applied after any
+    /// matched profiles, so they take precedence; order is significant (later wins).
+    pub profiles: &'a [String],
+    /// Skip pattern matching entirely; only `profiles` are applied.
+    pub no_match: bool,
+}
+
 /// Collect all profiles that match `command`, merge them in priority order
 /// (glob < regex < exact), and build the systemd-run argument list.
 pub fn resolve(
@@ -40,49 +50,72 @@ pub fn resolve(
     command: &str,
     command_args: &[String],
 ) -> Result<ResolvedProfile> {
+    resolve_with(configs, command, command_args, ResolveOptions::default())
+}
+
+/// Like [`resolve`], but honouring explicit profile selection from the command line.
+///
+/// Explicitly selected profiles are appended after the matched ones, so they override
+/// them. A profile that both matches and is selected explicitly is applied only once,
+/// in its explicit position.
+pub fn resolve_with(
+    configs: &ValidatedConfigMap,
+    command: &str,
+    command_args: &[String],
+    opts: ResolveOptions<'_>,
+) -> Result<ResolvedProfile> {
+    // Resolved first so an unknown name fails before anything else happens.
+    let selected = select_profiles(configs, opts.profiles)?;
+
     let mut exact_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
     let mut glob_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
     let mut regex_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
 
-    let full_command: String = core::iter::once(command)
-        .chain(command_args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
+    if !opts.no_match {
+        let full_command: String = core::iter::once(command)
+            .chain(command_args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
 
-    let matches_cmd = |p: &CommandPattern| {
-        let subject = |t: &MatchTarget| match t {
-            MatchTarget::Command => command,
-            MatchTarget::FullCommand => full_command.as_str(),
+        let matches_cmd = |p: &CommandPattern| {
+            let subject = |t: &MatchTarget| match t {
+                MatchTarget::Command => command,
+                MatchTarget::FullCommand => full_command.as_str(),
+            };
+            match p {
+                CommandPattern::Exact(s, t) => s == subject(t),
+                CommandPattern::Glob(g, t) => g.matches(subject(t)),
+                CommandPattern::Regex(r, t) => r.is_match(subject(t)),
+                CommandPattern::Sentinel => false,
+            }
         };
-        match p {
-            CommandPattern::Exact(s, t) => s == subject(t),
-            CommandPattern::Glob(g, t) => g.matches(subject(t)),
-            CommandPattern::Regex(r, t) => r.is_match(subject(t)),
-            CommandPattern::Sentinel => false,
-        }
-    };
 
-    for (name, profile) in &configs.0 {
-        let resolved = if profile
-            .pattern
-            .iter()
-            .any(|p| matches!(p, CommandPattern::Sentinel))
-        {
-            resolve_patterns(configs, profile, &mut vec![])?
-        } else {
-            profile.pattern.clone()
-        };
-        if !resolved.iter().all(matches_cmd) {
-            continue;
-        }
-        match resolved
-            .iter()
-            .find(|p| !matches!(p, CommandPattern::Sentinel))
-        {
-            Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
-            Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
-            Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
-            _ => {}
+        for (name, profile) in &configs.0 {
+            // Already selected explicitly — applied later, in its explicit position.
+            if selected.iter().any(|(n, _)| *n == name.as_str()) {
+                continue;
+            }
+            let resolved = if profile
+                .pattern
+                .iter()
+                .any(|p| matches!(p, CommandPattern::Sentinel))
+            {
+                resolve_patterns(configs, profile, &mut vec![])?
+            } else {
+                profile.pattern.clone()
+            };
+            if !resolved.iter().all(matches_cmd) {
+                continue;
+            }
+            match resolved
+                .iter()
+                .find(|p| !matches!(p, CommandPattern::Sentinel))
+            {
+                Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
+                Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
+                Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
+                _ => {}
+            }
         }
     }
 
@@ -90,13 +123,20 @@ pub fn resolve(
     let mut merged = Properties::new();
     let mut meta = ProfileMeta::default();
 
-    for (name, profile) in glob_matches
+    let chain = glob_matches
         .iter()
         .chain(regex_matches.iter())
         .chain(exact_matches.iter())
-    {
-        let (kind, pattern) = match_description(&profile.pattern);
-        match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
+        .map(|entry| (entry, false))
+        .chain(selected.iter().map(|entry| (entry, true)));
+
+    for ((name, profile), explicit) in chain {
+        if explicit {
+            match_log.push(format!("profile '{name}' selected explicitly"));
+        } else {
+            let (kind, pattern) = match_description(&profile.pattern);
+            match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
+        }
 
         let (props, m) = expand_extend(configs, profile, &mut Vec::new(), &mut match_log, 0)?;
         merge_into(&mut merged, props)?;
@@ -109,6 +149,30 @@ pub fn resolve(
 
     let arg_vars = parse_command_args(command_args, &meta.arg_aliases, &meta.arg_flags);
     build_args(&merged, meta, match_log, &arg_vars)
+}
+
+/// Look up explicitly requested profile names, preserving order and dropping duplicates.
+///
+/// An unknown name is an error: silently ignoring it would run the command with less
+/// sandboxing than the user asked for. Synthetic keys created by cross-file self-extend
+/// (see `config::load_configs`) contain a NUL and are deliberately not selectable.
+fn select_profiles<'a>(
+    configs: &'a ValidatedConfigMap,
+    names: &[String],
+) -> Result<Vec<(&'a str, &'a ValidatedProfileConfig)>> {
+    let mut selected: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
+    for name in names {
+        if selected.iter().any(|(n, _)| *n == name.as_str()) {
+            continue;
+        }
+        let (key, profile) = configs
+            .0
+            .get_key_value(name.as_str())
+            .filter(|(key, _)| !key.contains('\0'))
+            .with_context(|| format!("profile '{name}' not found"))?;
+        selected.push((key.as_str(), profile));
+    }
+    Ok(selected)
 }
 
 fn match_description(patterns: &[CommandPattern]) -> (&'static str, String) {
@@ -951,7 +1015,7 @@ mod tests {
             .systemd_args
             .windows(2)
             .filter(|w| {
-                assert!(w.len() == 2);
+                assert_eq!(w.len(), 2);
                 w[0] == "-p" && w[1].starts_with("BindPaths=")
             })
             .count();
@@ -1223,5 +1287,124 @@ mod tests {
         // Does not match on command name alone (without matching args).
         let r = resolve(&configs, "git", &[]).unwrap();
         assert!(r.systemd_args.is_empty());
+    }
+    // ── explicit profile selection tests ──────────────────────────────────────
+
+    fn select(profiles: &[String], no_match: bool) -> ResolveOptions<'_> {
+        ResolveOptions { profiles, no_match }
+    }
+
+    #[test]
+    fn explicit_profile_bypasses_match() {
+        // A profile that never matches on its own is applied when named explicitly.
+        let configs = make_configs(vec![(
+            "netblock",
+            never_profile(vec![("PrivateNetwork", Value::Boolean(true))]),
+        )]);
+        let names = args(&["netblock"]);
+        let r = resolve_with(&configs, "curl", &[], select(&names, false)).unwrap();
+        assert!(has_arg(&r.systemd_args, "PrivateNetwork=yes"));
+    }
+
+    #[test]
+    fn explicit_profile_appended_to_matches() {
+        // Matched profiles still apply; the explicit one wins on conflicting keys.
+        let matched = profile(
+            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
+            vec![("MemoryMax", str("1G")), ("CPUQuota", str("10%"))],
+        );
+        let extra = never_profile(vec![("MemoryMax", str("2G"))]);
+        let configs = make_configs(vec![("curl", matched), ("extra", extra)]);
+
+        let names = args(&["extra"]);
+        let r = resolve_with(&configs, "curl", &[], select(&names, false)).unwrap();
+        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
+        assert!(has_arg(&r.systemd_args, "MemoryMax=2G"));
+        assert!(!has_arg(&r.systemd_args, "MemoryMax=1G"));
+    }
+
+    #[test]
+    fn no_match_ignores_matching_profiles() {
+        let matched = profile(
+            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
+            vec![("CPUQuota", str("10%"))],
+        );
+        let extra = never_profile(vec![("MemoryMax", str("2G"))]);
+        let configs = make_configs(vec![("curl", matched), ("extra", extra)]);
+
+        let names = args(&["extra"]);
+        let r = resolve_with(&configs, "curl", &[], select(&names, true)).unwrap();
+        assert!(has_arg(&r.systemd_args, "MemoryMax=2G"));
+        assert!(!has_arg(&r.systemd_args, "CPUQuota=10%"));
+    }
+
+    #[test]
+    fn no_match_without_profiles_is_empty() {
+        let configs = make_configs(vec![(
+            "curl",
+            profile(
+                CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
+                vec![("CPUQuota", str("10%"))],
+            ),
+        )]);
+        let r = resolve_with(&configs, "curl", &[], select(&[], true)).unwrap();
+        assert!(r.systemd_args.is_empty());
+    }
+
+    #[test]
+    fn explicit_profile_not_found_errors() {
+        let configs = make_configs(vec![("base", never_profile(vec![]))]);
+        let names = args(&["bsae"]);
+        resolve_with(&configs, "curl", &[], select(&names, false)).unwrap_err();
+    }
+
+    #[test]
+    fn explicit_synthetic_name_not_selectable() {
+        // Keys generated by cross-file self-extend must stay internal.
+        let synthetic = "\u{0}app\u{0}0";
+        let configs = make_configs(vec![(
+            synthetic,
+            never_profile(vec![("CPUQuota", str("10%"))]),
+        )]);
+        let names = args(&[synthetic]);
+        resolve_with(&configs, "app", &[], select(&names, false)).unwrap_err();
+    }
+
+    #[test]
+    fn explicit_profile_deduped_against_match() {
+        // A profile that both matches and is named explicitly is applied once only.
+        let configs = make_configs(vec![(
+            "app",
+            profile(
+                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
+                vec![("CPUQuota", str("10%"))],
+            ),
+        )]);
+        let names = args(&["app", "app"]);
+        let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
+
+        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
+        let mentions = r
+            .match_log
+            .iter()
+            .filter(|line| line.starts_with("profile 'app'"))
+            .count();
+        assert_eq!(mentions, 1);
+        assert!(
+            r.match_log
+                .iter()
+                .any(|l| l.contains("selected explicitly"))
+        );
+    }
+
+    #[test]
+    fn explicit_profiles_applied_in_cli_order() {
+        let a = never_profile(vec![("CPUQuota", str("10%"))]);
+        let b = never_profile(vec![("CPUQuota", str("20%"))]);
+        let configs = make_configs(vec![("a", a), ("b", b)]);
+
+        let names = args(&["a", "b"]);
+        let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
+        assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
     }
 }

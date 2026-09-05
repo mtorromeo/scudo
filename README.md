@@ -12,9 +12,11 @@ Arguments:
   [COMMAND_ARGS]...  
 
 Options:
-      --debug                      Enable debug output
+  -v, --verbose                    Enable verbose output
       --confirm                    Confirm before running the command
-  -p, --property <PROPERTY=VALUE>  Set a property for the systemd-run command
+  -P, --property <PROPERTY=VALUE>  Set a property for the systemd-run command
+  -p, --profile <NAME>             Apply the named profile, ignoring its match rules (repeatable, comma-separated)
+      --no-match                   Skip profile matching; apply only the profiles given with --profile
   -h, --help                       Print help
   -V, --version                    Print version
 ```
@@ -192,6 +194,29 @@ When multiple profiles match the same command, they are merged in order of incre
 > ```
 >
 > The `"git"` entry matches exactly the `git` binary (command name only). The regex entry then checks whether the word `commit` appears anywhere in the full command line, regardless of any flags that precede it. `\bcommit\b` uses word boundaries so it does not accidentally match similar words like `commitlint` or `committed`. Of course this can still erroneously match when the word `commit` appears in other contexts but security-wise it is better to err on the side of caution and assume the word `commit` is a command name.
+
+### Selecting profiles explicitly
+
+`--profile <NAME>` applies a profile by name, whatever its `match` field says — including base profiles declared with `match = []`. It is repeatable and also accepts a comma-separated list. Named profiles are applied *after* the ones that matched, so they take precedence; among themselves they are applied in the order given on the command line, with the last one winning.
+
+`--no-match` skips pattern matching altogether. Combined with `--profile` it means "use exactly these profiles and nothing else"; on its own it runs the command with no profile at all.
+
+| Invocation | Profiles applied |
+|------------|------------------|
+| `scudo --profile netblock -- curl https://example.com` | everything matching `curl`, then `netblock` |
+| `scudo --profile a,b -- curl https://example.com` | matches for `curl`, then `a`, then `b` |
+| `scudo --no-match --profile netblock -- curl https://example.com` | only `netblock` |
+| `scudo --no-match -- curl https://example.com` | none — the command is executed directly, without `systemd-run` |
+| `scudo --no-match -p MemoryMax=1G -- curl https://example.com` | none, but `systemd-run` still runs with the explicit property |
+
+A profile that both matches and is named explicitly is applied only once, in its explicit position. An unknown profile name is a fatal error: scudo exits with status 1 without running the command, rather than running it with less sandboxing than was asked for.
+
+```
+$ scudo --profile snadboxed -- curl https://example.com
+scudo: profile 'snadboxed' not found
+```
+
+Both flags belong to scudo itself, so they are only available through the explicit `scudo <command>` form. When scudo is invoked through a symlink or the FUSE shim, every argument belongs to the wrapped command.
 
 ### Array extension
 

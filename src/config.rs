@@ -559,7 +559,7 @@ mod tests {
         let r = crate::profile::resolve(&configs, "app", &[]).unwrap();
         let has = |kv: &str| {
             r.systemd_args.windows(2).any(|w| {
-                assert!(w.len() == 2);
+                assert_eq!(w.len(), 2);
                 w[0] == "-p" && w[1] == kv
             })
         };
