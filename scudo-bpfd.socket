@@ -1,0 +1,11 @@
+[Unit]
+Description=scudo policy enforcement daemon socket
+
+[Socket]
+# Same runtime directory scudo-fuse uses; the daemon looks for the socket here.
+RuntimeDirectory=scudo
+ListenStream=%t/scudo/bpfd.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

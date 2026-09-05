@@ -51,7 +51,7 @@ where
     }
 }
 
-use crate::trust;
+use crate::{policy::NetworkConfig, trust};
 
 /// Match type for a pattern entry. Defaults to `exact` when unspecified.
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -154,6 +154,12 @@ pub struct ProfileConfig {
     /// Flags that take no value (boolean flags); prevents consuming the next arg.
     #[serde(default)]
     pub arg_flags: Vec<String>,
+    /// Network policy, kept in its raw form so that `extend` can merge it field
+    /// by field with the same array semantics as every other property.
+    /// Declaring it explicitly keeps it out of the flattened `properties` below,
+    /// which is what we want: it is not a systemd unit property.
+    #[serde(default)]
+    pub network: Option<toml::Table>,
     /// All systemd unit properties, keyed by their exact systemd name.
     /// Values are either a single string/bool/integer or an array thereof.
     #[serde(flatten)]
@@ -171,6 +177,7 @@ pub struct ValidatedProfileConfig {
     pub confirm: Option<bool>,
     pub arg_aliases: ArgAliases,
     pub arg_flags: Vec<String>,
+    pub network: Option<toml::Table>,
     pub properties: HashMap<String, toml::Value>,
 }
 
@@ -185,6 +192,9 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
             .into_iter()
             .map(|(name, config)| {
                 let pattern = build_patterns(&name, config.r#match)?;
+                if let Some(table) = &config.network {
+                    validate_network(&name, table)?;
+                }
                 Ok((
                     name,
                     ValidatedProfileConfig {
@@ -195,6 +205,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                         confirm: config.confirm,
                         arg_aliases: config.arg_aliases,
                         arg_flags: config.arg_flags,
+                        network: config.network,
                         properties: config.properties,
                     },
                 ))
@@ -202,6 +213,19 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
             .collect::<Result<HashMap<_, _>>>()?;
         Ok(ValidatedConfigMap(map))
     }
+}
+
+/// Check a profile's `network` table parses, so a typo is reported when the
+/// config is read rather than when a command is about to run.
+///
+/// `"..."` sentinels are skipped: they are resolved later, when profiles merge.
+fn validate_network(name: &str, table: &toml::Table) -> Result<()> {
+    let config: NetworkConfig = toml::Value::Table(table.clone())
+        .try_into()
+        .with_context(|| format!("profile '{name}': invalid network policy"))?;
+    config
+        .validate()
+        .with_context(|| format!("profile '{name}': invalid network policy"))
 }
 
 /// Convert the raw `match` field into a vec of compiled patterns.
@@ -287,11 +311,15 @@ fn substitute_config_dir(value: &mut toml::Value, dir: &str) {
                 substitute_config_dir(item, dir);
             }
         }
+        toml::Value::Table(table) => {
+            for (_, item) in table.iter_mut() {
+                substitute_config_dir(item, dir);
+            }
+        }
         toml::Value::Integer(_)
         | toml::Value::Float(_)
         | toml::Value::Boolean(_)
-        | toml::Value::Datetime(_)
-        | toml::Value::Table(_) => {}
+        | toml::Value::Datetime(_) => {}
     }
 }
 
@@ -303,6 +331,11 @@ fn substitute_config_dir(value: &mut toml::Value, dir: &str) {
 fn substitute_profile_config_dir(profile: &mut ProfileConfig, dir: &str) {
     for value in profile.properties.values_mut() {
         substitute_config_dir(value, dir);
+    }
+    if let Some(network) = profile.network.as_mut() {
+        for (_, value) in network.iter_mut() {
+            substitute_config_dir(value, dir);
+        }
     }
     if let Some(exec) = profile.exec.as_mut()
         && exec.contains(CONFIG_DIR_VAR)

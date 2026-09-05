@@ -1,0 +1,16 @@
+[Unit]
+Description=scudo policy enforcement daemon
+Requires=scudo-bpfd.socket
+
+[Service]
+Type=simple
+RuntimeDirectory=scudo
+ExecStart=/usr/bin/scudo-bpfd
+# The binary carries cap_bpf and cap_net_admin as file capabilities, which the
+# kernel drops when no-new-privileges is set.
+NoNewPrivileges=no
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+Also=scudo-bpfd.socket

@@ -1,14 +1,33 @@
 use std::{ffi::OsStr, io::IsTerminal as _, os::unix::process::CommandExt as _, path::Path};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+
+/// How to start the command inside the transient unit.
+#[derive(Debug, Default)]
+pub struct Options<'a> {
+    pub verbose: bool,
+    pub confirm: bool,
+    /// When set, run the command through scudo's own shim, which claims the
+    /// policies registered under this token before it execs the command.
+    ///
+    /// The shim exists because the cgroup does not exist until the unit starts:
+    /// registering earlier is impossible, and attaching later would leave a
+    /// window in which the command runs unfiltered.
+    pub shim_token: Option<&'a str>,
+}
 
 pub fn exec(
     command: &Path,
     args: &[String],
     systemd_args: &[String],
-    verbose: bool,
-    confirm: bool,
+    options: &Options<'_>,
 ) -> Result<()> {
+    let Options {
+        verbose,
+        confirm,
+        shim_token,
+    } = *options;
+
     let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
     cmd.args(["--user", "--wait", "-Pdt"]).args(systemd_args);
 
@@ -16,7 +35,12 @@ pub fn exec(
         cmd.arg("-q");
     }
 
-    cmd.arg("--").arg(command).args(args);
+    cmd.arg("--");
+    if let Some(token) = shim_token {
+        let self_exe = std::env::current_exe().context("locating the scudo binary")?;
+        cmd.arg(self_exe).arg("--bpf-shim").arg(token).arg("--");
+    }
+    cmd.arg(command).args(args);
 
     let interactive = std::io::stdin().is_terminal();
 

@@ -4,8 +4,9 @@ use anyhow::{Context as _, Result, bail};
 use regex::Regex;
 use toml::Value;
 
-use crate::config::{
-    ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig,
+use crate::{
+    config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig},
+    policy::{NetworkConfig, NetworkPolicy, Policy},
 };
 
 #[derive(Debug)]
@@ -15,6 +16,8 @@ pub struct ResolvedProfile {
     pub verbose: bool,
     pub confirm: bool,
     pub match_log: Vec<String>,
+    /// Policies to hand to `scudo-bpfd` before the command starts.
+    pub policies: Vec<Policy>,
 }
 
 type Properties = HashMap<String, Value>;
@@ -31,6 +34,9 @@ struct ProfileMeta {
     confirm: Option<bool>,
     arg_aliases: ArgAliases,
     arg_flags: Vec<String>,
+    /// Raw network policy, still in TOML form so that it merges with the same
+    /// array semantics as every other property.
+    network: Option<Properties>,
 }
 
 /// Options controlling which profiles [`resolve_with`] applies.
@@ -145,6 +151,7 @@ pub fn resolve_with(
         meta.confirm = m.confirm.or(meta.confirm);
         meta.arg_aliases.extend(m.arg_aliases);
         meta.arg_flags.extend(m.arg_flags);
+        merge_network(&mut meta.network, m.network)?;
     }
 
     let arg_vars = parse_command_args(command_args, &meta.arg_aliases, &meta.arg_flags);
@@ -290,6 +297,7 @@ fn expand_extend(
         base_meta.confirm = parent_meta.confirm.or(base_meta.confirm);
         base_meta.arg_aliases.extend(parent_meta.arg_aliases);
         base_meta.arg_flags.extend(parent_meta.arg_flags);
+        merge_network(&mut base_meta.network, parent_meta.network)?;
     }
 
     // Current profile's values override everything inherited from parents.
@@ -298,15 +306,73 @@ fn expand_extend(
     let mut merged_flags = base_meta.arg_flags;
     merged_flags.extend(profile.arg_flags.iter().cloned());
 
+    let mut network = base_meta.network;
+    merge_network(
+        &mut network,
+        profile.network.clone().map(table_to_properties),
+    )?;
+
     let meta = ProfileMeta {
         exec: profile.exec.clone().or(base_meta.exec),
         verbose: profile.verbose.or(base_meta.verbose),
         confirm: profile.confirm.or(base_meta.confirm),
         arg_aliases: merged_aliases,
         arg_flags: merged_flags,
+        network,
     };
     merge_into(&mut base, profile.properties.clone())?;
     Ok((base, meta))
+}
+
+fn table_to_properties(table: toml::Table) -> Properties {
+    table.into_iter().collect()
+}
+
+/// Merge a network policy table into the inherited one, reusing the same array
+/// semantics as regular properties so that `"..."` splices the inherited list in.
+///
+/// Unlike `merge_into` this descends into nested tables, because the network
+/// table has them: `dest` and `ports` each hold their own `allow` and `deny`
+/// lists. Replacing one of those wholesale would drop the half the child did not
+/// mention, and a `"..."` inside it would find no inherited list to splice.
+fn merge_network(dst: &mut Option<Properties>, src: Option<Properties>) -> Result<()> {
+    let Some(src) = src else {
+        return Ok(());
+    };
+    let mut base: toml::Table = dst.take().unwrap_or_default().into_iter().collect();
+    merge_table_into(&mut base, src.into_iter().collect())?;
+    *dst = Some(base.into_iter().collect());
+    Ok(())
+}
+
+/// `merge_into` for a `toml::Table`, descending into nested tables.
+fn merge_table_into(dst: &mut toml::Table, src: toml::Table) -> Result<()> {
+    for (key, src_val) in src {
+        match src_val {
+            Value::Array(src_arr) => {
+                let merged = splice_array(dst.get(&key), src_arr, &key)?;
+                dst.insert(key, Value::Array(merged));
+            }
+            Value::Table(src_tbl) => {
+                let merged = match dst.remove(&key) {
+                    Some(Value::Table(mut base)) => {
+                        merge_table_into(&mut base, src_tbl)?;
+                        base
+                    }
+                    _ => src_tbl,
+                };
+                dst.insert(key, Value::Table(merged));
+            }
+            other @ (Value::String(_)
+            | Value::Integer(_)
+            | Value::Float(_)
+            | Value::Boolean(_)
+            | Value::Datetime(_)) => {
+                dst.insert(key, other);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Merge `src` into `dst`.
@@ -315,39 +381,48 @@ fn expand_extend(
 /// It may appear at most once; multiple occurrences are an error.
 /// Arrays without `"..."` replace the parent's value entirely.
 fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
-    let sentinel = Value::String("...".into());
     for (key, src_val) in src {
-        if let Value::Array(src_arr) = src_val {
-            let array = match src_arr.iter().filter(|v| *v == &sentinel).count() {
-                0 => src_arr,
-                1 => {
-                    let base_items = match dst.get(&key) {
-                        Some(Value::Array(arr)) => arr.clone(),
-                        _ => vec![],
-                    };
-                    let mut merged = Vec::with_capacity(
-                        src_arr
-                            .len()
-                            .saturating_sub(1)
-                            .saturating_add(base_items.len()),
-                    );
-                    for v in src_arr {
-                        if v == sentinel {
-                            merged.extend(base_items.iter().cloned());
-                        } else {
-                            merged.push(v);
-                        }
-                    }
-                    merged
-                }
-                _ => anyhow::bail!("property '{key}': '...' may appear at most once"),
-            };
-            dst.insert(key, Value::Array(array));
-        } else {
-            dst.insert(key, src_val);
-        }
+        let merged = match src_val {
+            Value::Array(src_arr) => Value::Array(splice_array(dst.get(&key), src_arr, &key)?),
+            other @ (Value::String(_)
+            | Value::Integer(_)
+            | Value::Float(_)
+            | Value::Boolean(_)
+            | Value::Datetime(_)
+            | Value::Table(_)) => other,
+        };
+        dst.insert(key, merged);
     }
     Ok(())
+}
+
+/// Resolve `"..."` inside a child's array against the list it inherited.
+fn splice_array(base: Option<&Value>, src_arr: Vec<Value>, key: &str) -> Result<Vec<Value>> {
+    let sentinel = Value::String("...".into());
+    match src_arr.iter().filter(|v| *v == &sentinel).count() {
+        0 => Ok(src_arr),
+        1 => {
+            let base_items: &[Value] = match base {
+                Some(Value::Array(arr)) => arr,
+                _ => &[],
+            };
+            let mut merged = Vec::with_capacity(
+                src_arr
+                    .len()
+                    .saturating_sub(1)
+                    .saturating_add(base_items.len()),
+            );
+            for v in src_arr {
+                if v == sentinel {
+                    merged.extend(base_items.iter().cloned());
+                } else {
+                    merged.push(v);
+                }
+            }
+            Ok(merged)
+        }
+        _ => anyhow::bail!("property '{key}': '...' may appear at most once"),
+    }
 }
 
 /// Parse `command_args` into a map of arg variable name → accumulated values.
@@ -534,13 +609,92 @@ fn build_args(
         }
     }
 
+    // The properties a policy needs are added by `policy::apply`, once it knows
+    // the policy is actually being enforced: emitting them for a policy that
+    // ends up degraded would restrict the command for no benefit.
+    let policies = build_policies(meta.network, arg_vars)?;
+
     Ok(ResolvedProfile {
         systemd_args: args,
         exec: meta.exec,
         verbose: meta.verbose.unwrap_or(false),
         confirm: meta.confirm.unwrap_or(false),
         match_log,
+        policies,
     })
+}
+
+/// Turn the merged raw network table into a normalised policy.
+fn build_policies(network: Option<Properties>, arg_vars: &ArgVars) -> Result<Vec<Policy>> {
+    let Some(network) = network else {
+        return Ok(Vec::new());
+    };
+
+    let mut table = toml::Table::new();
+    for (key, val) in network {
+        if let Some(expanded) = expand_network_value(val, arg_vars, false)? {
+            table.insert(key, expanded);
+        }
+    }
+
+    let config: NetworkConfig = toml::Value::Table(table)
+        .try_into()
+        .context("invalid network policy")?;
+    let policy = NetworkPolicy::try_from(config).context("invalid network policy")?;
+
+    if policy.is_unrestricted() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![Policy::Network(policy)])
+}
+
+/// Expand `$VAR` and `$arg_*` references inside a network policy value.
+///
+/// Mirrors `value_to_strings`: a multi-valued `$arg_*` replicates the list
+/// element it appears in, and an element expanding to nothing is dropped.
+/// Anywhere but a list there is nothing to replicate, so a multi-valued
+/// expansion is an error rather than a silent truncation.
+fn expand_network_value(val: Value, arg_vars: &ArgVars, in_list: bool) -> Result<Option<Value>> {
+    match val {
+        Value::String(s) => {
+            let mut expanded = expand_vars(&s, arg_vars, false)?;
+            expanded.retain(|e| !e.is_empty());
+            match expanded.len() {
+                0 => Ok(None),
+                1 => Ok(expanded.pop().map(Value::String)),
+                _ if in_list => Ok(Some(Value::Array(
+                    expanded.into_iter().map(Value::String).collect(),
+                ))),
+                _ => bail!("network policy: '{s}' expands to multiple values outside a list"),
+            }
+        }
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match expand_network_value(item, arg_vars, true)? {
+                    // A list element that itself expanded to a list is spliced in.
+                    Some(Value::Array(nested)) => out.extend(nested),
+                    Some(value) => out.push(value),
+                    None => {}
+                }
+            }
+            Ok(Some(Value::Array(out)))
+        }
+        Value::Table(items) => {
+            let mut out = toml::Table::new();
+            for (key, item) in items {
+                // Every list in the network table is written as one — `allow`,
+                // `deny` — so a table value is never itself a list context.
+                if let Some(value) = expand_network_value(item, arg_vars, false)? {
+                    out.insert(key, value);
+                }
+            }
+            Ok(Some(Value::Table(out)))
+        }
+        other @ (Value::Integer(_) | Value::Float(_) | Value::Boolean(_) | Value::Datetime(_)) => {
+            Ok(Some(other))
+        }
+    }
 }
 
 /// Format a `Key=value` property for systemd-run.
@@ -686,7 +840,10 @@ mod tests {
     use glob::Pattern;
 
     use super::*;
-    use crate::config::ArgAliasDecl;
+    use crate::{
+        config::ArgAliasDecl,
+        policy::network::{Action, Destination, OnUnavailable, PortRange, PortRule, Protocol},
+    };
 
     fn make_configs(profiles: Vec<(&str, ValidatedProfileConfig)>) -> ValidatedConfigMap {
         ValidatedConfigMap(
@@ -706,6 +863,7 @@ mod tests {
             pattern: vec![pattern],
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
+            network: None,
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         }
     }
@@ -719,7 +877,26 @@ mod tests {
             confirm: None,
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
+            network: None,
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+        }
+    }
+
+    /// Build a config map through the real load pipeline, so that these tests
+    /// exercise validation as well as merging.
+    fn configs_from_toml(src: &str) -> ValidatedConfigMap {
+        let raw: crate::config::ConfigMap = toml::from_str(src).unwrap();
+        raw.try_into().unwrap()
+    }
+
+    #[expect(clippy::panic)]
+    fn resolved_policy(src: &str, command: &str, args: &[&str]) -> NetworkPolicy {
+        let configs = configs_from_toml(src);
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let mut resolved = resolve(&configs, command, &args).unwrap();
+        match resolved.policies.pop() {
+            Some(Policy::Network(policy)) => policy,
+            None => panic!("expected a network policy"),
         }
     }
 
@@ -1406,5 +1583,299 @@ mod tests {
         let names = args(&["a", "b"]);
         let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
         assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
+    }
+
+    #[test]
+    fn network_policy_is_resolved_from_the_profile() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            network.dest.allow = ["1.1.1.1"]
+            network.ports.allow = [53]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(policy.dest.allow.len(), 1);
+        assert_eq!(policy.ports.allow.len(), 1);
+        assert!(policy.requires_enforcer());
+    }
+
+    /// A `network` table must not leak into the flattened systemd properties.
+    #[test]
+    fn network_is_not_a_systemd_property() {
+        let configs = configs_from_toml(
+            r#"
+            [curl]
+            network.dest.allow = ["1.1.1.1"]
+            MemoryMax = "256M"
+            "#,
+        );
+        let resolved = resolve(&configs, "curl", &[]).unwrap();
+        assert!(has_arg(&resolved.systemd_args, "MemoryMax=256M"));
+        assert!(
+            !resolved
+                .systemd_args
+                .iter()
+                .any(|a| a.starts_with("network"))
+        );
+    }
+
+    #[test]
+    fn network_inherits_through_extend() {
+        let policy = resolved_policy(
+            r#"
+            [base]
+            match = []
+            network.dest.allow = ["1.1.1.1"]
+            network.dest.deny = ["10.0.0.0/8"]
+            network.on_unavailable = "no-network"
+
+            [curl]
+            extend = "base"
+            network.dest.allow = ["...", "api.github.com"]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![
+                Destination::Net {
+                    addr: "1.1.1.1".parse().unwrap(),
+                    prefix_len: 32u8,
+                },
+                Destination::Host("api.github.com".to_owned()),
+            ]
+        );
+        // The half the child never mentioned survives the merge.
+        assert_eq!(
+            policy.dest.deny,
+            vec![Destination::Net {
+                addr: "10.0.0.0".parse().unwrap(),
+                prefix_len: 8u8,
+            }]
+        );
+        // Untouched fields are inherited as they are.
+        assert_eq!(policy.on_unavailable, OnUnavailable::NoNetwork);
+    }
+
+    /// A child that only speaks about `ports` must not wipe the `dest` table it
+    /// inherited: the network table nests, so the merge has to descend into it
+    /// instead of replacing a sub-table wholesale.
+    #[test]
+    fn network_subtables_merge_instead_of_replacing() {
+        let policy = resolved_policy(
+            r#"
+            [base]
+            match = []
+            network.dest.allow = ["1.1.1.1"]
+            network.ports.deny = [22]
+
+            [curl]
+            extend = "base"
+            network.ports.allow = [443]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![Destination::Net {
+                addr: "1.1.1.1".parse().unwrap(),
+                prefix_len: 32u8,
+            }]
+        );
+        assert_eq!(policy.ports.allow.len(), 1);
+        assert_eq!(policy.ports.deny.len(), 1);
+    }
+
+    /// Without the sentinel, a child's list replaces the inherited one — the
+    /// same rule as for every other array-valued property.
+    #[test]
+    fn network_list_without_sentinel_replaces() {
+        let policy = resolved_policy(
+            r#"
+            [base]
+            match = []
+            network.dest.allow = ["1.1.1.1"]
+
+            [curl]
+            extend = "base"
+            network.dest.allow = ["api.github.com"]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![Destination::Host("api.github.com".to_owned())]
+        );
+    }
+
+    #[test]
+    fn network_scalars_are_overridden_by_the_child() {
+        let policy = resolved_policy(
+            r#"
+            [base]
+            match = []
+            network.default = "deny"
+            network.on_unavailable = "fail"
+            network.dest.allow = ["1.1.1.1"]
+
+            [curl]
+            extend = "base"
+            network.on_unavailable = "no-network"
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(policy.on_unavailable, OnUnavailable::NoNetwork);
+        assert_eq!(policy.default, Action::Deny);
+    }
+
+    /// Resolving a profile only collects the policy; the properties it needs
+    /// are the enforcer's business, so none are emitted here.
+    #[test]
+    fn resolving_a_policy_emits_no_properties_of_its_own() {
+        let configs = configs_from_toml(
+            r#"
+            [curl]
+            network.dest.allow = ["1.1.1.1", "example.com"]
+            "#,
+        );
+        let resolved = resolve(&configs, "curl", &[]).unwrap();
+        assert!(resolved.systemd_args.is_empty());
+        assert_eq!(resolved.policies.len(), 1);
+    }
+
+    /// Denying everything needs no enforcer, so it needs no extra properties
+    /// either: `policy::apply` turns it into `PrivateNetwork=yes`.
+    #[test]
+    fn deny_all_policy_adds_no_properties() {
+        let configs = configs_from_toml(
+            "
+            [curl]
+            network = {}
+            ",
+        );
+        let resolved = resolve(&configs, "curl", &[]).unwrap();
+        assert!(resolved.systemd_args.is_empty());
+        assert_eq!(resolved.policies.len(), 1);
+    }
+
+    /// A policy that restricts nothing is dropped rather than carried around.
+    #[test]
+    fn unrestricted_policy_is_dropped() {
+        let configs = configs_from_toml(
+            r#"
+            [curl]
+            network.default = "allow"
+            network.inbound = "allow"
+            "#,
+        );
+        let resolved = resolve(&configs, "curl", &[]).unwrap();
+        assert!(resolved.policies.is_empty());
+    }
+
+    #[test]
+    fn network_rules_expand_argument_variables() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            network.dest.allow = ["$arg_1"]
+            "#,
+            "curl",
+            &["api.github.com"],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![Destination::Host("api.github.com".to_owned())]
+        );
+    }
+
+    /// A multi-valued `$arg_*` replicates the list element it appears in, the
+    /// same way it does for array-valued systemd properties.
+    #[test]
+    fn multi_valued_argument_replicates_the_rule() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            arg_aliases.host = { flags = ["--host"], nargs = "+" }
+            network.dest.allow = ["$arg_host"]
+            "#,
+            "curl",
+            &["--host", "a.example", "b.example"],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![
+                Destination::Host("a.example".to_owned()),
+                Destination::Host("b.example".to_owned()),
+            ]
+        );
+    }
+
+    /// A multi-valued `$arg_*` replicates inside the port list too, and the
+    /// two lists expand independently of one another.
+    #[test]
+    fn multi_valued_argument_fills_the_port_list() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            arg_aliases.port = { flags = ["--port"], nargs = "+" }
+            network.dest.allow = ["api.github.com"]
+            network.ports.allow = ["$arg_port"]
+            "#,
+            "curl",
+            &["--port", "80", "443"],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![Destination::Host("api.github.com".to_owned())]
+        );
+        assert_eq!(
+            policy.ports.allow,
+            vec![
+                PortRule {
+                    ports: PortRange { start: 80, end: 80 },
+                    proto: Protocol::Any,
+                },
+                PortRule {
+                    ports: PortRange {
+                        start: 443,
+                        end: 443
+                    },
+                    proto: Protocol::Any,
+                },
+            ]
+        );
+    }
+
+    /// An unset `$arg_*` drops the rule instead of producing a bogus one.
+    #[test]
+    fn missing_argument_drops_the_rule() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            network.dest.allow = ["1.1.1.1", "$arg_2"]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(policy.dest.allow.len(), 1);
+    }
+
+    #[test]
+    fn invalid_network_policy_is_rejected_at_load() {
+        let raw: crate::config::ConfigMap = toml::from_str(
+            r#"
+            [curl]
+            network.dest.allow = ["10.0.0.0/33"]
+            "#,
+        )
+        .unwrap();
+        let err = ValidatedConfigMap::try_from(raw).unwrap_err();
+        assert!(format!("{err:#}").contains("curl"));
     }
 }

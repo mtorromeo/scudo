@@ -46,7 +46,7 @@ export PATH="$HOME/.scudo/shims:$PATH"
 
 The shims directory itself is excluded from the PATH search used for the existence check, which prevents FUSE re-entrancy deadlocks when the shims directory is already in `PATH`.
 
-> **Warning:** When using the FUSE shim, avoid broad matchers (`glob`, `regex`) that match large numbers of commands in combination with `confirm = true` or `debug = true`. Because the shim intercepts every command in your session — including those run by scripts, your shell itself, and every subprocess — an overly wide profile with interactive options will trigger a confirmation prompt or dump debug output for each of them, making the environment unusable. Reserve `confirm` and `debug` for profiles with narrow, exact-match patterns, and validate broad profiles without those options first.
+> **Warning:** When using the FUSE shim, avoid broad matchers (`glob`, `regex`) that match large numbers of commands in combination with `confirm = true` or `verbose = true`. Because the shim intercepts every command in your session — including those run by scripts, your shell itself, and every subprocess — an overly wide profile with interactive options will trigger a confirmation prompt or dump debug output for each of them, making the environment unusable. Reserve `confirm` and `verbose` for profiles with narrow, exact-match patterns, and validate broad profiles without those options first.
 
 By default the command search path is read from the `PATH` environment variable; pass `--path` / `-p` to override it:
 
@@ -108,10 +108,11 @@ Each TOML section defines a profile. The section name is also the default match 
 | `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
 | `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
-| `debug` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
+| `verbose` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
 | `arg_aliases` | table | Maps variable names to the flag(s) that populate them; see [Command argument variables](#command-argument-variables) |
 | `arg_flags` | array of strings | Flags that take no value (boolean flags); needed for correct positional detection |
+| `network` | table | Network policy; see [Network filtering](#network-filtering) |
 
 All other keys are passed directly to `systemd-run` as `-p Key=value` properties. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays.
 
@@ -167,6 +168,202 @@ BindReadOnlyPaths = ["$HOME/.npmrc"]
 extend = "npm"
 BindPaths = ["...", "$HOME/.pnpm-store"]
 ```
+
+### Network filtering
+
+`PrivateNetwork = true` is all-or-nothing. The `[profile.network]` table asks for something
+finer: deny everything by default and allow only what the command actually needs.
+
+```toml
+[cargo]
+extend = "sandboxed-home"
+
+[cargo.network]
+default = "deny"            # "deny" (default) or "allow"
+inbound = "deny"            # "deny" (default) or "allow"
+service_manager = "deny"    # "deny" (default) or "allow"
+on_unavailable = "fail"     # "fail" (default), "no-network", or "warn"
+
+dest = { allow = ["10.0.0.0/8", "*.crates.io"], deny = ["10.1.2.0/24"] }
+ports = { allow = [443, "53/udp"], deny = [22] }
+```
+
+#### The two dimensions
+
+**`dest` and `ports` are independent sources of permission, not filters that narrow one
+another.** A packet is judged by:
+
+```text
+if the destination is denied  or the port is denied   ->  deny
+if the destination is allowed or the port is allowed  ->  allow
+otherwise                                             ->  the default
+```
+
+Three things follow, and the second one is the one to read twice:
+
+- **An empty `allow` list grants nothing, not everything.** A dimension with nothing in it
+  abstains and the other one decides.
+- **`ports.allow` opens those ports at *every* address**, including ones `dest` never mentions.
+  It widens; it does not narrow. There is no way to say "port 443, but only on this host" —
+  that is the price of dropping the per-rule port, and it is what lets the whole policy be two
+  map lookups instead of a scan.
+- **`ports.deny` is what narrows**, and it revokes everywhere — including at an address
+  `dest.allow` names.
+
+Traffic with no port of its own — ICMP, raw sockets — needs no special case: the port dimension
+abstains on both sides and the destination decides alone.
+
+#### Destinations
+
+A `dest` entry is a bare string:
+
+| Form | Example |
+|------|---------|
+| CIDR | `"10.0.0.0/8"`, `"2606:4700::/32"` |
+| Address | `"1.1.1.1"`, `"2606:4700::1"` |
+| Host or glob | `"api.github.com"`, `"*.crates.io"` |
+| Symbolic name | `"any"`, `"localhost"`, `"link-local"`, `"multicast"` |
+
+IPv6 addresses are written plainly — there is no port to tell them apart from, so they need no
+brackets. Hosts accept `*` and `?` globs, and `*` crosses dots: `*.crates.io` covers
+`a.b.crates.io` but not the bare `crates.io`. A symbolic name is systemd's, and expands to its
+IPv4 *and* IPv6 networks.
+
+#### Ports
+
+A `ports` entry is a number, or a string holding a range, either of them optionally narrowed to
+one protocol with a `/tcp` or `/udp` suffix:
+
+| Form | Example |
+|------|---------|
+| Port | `443` |
+| Range | `"8000-8100"` |
+| Port and protocol | `"53/udp"` |
+| Range and protocol | `"8000-8100/tcp"` |
+
+A port written without a protocol covers TCP and UDP both.
+
+#### Order does not matter
+
+Every entry of a list carries the same verdict, so which one matches cannot change the outcome,
+and `deny` beating `allow` is a property of how the two are consulted rather than of where
+rules sit. That makes merging two profiles' lists a plain union: commutative, idempotent, and
+impossible to get wrong by reordering. Entries take `$VAR` and `$arg_*` expansions like any
+other profile value, and `"..."` splices in the list inherited from an extended profile —
+each of the four lists inheriting on its own.
+
+Denying everything (`network = {}`) is realised with `PrivateNetwork=yes` and needs nothing
+else. Anything finer needs the `scudo-bpfd` helper, which attaches eBPF programs to the
+command's cgroup; systemd's own `IPAddressAllow=` and `SocketBindAllow=` are silently ignored
+in user units, since `systemd --user` may not load BPF programs.
+
+#### Names
+
+**Naming a host in `dest` is what allows that domain to be resolved**, and the DNS allowlist is
+nothing more than the set of names the destination lists mention. `scudo-bpfd` answers the
+sandbox's DNS itself: the eBPF programs redirect every query to a resolver bound to loopback for
+that one sandbox, which refuses names no rule mentions, forwards the rest to the system's
+nameservers, and records the `A` and `AAAA` addresses it hands back. From that moment those
+addresses are covered by the list that named the host, as `/32` and `/128` prefixes like any
+other. Both UDP and TCP queries are served, and a truncated answer is retried over TCP.
+
+The redirect happens before any check, so a policy whose port lists never mention 53 still
+resolves names — and, for the same reason, `ports.deny = [53]` does not take that away: the
+query never reaches the port rules, because it never reaches port 53. What decides which names
+may be looked up is the set of names the destination rules mention, and nothing else. A policy
+that names no host gets no resolver at all, and then port 53 is judged like any other port.
+
+Three things follow from this design, and all three are deliberate:
+
+- **The rule is matched against the question, not the CNAME chain**, so a rule for
+  `api.github.com` covers whatever that name ends up resolving to.
+- **A name in `dest.deny` still resolves.** That is how its addresses become known, so the rule
+  keeps them out of reach even for a program that had the address hardcoded. Since the deny
+  side is consulted first, the connection fails either way.
+- **A name no rule mentions is refused — unless refusing it would buy nothing.** With
+  `default = "allow"`, with a destination covering the whole address space (`any`,
+  `0.0.0.0/0`), or with any `ports.allow` at all — each of these already lets the command reach
+  an address it never named, so refusing the lookup would only break it.
+
+Addresses learnt this way expire with the record's TTL, clamped to between 30 seconds and an
+hour — a zero TTL would otherwise expire the address before the program managed to connect.
+Expiry is a *removal*: the resolver takes the prefix back out, and the programs carry no expiry
+check of their own. That is not an oversight. A prefix that had expired but was still present
+would keep covering the shorter prefixes underneath it, with no way to fall back to the
+next-longest match — so a stale `/32` in the deny trie would read as "no match" and let traffic
+through. With removal alone, a sweep that runs late merely leaves an entry doing what it was
+already doing for another half second, which errs the safe way in both directions.
+
+A DNS-over-HTTPS or DNS-over-TLS resolver bypasses this entirely, but not the address rules:
+its server has to be in the allowlist like anything else.
+
+#### How it is enforced
+
+`scudo-bpfd` attaches four `cgroup/sock_addr` programs (`connect4`, `connect6`, `sendmsg4`,
+`sendmsg6`) so a blocked destination fails with a clean `EPERM` at `connect()` rather than
+timing out, plus a `cgroup_skb` egress program as a backstop — the only layer that also covers
+raw sockets, ICMP and anything that is neither TCP nor UDP. With `inbound = "deny"` an ingress
+program matches the *source* address, and the source port, against the same two lists, the way
+`IPAddressAllow=` does, so replies from an allowed peer still arrive. `recvmsg4` and `recvmsg6`
+put the source of a redirected DNS reply back to the nameserver the query was sent to — the
+address is remembered per socket, keyed by its cookie, when the query is redirected — so a stub
+resolver on an unconnected socket, which checks that the answer came from the server it asked,
+does not throw it away.
+
+Programs are attached as BPF links, which stack: the kernel combines the verdicts of every
+program on a cgroup with a logical AND, so a second policy on the same cgroup can only ever
+narrow what is permitted, never widen it.
+
+Profiles with an enforced policy also get `ProtectControlGroups=yes`, which keeps the command
+from migrating out of the cgroup the programs are attached to, and one that needs the resolver
+loses systemd-resolved's varlink sockets, since a lookup made through `nss-resolve` would
+neither obey the allowlist nor teach the policy the address it resolved to.
+
+Unless `service_manager` says otherwise, a profile with a policy also loses access to
+`systemd --user`, via `InaccessiblePaths` on `$XDG_RUNTIME_DIR/systemd` and
+`$XDG_RUNTIME_DIR/bus`. Without that the policy is trivially bypassed: a sandboxed command can
+ask the service manager to start a process in a sibling cgroup, where no program of ours is
+attached. That holds however the policy is realised — `network = {}` and a policy degraded to
+`no-network` included, since `PrivateNetwork=yes` is worth nothing while the command can ask
+for a unit that has a network.
+
+That does mean the session bus goes away, which some programs need. Set
+`service_manager = "allow"` to keep it — and be aware that anything able to reach the bus can
+step outside the policy.
+
+#### Installing the helper
+
+```bash
+sudo install -m755 target/release/scudo-bpfd /usr/bin/scudo-bpfd
+sudo setcap cap_bpf,cap_net_admin=ep /usr/bin/scudo-bpfd
+systemctl --user enable --now scudo-bpfd.socket
+```
+
+The daemon holds `CAP_BPF` and `CAP_NET_ADMIN` as file capabilities, so anyone on the system
+can execute it. What keeps that harmless is that it offers exactly one operation — *add*
+restrictions to a cgroup the caller already owns — and no way to remove them: policies are
+detached only when the cgroup itself disappears. It refuses any cgroup outside the calling
+user's own systemd subtree, which it establishes from `SO_PEERCRED` rather than from anything
+the caller says.
+
+Registration happens in two steps for a reason. `scudo` registers the policy and gets a
+single-use token; the command is then started as `scudo --bpf-shim <token> -- <command>`, and
+that shim — running inside the unit, in the final cgroup — claims the token and only then
+execs the real command. The cgroup does not exist before the unit starts, so registering
+earlier is impossible, and attaching afterwards would leave a window in which the command runs
+unfiltered.
+
+**When the policy cannot be enforced** — the helper is not installed, lacks its capabilities,
+or the kernel does not support it — `on_unavailable` decides what happens:
+
+| Value | Behaviour |
+|-------|-----------|
+| `fail` (default) | The command does not run. |
+| `no-network` | The command runs with no network at all. |
+| `warn` | A warning is printed and the command runs unfiltered. |
+
+The default is fail-closed: a profile that asks for a network policy never silently runs
+without one.
 
 ### Match patterns
 

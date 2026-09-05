@@ -1,0 +1,14 @@
+[package]
+name = "scudo-bpf-ebpf"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "eBPF programs enforcing scudo network policies"
+
+[dependencies]
+aya-ebpf = "0.2"
+scudo-bpf-common = { path = "../scudo-bpf-common" }
+
+[[bin]]
+name = "scudo-net"
+path = "src/main.rs"

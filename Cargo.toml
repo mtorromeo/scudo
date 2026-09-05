@@ -6,6 +6,32 @@ authors = ["Massimiliano Torromeo <massimiliano.torromeo@gmail.com>"]
 description = "Run commands sandboxed via systemd-run with per-command resource and permission profiles"
 license = "MIT OR Apache-2.0"
 
+# The eBPF crate is a member so that build.rs can name it with `--package`, but
+# it is kept out of default-members: it only builds for bpfel-unknown-none.
+[workspace]
+members = ["ebpf/scudo-bpf-common", "ebpf/scudo-bpf-ebpf"]
+default-members = [".", "ebpf/scudo-bpf-common"]
+
+# The workspace release profile is tuned for small host binaries; the eBPF object
+# needs the opposite, and its BTF must survive.
+[profile.release.package.scudo-bpf-ebpf]
+opt-level = 3
+debug = 2
+codegen-units = 1
+overflow-checks = false
+
+[features]
+default = ["bpf"]
+# Build scudo-bpfd and the eBPF programs it loads. Turning this off drops the
+# nightly toolchain and bpf-linker build requirements; scudo itself still talks
+# to the daemon when one is installed.
+bpf = ["dep:aya", "dep:aya-build", "dep:scudo-bpf-common"]
+
+[[bin]]
+name = "scudo-bpfd"
+path = "src/bin/scudo-bpfd.rs"
+required-features = ["bpf"]
+
 [lints.clippy]
 absolute_paths = "allow"
 allow_attributes_without_reason = "allow"
@@ -42,6 +68,9 @@ question_mark_used = "allow"
 restriction = { level = "warn", priority = -2 }
 self_named_module_files = "allow"
 shadow_reuse = "allow"
+# core::io is unstable and alloc adds nothing to a std binary.
+std_instead_of_alloc = "allow"
+std_instead_of_core = "allow"
 shadow_unrelated = "allow"
 single_call_fn = "allow"
 single_char_lifetime_names = "allow"
@@ -55,8 +84,15 @@ anyhow = "1"
 glob = "0.3"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 similar = "3"
 toml = { version = "1", features = ["display"] }
+
+aya = { version = "0.14", optional = true }
+scudo-bpf-common = { path = "ebpf/scudo-bpf-common", optional = true }
+
+[build-dependencies]
+aya-build = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 clap = { version = "4", features = ["derive", "env"] }

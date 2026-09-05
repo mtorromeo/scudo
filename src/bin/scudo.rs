@@ -6,7 +6,7 @@ use std::{
     process::exit,
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -32,6 +32,11 @@ struct Args {
     /// Skip profile matching; apply only the profiles given with --profile.
     #[arg(long)]
     no_match: bool,
+
+    /// Internal: claim the policies registered under TOKEN, then exec the
+    /// command. Set by scudo itself when starting a sandboxed unit.
+    #[arg(long, value_name = "TOKEN", hide = true)]
+    bpf_shim: Option<String>,
 
     #[arg()]
     command: String,
@@ -97,6 +102,11 @@ fn run() -> Result<()> {
     }
 
     let args = Args::parse_from(args);
+
+    if let Some(token) = args.bpf_shim.as_deref() {
+        return shim(token, &args);
+    }
+
     let bin = which(&args.command, &self_exe)?;
 
     let configs = scudo::config::load_configs()?;
@@ -129,11 +139,18 @@ fn run() -> Result<()> {
         None => bin,
     };
 
+    let applied = scudo::policy::apply(&resolved.policies)?;
+    for warning in &applied.warnings {
+        eprintln!("scudo: warning: {warning}");
+    }
+    resolved.systemd_args.extend(applied.systemd_args);
+    let shim_token = applied.token;
+
     resolved
         .systemd_args
         .extend(args.property.iter().map(|p| format!("--property={p}")));
 
-    if resolved.systemd_args.is_empty() {
+    if resolved.systemd_args.is_empty() && shim_token.is_none() {
         if resolved.verbose {
             eprintln!(
                 "scudo: warning: no profile matched or empty systemd-run options for '{}'",
@@ -150,7 +167,26 @@ fn run() -> Result<()> {
         &bin,
         &args.command_args,
         &resolved.systemd_args,
-        resolved.verbose,
-        resolved.confirm,
+        &scudo::runner::Options {
+            verbose: resolved.verbose,
+            confirm: resolved.confirm,
+            shim_token: shim_token.as_deref(),
+        },
     )
+}
+
+/// Run as the in-unit shim: claim the registered policies for this cgroup, then
+/// become the real command.
+///
+/// This runs inside the transient unit, so the cgroup the daemon reads from our
+/// connection is the one the command will run in. Nothing is executed until the
+/// daemon confirms: a policy that cannot be attached must never end up with the
+/// command running unfiltered.
+fn shim(token: &str, args: &Args) -> Result<()> {
+    scudo::bpfd::client::attach(token).context("claiming the sandbox policies")?;
+
+    let err = std::process::Command::new(&args.command)
+        .args(&args.command_args)
+        .exec();
+    Err(anyhow::Error::from(err).context("exec failed"))
 }
