@@ -1,0 +1,186 @@
+# cargo-make tasks for scudo.
+#
+# Run `cargo make` for a development build, `cargo make --profile production`
+# for a release one, and `cargo make ci` for what CI should run.
+
+[config]
+# `scudo-bpf-ebpf` is a workspace member only so that build.rs can name it with
+# `--package`; it targets bpfel-unknown-none and cannot be built for the host.
+# Left to itself, cargo-make runs every task once per workspace member and fails
+# on that one with "unwinding panics are not supported without std".
+#
+# Nothing here needs to build it directly: scudo's build.rs drives that through
+# `rustup run nightly cargo build -Z build-std=core`, so a plain `cargo build`
+# on the stable toolchain produces the eBPF object as a side effect.
+default_to_workspace = false
+
+[env]
+CARGO_PROFILE = "dev"
+TARGET_DIR = "debug"
+# Extra flags for clippy; CI turns warnings into errors.
+CLIPPY_FLAGS = ""
+
+[env.production]
+CARGO_PROFILE = "release"
+TARGET_DIR = "release"
+
+[env.ci]
+CARGO_PROFILE = "release"
+TARGET_DIR = "release"
+CLIPPY_FLAGS = "-Dwarnings"
+
+[tasks.default]
+description = "Build everything"
+alias = "all"
+
+[tasks.all]
+description = "Build everything"
+dependencies = ["build"]
+
+# The eBPF object is built by scudo's build.rs, which shells out to a nightly
+# toolchain and bpf-linker. Neither is a cargo dependency, so check for them here
+# rather than letting the build fail somewhere deep inside a linker invocation.
+[tasks.check-ebpf-toolchain]
+description = "Check the toolchain the eBPF programs need is installed"
+category = "Build"
+condition = { env_not_set = ["SCUDO_SKIP_EBPF_CHECK"] }
+script_runner = "@shell"
+script = '''
+missing=0
+
+if ! rustup toolchain list 2>/dev/null | grep -q '^nightly'; then
+    echo "error: the eBPF programs need a nightly toolchain (for -Z build-std=core)."
+    echo "       install it with: rustup toolchain install nightly --component rust-src"
+    missing=1
+elif ! rustup component list --toolchain nightly 2>/dev/null | grep -q '^rust-src.*installed'; then
+    echo "error: the nightly toolchain is missing rust-src, which -Z build-std needs."
+    echo "       install it with: rustup component add rust-src --toolchain nightly"
+    missing=1
+fi
+
+if ! command -v bpf-linker >/dev/null 2>&1; then
+    echo "error: bpf-linker is not installed."
+    echo "       install it with: cargo install bpf-linker"
+    missing=1
+fi
+
+if [ "$missing" -ne 0 ]; then
+    echo
+    echo "To build without the eBPF enforcer instead, run:"
+    echo "    cargo make build-no-bpf"
+    exit 1
+fi
+'''
+
+[tasks.build]
+description = "Build scudo, scudo-fuse and scudo-bpfd"
+category = "Build"
+dependencies = ["check-ebpf-toolchain"]
+command = "cargo"
+args = ["build", "--locked", "--profile", "${CARGO_PROFILE}"]
+
+# Without the `bpf` feature there is no scudo-bpfd and no eBPF object, so neither
+# nightly nor bpf-linker is needed. Network policies that need the enforcer then
+# fall back to whatever their `on_unavailable` says.
+[tasks.build-no-bpf]
+description = "Build without the eBPF enforcer (stable toolchain only)"
+category = "Build"
+command = "cargo"
+args = [
+    "build",
+    "--locked",
+    "--no-default-features",
+    "--profile",
+    "${CARGO_PROFILE}",
+]
+
+[tasks.test]
+description = "Run the unit tests"
+category = "Test"
+dependencies = ["check-ebpf-toolchain"]
+command = "cargo"
+args = ["test", "--locked", "--profile", "${CARGO_PROFILE}"]
+
+# These attach real eBPF programs, so they need the daemon running with its
+# capabilities; see the Network filtering section of the README.
+[tasks.test-integration]
+description = "Run the integration tests (needs scudo-bpfd running)"
+category = "Test"
+command = "cargo"
+args = [
+    "test",
+    "--locked",
+    "--profile",
+    "${CARGO_PROFILE}",
+    "--test",
+    "network_policy",
+    "--",
+    "--ignored",
+]
+
+[tasks.clippy]
+description = "Lint"
+category = "Test"
+dependencies = ["check-ebpf-toolchain"]
+command = "cargo"
+args = ["clippy", "--locked", "--all-targets", "--", "@@remove-empty(CLIPPY_FLAGS)"]
+
+[tasks.format]
+description = "Format the sources"
+category = "Development"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.format-check]
+description = "Check the sources are formatted"
+category = "Test"
+command = "cargo"
+args = ["fmt", "--all", "--check"]
+
+[tasks.clean]
+description = "Remove build artifacts"
+category = "Build"
+command = "cargo"
+args = ["clean"]
+
+# A task's `env` does not reach its dependencies, so selecting the ci profile has
+# to happen on the command line. This wrapper does it, which keeps plain
+# `cargo make ci` from quietly running a development build with lenient lints.
+[tasks.ci]
+description = "Everything CI should run"
+category = "Test"
+script_runner = "@shell"
+script = 'cargo make --allow-private --profile ci ci-steps'
+
+[tasks.ci-steps]
+description = "The ci task's actual steps; use `cargo make ci` instead"
+category = "Test"
+private = true
+dependencies = ["format-check", "clippy", "test", "build"]
+
+# Installing is not just copying a binary: scudo-bpfd is useless without its file
+# capabilities, since a user service manager may not load BPF programs.
+[tasks.install]
+description = "Install into /usr/bin and grant scudo-bpfd its capabilities"
+category = "Development"
+dependencies = ["build"]
+script_runner = "@shell"
+script = '''
+set -e
+prefix="${SCUDO_PREFIX:-/usr}"
+bindir="$prefix/bin"
+unitdir="$prefix/lib/systemd/user"
+
+sudo install -Dm0755 "target/${TARGET_DIR}/scudo" "$bindir/scudo"
+sudo install -Dm0755 "target/${TARGET_DIR}/scudo-fuse" "$bindir/scudo-fuse"
+sudo install -Dm0644 scudo-fuse.service -t "$unitdir"
+
+if [ -f "target/${TARGET_DIR}/scudo-bpfd" ]; then
+    sudo install -Dm0755 "target/${TARGET_DIR}/scudo-bpfd" "$bindir/scudo-bpfd"
+    sudo setcap cap_bpf,cap_net_admin=ep "$bindir/scudo-bpfd"
+    sudo install -Dm0644 scudo-bpfd.service scudo-bpfd.socket -t "$unitdir"
+    echo "installed; start the daemon with: systemctl --user enable --now scudo-bpfd.socket"
+else
+    echo "installed without scudo-bpfd (built without the bpf feature)"
+fi
+'''

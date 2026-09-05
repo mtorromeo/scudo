@@ -4,6 +4,9 @@
 //! needs a nightly toolchain and `bpf-linker`. Without the `bpf` feature none of
 //! that is required.
 
+// A build script reports failure by panicking: cargo turns that into the error
+// the user sees, and there is nothing above us to hand a Result to.
+#[expect(clippy::panic)]
 fn main() {
     #[cfg(feature = "bpf")]
     {
