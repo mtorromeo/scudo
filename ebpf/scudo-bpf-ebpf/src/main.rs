@@ -23,13 +23,14 @@ use aya_ebpf::{
     bindings::{bpf_sock_addr, sk_action},
     helpers::bpf_get_socket_cookie,
     macros::{cgroup_skb, cgroup_sock_addr, map},
-    maps::{Array, LpmTrie, LruHashMap, lpm_trie::Key},
+    maps::{Array, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     programs::{SkBuffContext, SockAddrContext},
 };
 use scudo_bpf_common::{
-    ACTION_ALLOW, DNS_PORT, LOOPBACK_V4, LOOPBACK_V6, MAX_DESTINATIONS, MAX_DNS_ORIGINS,
-    PORTS_ENTRIES, PROTO_ANY, PROTO_TCP, PROTO_UDP, SET_ALLOW, SET_DENY, SLOT_TCP, SLOT_UDP,
-    port_bit, port_word,
+    ACTION_ALLOW, DNS_PORT, DenialEvent, EVENTS_BYTES, FAMILY_V4, FAMILY_V6, LOOPBACK_V4,
+    LOOPBACK_V6, MAX_DESTINATIONS, MAX_DNS_ORIGINS, PORTS_ENTRIES, PROTO_ANY, PROTO_TCP, PROTO_UDP,
+    SET_ALLOW, SET_DENY, SLOT_TCP, SLOT_UDP, STAGE_CONNECT, STAGE_EGRESS, STAGE_INGRESS,
+    STAGE_SENDMSG, port_bit, port_word,
 };
 
 /// Set by the loader: the verdict when neither dimension has anything to say.
@@ -53,6 +54,14 @@ static PORTS_DENY_SET: u8 = 0;
 #[unsafe(no_mangle)]
 static PORTS_ALLOW_SET: u8 = 0;
 
+/// Set by the loader: whether this sandbox reports what it turns away.
+///
+/// Read like the two above, and folded away like them: with reporting off, the
+/// verifier drops every emit site, so a sandbox nobody is watching does not pay
+/// for the ring buffer it never writes to.
+#[unsafe(no_mangle)]
+static LOG_DENIALS: u8 = 0;
+
 /// Destination prefixes, statically declared or learnt from a DNS answer. An
 /// address learnt from DNS is a `/32` or `/128` like any other prefix; taking it
 /// out again when its TTL runs out is the resolver's job, and an entry that
@@ -69,6 +78,20 @@ static DEST_ALLOW_V6: LpmTrie<[u8; 16], u8> = LpmTrie::with_max_entries(MAX_DEST
 /// Four bitmaps over the port space: {deny, allow} × {TCP, UDP}.
 #[map]
 static PORTS: Array<u64> = Array::with_max_entries(PORTS_ENTRIES, 0);
+
+/// Denied accesses on their way to `scudo-bpfd`, which forwards them to whoever
+/// is watching the sandbox. The loader shrinks this to a single page when
+/// nothing is being reported.
+#[map]
+static EVENTS: RingBuf = RingBuf::with_byte_size(EVENTS_BYTES, 0);
+
+/// How many events did not fit in the ring buffer.
+///
+/// Per-CPU, so counting costs no atomic and no contention; the daemon adds the
+/// counters up when it reports them. Losing events is the ring buffer working
+/// as intended — the alternative is blocking the traffic on the reader.
+#[map]
+static DROPPED: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// Where a redirected DNS query was originally headed, keyed by socket cookie.
 ///
@@ -177,6 +200,72 @@ fn verdict_v6(addr: [u8; 16], port: u16, proto: u8) -> bool {
     decide(false, DEST_ALLOW_V6.get(&key).is_some(), port, proto)
 }
 
+/// A v4 address as the sixteen bytes an event carries, the rest zeroed.
+#[inline(always)]
+fn v4_bytes(addr: u32) -> [u8; 16] {
+    // The u32 is a container for octets in network order, not a number, so its
+    // native-endian bytes are the address in order.
+    let o = addr.to_ne_bytes();
+    [o[0], o[1], o[2], o[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+/// Add one to this CPU's tally of events that did not fit.
+#[inline(always)]
+fn note_drop() {
+    if let Some(counter) = DROPPED.get_ptr_mut(0) {
+        // SAFETY: the map hands back a pointer to this CPU's own slot, which no
+        // other instance of the program can be writing at the same time.
+        unsafe { *counter = (*counter).wrapping_add(1) };
+    }
+}
+
+/// Report an access the policy turned away.
+///
+/// A reservation, a write and a submit: nothing here loops, and nothing grows
+/// with the size of the policy. A full ring buffer costs the report, never the
+/// verdict — the alternative would be holding up the traffic on a reader.
+#[inline(always)]
+fn note_denial(stage: u8, family: u8, addr: [u8; 16], port: u16, proto: u8) {
+    if global(&LOG_DENIALS) == 0 {
+        return;
+    }
+    let Some(mut entry) = EVENTS.reserve::<DenialEvent>(0) else {
+        note_drop();
+        return;
+    };
+    entry.write(DenialEvent {
+        addr,
+        port,
+        family,
+        proto,
+        stage,
+        _pad: [0; 3],
+    });
+    entry.submit(0);
+}
+
+/// The verdict, and the report that goes with a refusal.
+///
+/// Every hook goes through here, so a denial is announced in exactly one place
+/// per family and no layer can quietly turn something away unreported.
+#[inline(always)]
+fn judge_v4(addr: u32, port: u16, proto: u8, stage: u8) -> bool {
+    if verdict_v4(addr, port, proto) {
+        return true;
+    }
+    note_denial(stage, FAMILY_V4, v4_bytes(addr), port, proto);
+    false
+}
+
+#[inline(always)]
+fn judge_v6(addr: [u8; 16], port: u16, proto: u8, stage: u8) -> bool {
+    if verdict_v6(addr, port, proto) {
+        return true;
+    }
+    note_denial(stage, FAMILY_V6, addr, port, proto);
+    false
+}
+
 /// `sock_addr` programs report the socket type, not the IP protocol.
 /// `SOCK_STREAM` is 1 and `SOCK_DGRAM` is 2.
 #[inline(always)]
@@ -248,8 +337,11 @@ fn redirect_to_resolver(sock_addr: &mut bpf_sock_addr, v4: bool, port: u16) {
 
 /// Shared body of the four `sock_addr` hooks. Returns 1 to allow, 0 to fail the
 /// syscall with `EPERM`.
+///
+/// `stage` is a constant at every call site, so nothing is read at run time to
+/// know which hook this is.
 #[inline(always)]
-fn sock_addr_verdict(ctx: &SockAddrContext, v4: bool) -> i32 {
+fn sock_addr_verdict(ctx: &SockAddrContext, v4: bool, stage: u8) -> i32 {
     // SAFETY: the kernel hands us a valid, writable context for the duration of
     // the call, and rewriting the destination is what these hooks are for.
     let sock_addr = unsafe { &mut *ctx.sock_addr };
@@ -268,9 +360,9 @@ fn sock_addr_verdict(ctx: &SockAddrContext, v4: bool) -> i32 {
     }
 
     let allowed = if v4 {
-        verdict_v4(sock_addr.user_ip4, port, proto)
+        judge_v4(sock_addr.user_ip4, port, proto, stage)
     } else {
-        verdict_v6(sock_addr_v6(sock_addr), port, proto)
+        judge_v6(sock_addr_v6(sock_addr), port, proto, stage)
     };
     i32::from(allowed)
 }
@@ -340,22 +432,22 @@ fn recvmsg_restore(ctx: &SockAddrContext, v4: bool) -> i32 {
 
 #[cgroup_sock_addr(connect4)]
 pub fn connect4(ctx: SockAddrContext) -> i32 {
-    sock_addr_verdict(&ctx, true)
+    sock_addr_verdict(&ctx, true, STAGE_CONNECT)
 }
 
 #[cgroup_sock_addr(connect6)]
 pub fn connect6(ctx: SockAddrContext) -> i32 {
-    sock_addr_verdict(&ctx, false)
+    sock_addr_verdict(&ctx, false, STAGE_CONNECT)
 }
 
 #[cgroup_sock_addr(sendmsg4)]
 pub fn sendmsg4(ctx: SockAddrContext) -> i32 {
-    sock_addr_verdict(&ctx, true)
+    sock_addr_verdict(&ctx, true, STAGE_SENDMSG)
 }
 
 #[cgroup_sock_addr(sendmsg6)]
 pub fn sendmsg6(ctx: SockAddrContext) -> i32 {
-    sock_addr_verdict(&ctx, false)
+    sock_addr_verdict(&ctx, false, STAGE_SENDMSG)
 }
 
 #[cgroup_sock_addr(recvmsg4)]
@@ -400,7 +492,7 @@ fn transport_port(ctx: &SkBuffContext, offset: usize, proto: u8, egress: bool) -
 }
 
 #[inline(always)]
-fn ipv4_verdict(ctx: &SkBuffContext, egress: bool) -> bool {
+fn ipv4_verdict(ctx: &SkBuffContext, egress: bool, stage: u8) -> bool {
     // A header we cannot read is one we cannot judge; the connect hooks have
     // already had their say on anything that went through a socket.
     let Ok(version_ihl) = ctx.load::<u8>(0) else {
@@ -416,11 +508,11 @@ fn ipv4_verdict(ctx: &SkBuffContext, egress: bool) -> bool {
     };
     let ihl = ((version_ihl & 0x0f) as usize) * 4;
     let port = transport_port(ctx, ihl, proto, egress);
-    verdict_v4(addr, port, normalise_proto(proto))
+    judge_v4(addr, port, normalise_proto(proto), stage)
 }
 
 #[inline(always)]
-fn ipv6_verdict(ctx: &SkBuffContext, egress: bool) -> bool {
+fn ipv6_verdict(ctx: &SkBuffContext, egress: bool, stage: u8) -> bool {
     let Ok(proto) = ctx.load::<u8>(6) else {
         return true;
     };
@@ -429,7 +521,7 @@ fn ipv6_verdict(ctx: &SkBuffContext, egress: bool) -> bool {
         return true;
     };
     let port = transport_port(ctx, 40, proto, egress);
-    verdict_v6(addr, port, normalise_proto(proto))
+    judge_v6(addr, port, normalise_proto(proto), stage)
 }
 
 #[inline(always)]
@@ -445,9 +537,10 @@ fn normalise_proto(proto: u8) -> u8 {
 /// on ingress. This is the layer that sees raw sockets and ICMP.
 #[inline(always)]
 fn skb_verdict(ctx: &SkBuffContext, egress: bool) -> i32 {
+    let stage = if egress { STAGE_EGRESS } else { STAGE_INGRESS };
     let allowed = match skb_protocol(ctx) {
-        ETH_P_IP => ipv4_verdict(ctx, egress),
-        ETH_P_IPV6 => ipv6_verdict(ctx, egress),
+        ETH_P_IP => ipv4_verdict(ctx, egress, stage),
+        ETH_P_IPV6 => ipv6_verdict(ctx, egress, stage),
         // Not IP at all: the policy has nothing to say about it.
         _ => true,
     };

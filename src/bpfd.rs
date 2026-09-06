@@ -14,6 +14,8 @@ pub mod caps;
 #[cfg(feature = "bpf")]
 pub mod dns;
 #[cfg(feature = "bpf")]
+pub mod events;
+#[cfg(feature = "bpf")]
 pub mod loader;
 #[cfg(feature = "bpf")]
 pub mod resolver;

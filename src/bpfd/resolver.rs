@@ -33,6 +33,8 @@ use glob::Pattern;
 use crate::{
     bpfd::{
         dns,
+        events::Bus,
+        protocol::Notification,
         trie::{self, DestKey},
     },
     policy::network::Action,
@@ -196,19 +198,33 @@ pub struct Resolver {
     sockets: Sockets,
     config: Config,
     bpf: Arc<Mutex<Ebpf>>,
+    /// Where refused lookups go. A name the rules do not mention is the first
+    /// thing a too-tight policy turns away, and long before any address is
+    /// reached — so it belongs on the same stream as the rest.
+    bus: Arc<Bus>,
     /// Every address this resolver put in a trie, and when it stops counting.
     learnt: Mutex<HashMap<(Action, DestKey), u64>>,
 }
 
 impl Resolver {
     #[must_use]
-    pub fn new(sockets: Sockets, config: Config, bpf: Arc<Mutex<Ebpf>>) -> Self {
+    pub fn new(sockets: Sockets, config: Config, bpf: Arc<Mutex<Ebpf>>, bus: Arc<Bus>) -> Self {
         Resolver {
             sockets,
             config,
             bpf,
+            bus,
             learnt: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Say that a name was not looked up, and why.
+    fn refuse(&self, query: &[u8], name: &str, reason: impl Into<String>) -> Vec<u8> {
+        self.bus.publish(Notification::DnsRefused {
+            name: name.to_owned(),
+            reason: reason.into(),
+        });
+        dns::refuse(query)
     }
 
     /// Serve queries until `stop` is set.
@@ -287,13 +303,14 @@ impl Resolver {
 
     /// Decide, forward, learn.
     fn answer(&self, query: &[u8]) -> Vec<u8> {
-        // A message we cannot parse is one we will not forward.
+        // A message we cannot parse is one we will not forward. There is no
+        // name to report either, which is the one refusal that stays silent.
         let Ok(question) = dns::question(query) else {
             return dns::refuse(query);
         };
 
         if !self.config.may_resolve(&question.name) {
-            return dns::refuse(query);
+            return self.refuse(query, &question.name, "no rule names it");
         }
 
         match self.forward(query) {
@@ -303,13 +320,14 @@ impl Resolver {
                     // with an answer it cannot use, which is worse than saying
                     // no: refuse instead of handing out a dead lead.
                     eprintln!("scudo-bpfd: resolver: {err:#}");
-                    return dns::refuse(query);
+                    self.refuse(query, &question.name, format!("{err:#}"))
+                } else {
+                    response
                 }
-                response
             }
             Err(err) => {
                 eprintln!("scudo-bpfd: resolver: {err:#}");
-                dns::refuse(query)
+                self.refuse(query, &question.name, format!("{err:#}"))
             }
         }
     }

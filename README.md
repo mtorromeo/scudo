@@ -200,6 +200,7 @@ default = "deny"            # "deny" (default) or "allow"
 inbound = "deny"            # "deny" (default) or "allow"
 service_manager = "deny"    # "deny" (default) or "allow"
 on_unavailable = "fail"     # "fail" (default), "no-network", or "warn"
+log = "off"                 # "off" (default) or "denied"
 
 dest = { allow = ["10.0.0.0/8", "*.crates.io"], deny = ["10.1.2.0/24"] }
 ports = { allow = [443, "53/udp"], deny = [22] }
@@ -381,6 +382,31 @@ or the kernel does not support it — `on_unavailable` decides what happens:
 
 The default is fail-closed: a profile that asks for a network policy never silently runs
 without one.
+
+#### Seeing what was blocked
+
+A denied connection reaches the command as a bare `EPERM`, and a denied packet as nothing at
+all, so a policy that is one rule too tight looks like a program that is simply broken.
+`--verbose`, or `log = "denied"` on the profile, turns every refusal into a line on stderr:
+
+```console
+$ scudo --verbose -- curl -sS https://example.com/
+scudo: blocked DNS lookup of example.com (no rule names it)
+scudo: blocked connect to 1.1.1.1:443/tcp
+scudo: curl: blocked example.com (2x), 1.1.1.1:443 (7x) [5 repeats suppressed]
+```
+
+Refused DNS lookups are on the same stream, and usually come first: naming a host in a rule is
+also what permits resolving it, so a missing rule shows up as a name that will not resolve long
+before any address is reached.
+
+Reporting is off unless asked for. It costs a ring buffer per sandbox and a small process to
+read it, and with it off the emit sites are folded out of the eBPF programs entirely, so a
+sandbox nobody is watching pays nothing. Repeats of the same refusal within a few seconds are
+collapsed into one line — a denied connection is retried, and one `curl` would otherwise fill
+the screen — and the closing summary counts every attempt, including the ones that were never
+printed. A policy realised as `PrivateNetwork=yes` has no programs attached and therefore
+nothing to report; `--verbose` says so rather than leaving the silence to be misread.
 
 ### Match patterns
 

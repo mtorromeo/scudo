@@ -71,15 +71,25 @@ fn config_with(network: &str) -> tempdir::TempDir {
     dir
 }
 
-/// Run `curl` against `port` under the `probe` profile, returning its exit code.
-fn probe(network: &str, port: u16) -> i32 {
+/// Run `curl` against `port` under the `probe` profile, returning its exit code
+/// and everything scudo put on stderr.
+///
+/// stderr is a pipe, and with `--verbose` the watcher process inherits it, so
+/// reading to EOF also waits for the watcher to finish — which is exactly what
+/// makes the closing summary observable here.
+fn run_probe(network: &str, port: u16, verbose: bool) -> (i32, String) {
     require_daemon();
     let dir = config_with(network);
     let url = format!("http://127.0.0.1:{port}/");
-    let status = Command::new(env!("CARGO_BIN_EXE_scudo"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_scudo"));
+    command
         .env("XDG_CONFIG_HOME", dir.path())
         // Run from a directory with no .scudo.toml, so no trust prompt appears.
-        .current_dir(dir.path())
+        .current_dir(dir.path());
+    if verbose {
+        command.arg("--verbose");
+    }
+    let output = command
         .args([
             "--no-match",
             "--profile",
@@ -93,9 +103,17 @@ fn probe(network: &str, port: u16) -> i32 {
             "/dev/null",
             &url,
         ])
-        .status()
+        .output()
         .expect("running scudo");
-    status.code().unwrap_or(-1)
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Run `curl` against `port` under the `probe` profile, returning its exit code.
+fn probe(network: &str, port: u16) -> i32 {
+    run_probe(network, port, false).0
 }
 
 #[test]
@@ -380,4 +398,59 @@ mod tempdir {
             drop(std::fs::remove_dir_all(&self.path));
         }
     }
+}
+
+/// A refused connection reaches the command as a bare `EPERM`, which is
+/// indistinguishable from the program being broken. Verbose mode has to say
+/// what was refused, and say it while the command is still running.
+#[test]
+#[ignore = "needs scudo-bpfd with CAP_BPF"]
+fn a_blocked_connection_is_reported_on_stderr() {
+    let blocked = Sink::spawn();
+    let network = "network.dest.allow = [\"10.0.0.0/8\"]\n";
+    let (code, stderr) = run_probe(network, blocked.port, true);
+    assert_eq!(code, CURL_COULD_NOT_CONNECT);
+
+    let expected = format!("blocked connect to 127.0.0.1:{}/tcp", blocked.port);
+    assert!(
+        stderr.contains(&expected),
+        "expected '{expected}' on stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("curl: blocked 127.0.0.1"),
+        "expected a closing summary, got:\n{stderr}"
+    );
+}
+
+/// And says nothing when it was not asked to: an ordinary run must not start a
+/// watcher or print anything the user did not ask for.
+#[test]
+#[ignore = "needs scudo-bpfd with CAP_BPF"]
+fn nothing_is_reported_unless_it_was_asked_for() {
+    let blocked = Sink::spawn();
+    let network = "network.dest.allow = [\"10.0.0.0/8\"]\n";
+    let (code, stderr) = run_probe(network, blocked.port, false);
+    assert_eq!(code, CURL_COULD_NOT_CONNECT);
+    assert!(
+        !stderr.contains("blocked"),
+        "expected a quiet run, got:\n{stderr}"
+    );
+}
+
+/// A run that reaches everything it asked for still says so, because silence
+/// reads the same as the reporting never having started.
+#[test]
+#[ignore = "needs scudo-bpfd with CAP_BPF"]
+fn a_run_that_was_never_blocked_says_so() {
+    let sink = Sink::spawn();
+    let network = format!(
+        "network.dest.allow = [\"127.0.0.1\"]\nnetwork.ports.allow = [{}]\n",
+        sink.port
+    );
+    let (code, stderr) = run_probe(&network, sink.port, true);
+    assert_eq!(code, CURL_EMPTY_REPLY);
+    assert!(
+        stderr.contains("curl: nothing was blocked"),
+        "expected the empty summary, got:\n{stderr}"
+    );
 }

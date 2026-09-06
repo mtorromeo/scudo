@@ -3,9 +3,13 @@
 //! One object is loaded per sandbox, so its maps and `.rodata` belong to that
 //! sandbox alone: no policy id, no shared state, and cleanup is just a drop.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::atomic::{AtomicBool, Ordering},
+};
 use std::{
     fs::File,
+    os::fd::AsRawFd as _,
     path::Path,
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -14,49 +18,67 @@ use std::{
 use anyhow::{Context as _, Result};
 use aya::{
     Ebpf, EbpfLoader,
-    maps::Array,
+    maps::{Array, MapData, PerCpuArray, RingBuf},
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSockAddr},
 };
 use glob::Pattern;
 use scudo_bpf_common::{
-    ACTION_ALLOW, ACTION_DENY, PORTS_ENTRIES, SET_ALLOW, SET_DENY, SLOT_TCP, SLOT_UDP, port_bit,
-    port_word,
+    ACTION_ALLOW, ACTION_DENY, DenialEvent, EVENTS_BYTES, EVENTS_BYTES_OFF, FAMILY_V4, FAMILY_V6,
+    PORTS_ENTRIES, PROTO_TCP, PROTO_UDP, SET_ALLOW, SET_DENY, SLOT_TCP, SLOT_UDP, STAGE_CONNECT,
+    STAGE_EGRESS, STAGE_INGRESS, STAGE_SENDMSG, port_bit, port_word,
 };
 
 use crate::{
     bpfd::{
+        events::Bus,
+        protocol::{Notification, Stage, Transport},
         resolver::{self, Config as ResolverConfig, HostRule, Resolver, Sockets},
         trie::{self, DestKey},
     },
     policy::network::{Action, NetworkPolicy, PortRule, Protocol},
 };
 
+/// How often the ring buffer reader wakes to check whether it should stop, and
+/// to pick up the count of events that did not fit. The same half second the
+/// resolver's loop uses.
+const POLL_INTERVAL_MS: i32 = 500;
+
 /// The compiled programs, built by `build.rs`.
 static PROGRAM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scudo-net"));
 
 /// A loaded, attached policy. Dropping it detaches every program and stops the
-/// resolver that went with it.
+/// threads that went with it.
 pub struct Attached {
     /// Keeping the object alive is what keeps the programs attached.
     _bpf: Arc<Mutex<Ebpf>>,
-    resolver: Option<ResolverThread>,
+    resolver: Option<Worker>,
+    events: Option<Worker>,
 }
 
-/// The resolver thread and the flag that ends it.
-struct ResolverThread {
+/// A thread belonging to one sandbox, and the flag that ends it.
+struct Worker {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
+impl Worker {
+    /// Ask the thread to stop and wait for it. Both of ours wake at least twice
+    /// a second, so this is a short wait.
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            drop(handle.join());
+        }
+    }
+}
+
 impl Drop for Attached {
     fn drop(&mut self) {
-        let Some(resolver) = self.resolver.as_mut() else {
-            return;
-        };
-        resolver.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = resolver.handle.take() {
-            // The thread wakes at least twice a second, so this is a short wait.
-            drop(handle.join());
+        for worker in [self.events.as_mut(), self.resolver.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            worker.stop();
         }
     }
 }
@@ -131,7 +153,7 @@ fn set_bits(words: &mut [u64], set: u32, rule: PortRule) {
 /// already stack). Several links may sit on the same hook, and the kernel
 /// combines their verdicts with a logical AND, so another policy on the same
 /// cgroup can only ever narrow what is allowed — never widen it.
-pub fn attach(policy: &NetworkPolicy, cgroup: &Path) -> Result<Attached> {
+pub fn attach(policy: &NetworkPolicy, cgroup: &Path, bus: &Arc<Bus>) -> Result<Attached> {
     let statics = static_keys(policy);
     let hosts = host_rules(policy)?;
     let ports = port_bitmaps(policy);
@@ -151,12 +173,18 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path) -> Result<Attached> {
     // verified program, so a policy with no port rules pays nothing for them.
     let deny_set = u8::from(!policy.ports.deny.is_empty());
     let allow_set = u8::from(!policy.ports.allow.is_empty());
+    // Reporting is folded out of the programs the same way, so a sandbox nobody
+    // is watching carries none of it — and its ring buffer shrinks to a page,
+    // which at a hundred-odd live sandboxes is the difference that matters.
+    let reporting = policy.reports_denials();
     let mut bpf = EbpfLoader::new()
         .override_global("DEFAULT_ACTION", &action_value(policy.default), true)
         .override_global("RESOLVER_PORT_V4", &port_v4, true)
         .override_global("RESOLVER_PORT_V6", &port_v6, true)
         .override_global("PORTS_DENY_SET", &deny_set, true)
         .override_global("PORTS_ALLOW_SET", &allow_set, true)
+        .override_global("LOG_DENIALS", &u8::from(reporting), true)
+        .map_max_entries("EVENTS", events_bytes(reporting))
         .load(PROGRAM)
         .context("loading eBPF programs")?;
 
@@ -237,6 +265,15 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path) -> Result<Attached> {
             .context("attaching ingress")?;
     }
 
+    // Taken out before the object is shared: the reader owns these two, and
+    // nothing else ever looks at them. The programs keep referring to the maps
+    // themselves, which live in the kernel either way.
+    let events = if reporting {
+        Some(start_events(&mut bpf, Arc::clone(bus))?)
+    } else {
+        None
+    };
+
     let bpf = Arc::new(Mutex::new(bpf));
 
     let resolver = match sockets {
@@ -246,6 +283,7 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path) -> Result<Attached> {
             hosts,
             statics,
             Arc::clone(&bpf),
+            Arc::clone(bus),
         )?),
         None => None,
     };
@@ -253,6 +291,127 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path) -> Result<Attached> {
     Ok(Attached {
         _bpf: bpf,
         resolver,
+        events,
+    })
+}
+
+/// How much ring buffer to ask for. The kernel wants a power-of-two multiple of
+/// the page size, so the floor is a page and not a fixed 4 KB.
+fn events_bytes(reporting: bool) -> u32 {
+    if reporting {
+        return EVENTS_BYTES;
+    }
+    // SAFETY: sysconf reads a constant and touches no memory of ours.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    u32::try_from(page)
+        .unwrap_or(EVENTS_BYTES_OFF)
+        .max(EVENTS_BYTES_OFF)
+}
+
+/// Start the thread that carries denials from the kernel to the bus.
+fn start_events(bpf: &mut Ebpf, bus: Arc<Bus>) -> Result<Worker> {
+    let ring: RingBuf<MapData> = bpf
+        .take_map("EVENTS")
+        .context("eBPF object has no EVENTS map")?
+        .try_into()
+        .context("EVENTS is not a ring buffer")?;
+    let dropped: PerCpuArray<MapData, u64> = bpf
+        .take_map("DROPPED")
+        .context("eBPF object has no DROPPED map")?
+        .try_into()
+        .context("DROPPED is not a per-CPU array")?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = std::thread::Builder::new()
+        .name("events".to_owned())
+        .spawn(move || read_events(ring, &dropped, &bus, &thread_stop))
+        .context("starting the event reader thread")?;
+
+    Ok(Worker {
+        stop,
+        handle: Some(handle),
+    })
+}
+
+/// Drain the ring buffer onto the bus until the sandbox goes away.
+fn read_events(
+    mut ring: RingBuf<MapData>,
+    dropped: &PerCpuArray<MapData, u64>,
+    bus: &Bus,
+    stop: &AtomicBool,
+) {
+    let mut fds = [libc::pollfd {
+        fd: ring.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    let mut reported = 0u64;
+
+    while !stop.load(Ordering::Relaxed) {
+        while let Some(item) = ring.next() {
+            if let Some(event) = DenialEvent::from_bytes(&item)
+                && let Some(notification) = notification(&event)
+            {
+                bus.publish(notification);
+            }
+        }
+        // Whatever the kernel could not fit in while we were away. Reported as
+        // a delta, because the counters only ever go up.
+        let total = total_dropped(dropped);
+        if total > reported {
+            bus.note_lost(total.saturating_sub(reported));
+            reported = total;
+        }
+        // SAFETY: fds is a live, correctly sized array of pollfd.
+        unsafe {
+            libc::poll(
+                fds.as_mut_ptr(),
+                fds.len() as libc::nfds_t,
+                POLL_INTERVAL_MS,
+            );
+        }
+    }
+}
+
+/// The per-CPU tallies of events that did not fit, added up.
+fn total_dropped(dropped: &PerCpuArray<MapData, u64>) -> u64 {
+    dropped.get(&0, 0).map_or(0, |values| {
+        values.iter().copied().fold(0u64, u64::saturating_add)
+    })
+}
+
+/// Turn one event from the kernel into the message a watcher reads.
+///
+/// An event whose fields name nothing we know is dropped rather than guessed
+/// at: the two ends are built together, so it would mean the object and the
+/// daemon had come apart.
+fn notification(event: &DenialEvent) -> Option<Notification> {
+    let addr = match event.family {
+        FAMILY_V4 => {
+            let octets: [u8; 4] = event.addr.get(..4)?.try_into().ok()?;
+            IpAddr::V4(Ipv4Addr::from(octets))
+        }
+        FAMILY_V6 => IpAddr::V6(Ipv6Addr::from(event.addr)),
+        _ => return None,
+    };
+    let stage = match event.stage {
+        STAGE_CONNECT => Stage::Connect,
+        STAGE_SENDMSG => Stage::Sendmsg,
+        STAGE_EGRESS => Stage::Egress,
+        STAGE_INGRESS => Stage::Ingress,
+        _ => return None,
+    };
+    let transport = match event.proto {
+        PROTO_TCP => Transport::Tcp,
+        PROTO_UDP => Transport::Udp,
+        _ => Transport::Other,
+    };
+    Some(Notification::Blocked {
+        stage,
+        transport,
+        addr,
+        port: event.port,
     })
 }
 
@@ -263,7 +422,8 @@ fn start_resolver(
     hosts: Vec<HostRule>,
     statics: Vec<(Action, DestKey)>,
     bpf: Arc<Mutex<Ebpf>>,
-) -> Result<ResolverThread> {
+    bus: Arc<Bus>,
+) -> Result<Worker> {
     let config = ResolverConfig {
         hosts,
         // A learnt address that happens to equal a declared one shares its key,
@@ -278,12 +438,97 @@ fn start_resolver(
     let handle = std::thread::Builder::new()
         .name("resolver".to_owned())
         .spawn(move || {
-            Resolver::new(sockets, config, bpf).run(&thread_stop);
+            Resolver::new(sockets, config, bpf, bus).run(&thread_stop);
         })
         .context("starting the resolver thread")?;
 
-    Ok(ResolverThread {
+    Ok(Worker {
         stop,
         handle: Some(handle),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(family: u8, addr: [u8; 16], stage: u8, proto: u8, port: u16) -> DenialEvent {
+        DenialEvent {
+            addr,
+            port,
+            family,
+            proto,
+            stage,
+            _pad: [0; 3],
+        }
+    }
+
+    #[test]
+    fn a_v4_event_names_the_address_it_carries() {
+        let mut addr = [0u8; 16];
+        addr[..4].copy_from_slice(&[1, 1, 1, 1]);
+        let got = notification(&event(FAMILY_V4, addr, STAGE_CONNECT, PROTO_TCP, 443));
+        assert_eq!(
+            got,
+            Some(Notification::Blocked {
+                stage: Stage::Connect,
+                transport: Transport::Tcp,
+                addr: "1.1.1.1".parse().unwrap(),
+                port: 443,
+            })
+        );
+    }
+
+    /// ICMP and raw sockets carry no port and no transport of their own, and
+    /// only the packet-level hooks ever see them.
+    #[test]
+    fn a_portless_event_is_reported_as_such() {
+        let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let got = notification(&event(FAMILY_V6, addr, STAGE_EGRESS, 1, 0));
+        assert_eq!(
+            got,
+            Some(Notification::Blocked {
+                stage: Stage::Egress,
+                transport: Transport::Other,
+                addr: "2001:db8::1".parse().unwrap(),
+                port: 0,
+            })
+        );
+    }
+
+    /// A field naming something we do not know means the object and the daemon
+    /// have come apart; inventing a plausible event would be worse than none.
+    #[test]
+    fn an_event_we_cannot_read_is_dropped() {
+        assert_eq!(
+            notification(&event(7, [0; 16], STAGE_CONNECT, PROTO_TCP, 443)),
+            None
+        );
+        assert_eq!(
+            notification(&event(FAMILY_V4, [0; 16], 99, PROTO_TCP, 443)),
+            None
+        );
+    }
+
+    /// Every stage the programs can report has a name on the wire.
+    #[test]
+    fn every_stage_is_covered() {
+        for stage in [STAGE_CONNECT, STAGE_SENDMSG, STAGE_EGRESS, STAGE_INGRESS] {
+            assert!(
+                notification(&event(FAMILY_V4, [0; 16], stage, PROTO_UDP, 53)).is_some(),
+                "stage {stage} has no notification"
+            );
+        }
+    }
+
+    /// The ring buffer size the kernel is asked for has to be a power-of-two
+    /// multiple of the page size, at both settings.
+    #[test]
+    fn the_ring_buffer_size_is_one_the_kernel_will_take() {
+        for reporting in [true, false] {
+            let size = events_bytes(reporting);
+            assert!(size.is_power_of_two(), "{size} is not a power of two");
+            assert!(size >= EVENTS_BYTES_OFF);
+        }
+    }
 }

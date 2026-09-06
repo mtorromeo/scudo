@@ -5,15 +5,20 @@ use std::os::unix::net::UnixStream;
 use anyhow::{Context as _, Result, bail};
 
 use crate::{
-    bpfd::protocol::{Request, Response, read_message, socket_path, write_message},
+    bpfd::protocol::{MessageReader, Request, Response, read_message, socket_path, write_message},
     policy::Policy,
 };
 
+/// Open a connection to the daemon.
+fn connect() -> Result<UnixStream> {
+    let path = socket_path()?;
+    UnixStream::connect(&path)
+        .with_context(|| format!("connecting to scudo-bpfd at {}", path.display()))
+}
+
 /// Send one request and read the reply.
 fn round_trip(request: &Request) -> Result<Response> {
-    let path = socket_path()?;
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!("connecting to scudo-bpfd at {}", path.display()))?;
+    let stream = connect()?;
     write_message(&stream, request)?;
     read_message(&stream)
 }
@@ -30,7 +35,7 @@ pub fn register(policies: &[Policy]) -> Result<String> {
     match round_trip(&request)? {
         Response::Registered { token } => Ok(token),
         Response::Error { message } => bail!("{message}"),
-        Response::Attached => bail!("unexpected reply from scudo-bpfd"),
+        Response::Attached | Response::Watching => bail!("unexpected reply from scudo-bpfd"),
     }
 }
 
@@ -43,6 +48,29 @@ pub fn attach(token: &str) -> Result<()> {
     match round_trip(&request)? {
         Response::Attached => Ok(()),
         Response::Error { message } => bail!("{message}"),
-        Response::Registered { .. } => bail!("unexpected reply from scudo-bpfd"),
+        Response::Registered { .. } | Response::Watching => {
+            bail!("unexpected reply from scudo-bpfd")
+        }
+    }
+}
+
+/// Follow what the sandbox registered under `token` turns away.
+///
+/// Returns a reader positioned on the stream of notifications; it ends when the
+/// sandbox is torn down, which the daemon marks with a summary and then a close.
+pub fn watch(token: &str) -> Result<MessageReader> {
+    let stream = connect()?;
+    let request = Request::Watch {
+        token: token.to_owned(),
+    };
+    write_message(&stream, &request)?;
+    let mut reader = MessageReader::new(stream);
+    match reader.read::<Response>()? {
+        Some(Response::Watching) => Ok(reader),
+        Some(Response::Error { message }) => bail!("{message}"),
+        Some(Response::Registered { .. } | Response::Attached) => {
+            bail!("unexpected reply from scudo-bpfd")
+        }
+        None => bail!("scudo-bpfd closed the connection"),
     }
 }

@@ -10,7 +10,7 @@ pub mod network;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub use network::{NetworkConfig, NetworkPolicy, OnUnavailable};
+pub use network::{LogLevel, NetworkConfig, NetworkPolicy, OnUnavailable};
 
 /// A single enforcement policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +20,22 @@ pub enum Policy {
 }
 
 impl Policy {
+    /// `true` when this policy asks for the accesses it refuses to be reported.
+    #[must_use]
+    pub fn reports_denials(&self) -> bool {
+        match self {
+            Policy::Network(policy) => policy.reports_denials(),
+        }
+    }
+
+    /// Turn reporting on, whatever the profile asked for. This is what
+    /// `--verbose` does: the flag can only ever make scudo louder.
+    pub fn report_denials(&mut self) {
+        match self {
+            Policy::Network(policy) => policy.log = policy.log.max(LogLevel::Denied),
+        }
+    }
+
     /// The systemd unit properties this policy requires in order to be
     /// enforceable. They are added on top of whatever the profile itself sets.
     ///

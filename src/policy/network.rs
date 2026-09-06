@@ -47,6 +47,34 @@ pub enum OnUnavailable {
     Warn,
 }
 
+/// How much of what the policy turns away is reported back to the user.
+///
+/// Off by default: reporting costs a ring buffer per sandbox and a process to
+/// read it, and most commands are run without anyone watching. `--verbose`
+/// turns it on for one run; this is how a profile keeps it on for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogLevel {
+    /// Say nothing.
+    #[default]
+    Off,
+    /// Report every access the policy refused.
+    Denied,
+}
+
+impl LogLevel {
+    /// The louder of two settings. A profile that asked to be told must not be
+    /// silenced by one that did not ask either way.
+    #[must_use]
+    pub fn max(self, other: Self) -> Self {
+        if self == LogLevel::Denied || other == LogLevel::Denied {
+            LogLevel::Denied
+        } else {
+            LogLevel::Off
+        }
+    }
+}
+
 /// An inclusive port range. A single port is stored as `start == end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortRange {
@@ -131,6 +159,11 @@ pub struct NetworkPolicy {
     /// two lines of shell.
     pub service_manager: Action,
     pub on_unavailable: OnUnavailable,
+    /// Whether the sandbox reports what it turns away. Carried in the policy
+    /// because it is the daemon that has to act on it: the programs only emit
+    /// events when the loader has told them to.
+    #[serde(default)]
+    pub log: LogLevel,
     pub dest: RuleSet<Destination>,
     pub ports: RuleSet<PortRule>,
 }
@@ -172,6 +205,15 @@ impl NetworkPolicy {
     #[must_use]
     pub fn requires_enforcer(&self) -> bool {
         !self.is_deny_all() && !self.is_unrestricted()
+    }
+
+    /// `true` when the sandbox should report the accesses it turns away.
+    ///
+    /// Only an enforced policy can: a `PrivateNetwork=yes` sandbox has no
+    /// programs attached and nothing to report from.
+    #[must_use]
+    pub fn reports_denials(&self) -> bool {
+        self.log == LogLevel::Denied && self.requires_enforcer()
     }
 
     /// `true` when the policy needs its own DNS resolver.
@@ -226,6 +268,8 @@ pub struct NetworkConfig {
     pub inbound: Option<Action>,
     pub service_manager: Option<Action>,
     pub on_unavailable: Option<OnUnavailable>,
+    /// Report the accesses this policy refuses. `--verbose` implies it.
+    pub log: Option<LogLevel>,
     /// Addresses, networks and host names, as bare strings.
     #[serde(default)]
     pub dest: RuleSet<String>,
@@ -341,6 +385,7 @@ impl TryFrom<NetworkConfig> for NetworkPolicy {
             inbound: config.inbound.unwrap_or_default(),
             service_manager: config.service_manager.unwrap_or_default(),
             on_unavailable: config.on_unavailable.unwrap_or_default(),
+            log: config.log.unwrap_or_default(),
             dest: RuleSet {
                 allow: destinations(config.dest.allow)?,
                 deny: destinations(config.dest.deny)?,

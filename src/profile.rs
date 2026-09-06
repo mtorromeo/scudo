@@ -845,7 +845,9 @@ mod tests {
     use super::*;
     use crate::{
         config::ArgAliasDecl,
-        policy::network::{Action, Destination, OnUnavailable, PortRange, PortRule, Protocol},
+        policy::network::{
+            Action, Destination, LogLevel, OnUnavailable, PortRange, PortRule, Protocol,
+        },
     };
 
     fn make_configs(profiles: Vec<(&str, ValidatedProfileConfig)>) -> ValidatedConfigMap {
@@ -1756,6 +1758,58 @@ mod tests {
         );
         assert_eq!(policy.on_unavailable, OnUnavailable::NoNetwork);
         assert_eq!(policy.default, Action::Deny);
+    }
+
+    /// A profile can ask to be told what it blocks, without the rest of the
+    /// verbose output coming with it.
+    #[test]
+    fn a_profile_can_turn_denial_reporting_on() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            match = "curl"
+            network.log = "denied"
+            network.dest.allow = ["1.1.1.1"]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(policy.log, LogLevel::Denied);
+        assert!(policy.reports_denials());
+    }
+
+    /// Off unless asked: reporting costs a ring buffer and a process to read
+    /// it, and most commands run with nobody watching.
+    #[test]
+    fn reporting_is_off_by_default() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            match = "curl"
+            network.dest.allow = ["1.1.1.1"]
+            "#,
+            "curl",
+            &[],
+        );
+        assert_eq!(policy.log, LogLevel::Off);
+        assert!(!policy.reports_denials());
+    }
+
+    /// A policy realised by taking the network away has no programs attached,
+    /// so there is nothing for them to report even when asked.
+    #[test]
+    fn a_networkless_policy_reports_nothing() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            match = "curl"
+            network.log = "denied"
+            "#,
+            "curl",
+            &[],
+        );
+        assert!(policy.is_deny_all());
+        assert!(!policy.reports_denials());
     }
 
     /// Resolving a profile only collects the policy; the properties it needs

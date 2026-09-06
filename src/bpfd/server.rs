@@ -16,7 +16,7 @@ use std::{
         unix::net::{UnixListener, UnixStream},
     },
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc::Receiver},
     time::Instant,
 };
 
@@ -25,8 +25,9 @@ use anyhow::{Context as _, Result, bail};
 use crate::{
     bpfd::{
         caps, cgroup,
+        events::Bus,
         loader::{self, Attached},
-        protocol::{Request, Response, read_message, socket_path, write_message},
+        protocol::{Notification, Request, Response, read_message, socket_path, write_message},
     },
     policy::Policy,
 };
@@ -58,11 +59,22 @@ struct Pending {
     /// stays alive across the whole wait, and while it is there the registration
     /// is still on its way to being claimed.
     owner: i32,
+    /// Who registered, so that only they may watch it.
+    owner_uid: u32,
+    /// Where this sandbox's refusals go. It exists from registration rather
+    /// than from attachment because the watcher connects in between: the
+    /// command has not started yet, which is exactly when there is still
+    /// nothing to miss.
+    bus: Arc<Bus>,
 }
 
 /// A sandbox with policies attached. Dropping it detaches them.
 struct Sandbox {
     cgroup_dir: PathBuf,
+    /// The token it was claimed with, which is also how a watcher names it.
+    token: String,
+    owner_uid: u32,
+    bus: Arc<Bus>,
     _attached: Vec<Attached>,
 }
 
@@ -82,14 +94,49 @@ impl State {
         self.pending.retain(|_, p| {
             let age = now.duration_since(p.registered_at);
             if age >= PENDING_MAX_LIFETIME {
+                // Nothing was ever attached, so there is nothing to summarise,
+                // but a watcher that connected has to be let go all the same.
+                p.bus.close();
                 return false;
             }
             // Whoever registered is still on their way here: scudo asks for the
             // token before it runs the command, and between the two it may stop
             // to ask the user. Only once it is gone does the timeout decide.
-            process_alive(p.owner) || age < CLAIM_TIMEOUT
+            if process_alive(p.owner) || age < CLAIM_TIMEOUT {
+                return true;
+            }
+            p.bus.close();
+            false
         });
-        self.sandboxes.retain(|s| s.cgroup_dir.exists());
+        self.sandboxes.retain(|s| {
+            if s.cgroup_dir.exists() {
+                return true;
+            }
+            // The command has finished: send the summary before the programs
+            // come down with the sandbox, which is what ends the watcher.
+            s.bus.close();
+            false
+        });
+    }
+
+    /// The bus of a sandbox or registration named by `token`, if the caller is
+    /// the one who registered it.
+    fn bus_for(&self, token: &str, uid: u32) -> Result<Arc<Bus>> {
+        if let Some(pending) = self.pending.get(token) {
+            if pending.owner_uid != uid {
+                bail!("that registration belongs to another user");
+            }
+            return Ok(Arc::clone(&pending.bus));
+        }
+        let sandbox = self
+            .sandboxes
+            .iter()
+            .find(|s| s.token == token)
+            .context("unknown token")?;
+        if sandbox.owner_uid != uid {
+            bail!("that sandbox belongs to another user");
+        }
+        Ok(Arc::clone(&sandbox.bus))
     }
 }
 
@@ -200,23 +247,64 @@ fn set_socket_permissions(path: &std::path::Path) -> Result<()> {
 }
 
 fn serve(stream: &UnixStream, state: &Mutex<State>) {
-    let response = match handle(stream, state) {
-        Ok(response) => response,
-        Err(err) => Response::Error {
-            message: format!("{err:#}"),
-        },
+    let outcome = match read_message(stream) {
+        Ok(request) => handle(request, stream, state),
+        Err(err) => Err(err),
+    };
+    let (response, events) = match outcome {
+        Ok(Served::Reply(response)) => (response, None),
+        Ok(Served::Stream(events)) => (Response::Watching, Some(events)),
+        Err(err) => (
+            Response::Error {
+                message: format!("{err:#}"),
+            },
+            None,
+        ),
     };
     if let Err(err) = write_message(stream, &response) {
         eprintln!("scudo-bpfd: cannot reply: {err:#}");
+        return;
+    }
+    if let Some(events) = events {
+        stream_events(stream, &events);
     }
 }
 
-fn handle(stream: &UnixStream, state: &Mutex<State>) -> Result<Response> {
-    let request: Request = read_message(stream)?;
+/// What handling a request left the connection in: answered and finished, or
+/// answered and now carrying a stream.
+enum Served {
+    Reply(Response),
+    Stream(Receiver<Notification>),
+}
+
+fn handle(request: Request, stream: &UnixStream, state: &Mutex<State>) -> Result<Served> {
     match request {
-        Request::Register { policies } => register(policies, stream, state),
-        Request::Attach { token } => attach(&token, stream, state),
+        Request::Register { policies } => register(policies, stream, state).map(Served::Reply),
+        Request::Attach { token } => attach(&token, stream, state).map(Served::Reply),
+        Request::Watch { token } => watch(&token, stream, state).map(Served::Stream),
     }
+}
+
+/// Feed one watcher until its sandbox is torn down.
+///
+/// The summary is the last thing the bus sends, so the loop ends on its own:
+/// first the channel runs dry and disconnects, then this returns and the
+/// connection closes under the watcher, which is how it knows to exit.
+fn stream_events(stream: &UnixStream, events: &Receiver<Notification>) {
+    while let Ok(event) = events.recv() {
+        // A watcher that has gone away is not an error; it is the usual way one
+        // ends when the user kills the whole session.
+        if write_message(stream, &event).is_err() {
+            return;
+        }
+    }
+}
+
+fn watch(token: &str, stream: &UnixStream, state: &Mutex<State>) -> Result<Receiver<Notification>> {
+    let (_, uid) = peer_credentials(stream)?;
+    let bus = lock(state)?.bus_for(token, uid)?;
+    bus.subscribe()
+        .context("that sandbox has as many watchers as it can take, or is already gone")
 }
 
 fn register(policies: Vec<Policy>, stream: &UnixStream, state: &Mutex<State>) -> Result<Response> {
@@ -224,7 +312,7 @@ fn register(policies: Vec<Policy>, stream: &UnixStream, state: &Mutex<State>) ->
         bail!("no policies to register");
     }
 
-    let (owner, _) = peer_credentials(stream)?;
+    let (owner, owner_uid) = peer_credentials(stream)?;
     let token = new_token()?;
     let mut state = lock(state)?;
     state.reap();
@@ -237,6 +325,8 @@ fn register(policies: Vec<Policy>, stream: &UnixStream, state: &Mutex<State>) ->
             policies,
             registered_at: Instant::now(),
             owner,
+            owner_uid,
+            bus: Arc::new(Bus::new()),
         },
     );
     Ok(Response::Registered { token })
@@ -267,18 +357,23 @@ fn attach(token: &str, stream: &UnixStream, state: &Mutex<State>) -> Result<Resp
     for policy in &pending.policies {
         match policy {
             Policy::Network(network) => {
-                attached.push(loader::attach(network, &cgroup_dir).with_context(|| {
-                    format!(
+                attached.push(
+                    loader::attach(network, &cgroup_dir, &pending.bus).with_context(|| {
+                        format!(
                         "attaching the network policy; if this is a permission error, check: {}",
                         caps::SETCAP_HINT
                     )
-                })?);
+                    })?,
+                );
             }
         }
     }
 
     state.sandboxes.push(Sandbox {
         cgroup_dir,
+        token: token.to_owned(),
+        owner_uid: pending.owner_uid,
+        bus: pending.bus,
         _attached: attached,
     });
     Ok(Response::Attached)
@@ -371,6 +466,8 @@ mod tests {
                 .checked_sub(age)
                 .expect("the test clock does not go that far back"),
             owner,
+            owner_uid: 0,
+            bus: Arc::new(Bus::new()),
         }
     }
 
@@ -419,6 +516,100 @@ mod tests {
             .insert("ancient".to_owned(), pending(mine, PENDING_MAX_LIFETIME));
         state.reap();
         assert!(state.pending.is_empty());
+    }
+
+    /// The whole watch path, daemon side: a watcher attaches to a registration
+    /// that has not been claimed yet — which is when scudo actually connects,
+    /// before the command has started — follows it live, and is signed off with
+    /// a summary when the registration goes away.
+    #[test]
+    fn a_watcher_follows_a_registration_from_before_it_is_claimed() {
+        use crate::bpfd::protocol::{MessageReader, Notification, Stage, Transport};
+
+        let state = Arc::new(Mutex::new(State::default()));
+        let bus = Arc::new(Bus::new());
+        let mine = i32::try_from(std::process::id()).expect("pid fits in an i32");
+        // SAFETY: getuid always succeeds and touches no memory.
+        let uid = unsafe { libc::getuid() };
+        state
+            .lock()
+            .expect("a fresh lock")
+            .pending
+            .insert("token".to_owned(), {
+                let mut p = pending(mine, Duration::from_secs(0));
+                p.owner_uid = uid;
+                p.bus = Arc::clone(&bus);
+                p
+            });
+
+        let (client, server) = UnixStream::pair().expect("a socket pair");
+        write_message(
+            &client,
+            &Request::Watch {
+                token: "token".to_owned(),
+            },
+        )
+        .expect("sending the request");
+
+        let daemon = Arc::clone(&state);
+        let handle = std::thread::spawn(move || serve(&server, &daemon));
+
+        let mut reader = MessageReader::new(client);
+        assert!(matches!(
+            reader.read::<Response>().expect("a reply"),
+            Some(Response::Watching)
+        ));
+
+        let blocked = Notification::Blocked {
+            stage: Stage::Connect,
+            transport: Transport::Tcp,
+            addr: "1.1.1.1".parse().expect("a valid address"),
+            port: 443,
+        };
+        bus.publish(blocked.clone());
+        assert_eq!(
+            reader.read::<Notification>().expect("an event"),
+            Some(blocked)
+        );
+
+        // The command has finished: the sandbox goes, and the stream with it.
+        bus.close();
+        assert!(matches!(
+            reader.read::<Notification>().expect("a summary"),
+            Some(Notification::Summary { .. })
+        ));
+        assert_eq!(
+            reader.read::<Notification>().expect("a clean end"),
+            None,
+            "the connection should close behind the summary"
+        );
+        handle.join().expect("the serving thread finishes");
+    }
+
+    /// A token nobody registered is refused, rather than answered with a stream
+    /// that would never carry anything.
+    #[test]
+    fn watching_an_unknown_token_is_an_error() {
+        let state = Arc::new(Mutex::new(State::default()));
+        let (client, server) = UnixStream::pair().expect("a socket pair");
+        write_message(
+            &client,
+            &Request::Watch {
+                token: "nobody's".to_owned(),
+            },
+        )
+        .expect("sending the request");
+
+        let daemon = Arc::clone(&state);
+        std::thread::spawn(move || serve(&server, &daemon))
+            .join()
+            .expect("the serving thread finishes");
+
+        let reply: Response = read_message(&client).expect("a reply");
+        assert!(
+            matches!(&reply, Response::Error { message } if message.contains("unknown token")),
+            "expected a refusal, got {reply:?}"
+        );
     }
 
     #[test]
