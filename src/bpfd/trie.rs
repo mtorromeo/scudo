@@ -134,6 +134,7 @@ pub fn remove(bpf: &mut Ebpf, action: Action, key: DestKey) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[expect(clippy::panic)]
     #[test]
     fn a_v4_key_holds_the_address_in_network_order() {
         let DestKey::V4 { addr, prefix_len } = DestKey::net("10.0.0.0".parse().unwrap(), 8u8)

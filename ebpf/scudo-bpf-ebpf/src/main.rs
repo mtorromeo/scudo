@@ -299,10 +299,10 @@ fn remember_dns_origin(ctx: &SockAddrContext, sock_addr: &bpf_sock_addr, v4: boo
     // "dereference of modified ctx ptr" — and `&sock_addr.user_ip4` is one.
     if v4 {
         let addr = sock_addr.user_ip4;
-        _ = DNS_ORIGIN_V4.insert(&cookie, &addr, 0);
+        _ = DNS_ORIGIN_V4.insert(cookie, addr, 0);
     } else {
         let addr = sock_addr_v6(sock_addr);
-        _ = DNS_ORIGIN_V6.insert(&cookie, &addr, 0);
+        _ = DNS_ORIGIN_V6.insert(cookie, addr, 0);
     }
 }
 
@@ -328,10 +328,10 @@ fn recvmsg_restore(ctx: &SockAddrContext, v4: bool) -> i32 {
     let cookie = socket_cookie(ctx);
     // SAFETY: the value is copied out before anything else can touch the map.
     if v4 {
-        if let Some(&addr) = unsafe { DNS_ORIGIN_V4.get(&cookie) } {
+        if let Some(&addr) = unsafe { DNS_ORIGIN_V4.get(cookie) } {
             sock_addr.user_ip4 = addr;
         }
-    } else if let Some(&addr) = unsafe { DNS_ORIGIN_V6.get(&cookie) } {
+    } else if let Some(&addr) = unsafe { DNS_ORIGIN_V6.get(cookie) } {
         set_sock_addr_v6(sock_addr, addr);
     }
     set_sock_addr_port(sock_addr, DNS_PORT);
