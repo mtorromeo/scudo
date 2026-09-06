@@ -971,7 +971,7 @@ mod tests {
         let configs = configs_from_toml(
             r#"
             [curl]
-            CPUQuota = "50%"
+            systemd.CPUQuota = "50%"
             "#,
         );
         let r = resolve(&configs, "curl", &[]).unwrap();
@@ -1632,7 +1632,7 @@ mod tests {
             [curl]
             match = "curl"
             network.dest.allow = ["1.1.1.1"]
-            MemoryMax = "256M"
+            systemd.MemoryMax = "256M"
             "#,
         );
         let resolved = resolve(&configs, "curl", &[]).unwrap();

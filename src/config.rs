@@ -123,7 +123,12 @@ where
     }))
 }
 
+/// A profile as written in TOML. Systemd unit properties live in the `systemd`
+/// sub-table rather than at the top level, so every other key is one this struct
+/// knows about and a misspelled one is an error instead of a silently ignored
+/// property.
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// `None` = absent: the profile never matches a command on its own and is
     /// reachable only through `extend` or `--profile`.
@@ -155,14 +160,14 @@ pub struct ProfileConfig {
     pub arg_flags: Vec<String>,
     /// Network policy, kept in its raw form so that `extend` can merge it field
     /// by field with the same array semantics as every other property.
-    /// Declaring it explicitly keeps it out of the flattened `properties` below,
-    /// which is what we want: it is not a systemd unit property.
     #[serde(default)]
     pub network: Option<toml::Table>,
-    /// All systemd unit properties, keyed by their exact systemd name.
-    /// Values are either a single string/bool/integer or an array thereof.
-    #[serde(flatten)]
-    pub properties: HashMap<String, toml::Value>,
+    /// The `[<profile>.systemd]` sub-table: unit properties keyed by their exact
+    /// systemd name. Values are either a single string/bool/integer or an array
+    /// thereof. Keeping them in a table of their own is what lets the profile's
+    /// own keys be checked for typos — see `deny_unknown_fields` above.
+    #[serde(default)]
+    pub systemd: HashMap<String, toml::Value>,
 }
 
 pub type ConfigMap = HashMap<String, ProfileConfig>;
@@ -205,7 +210,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                         arg_aliases: config.arg_aliases,
                         arg_flags: config.arg_flags,
                         network: config.network,
-                        properties: config.properties,
+                        properties: config.systemd,
                     },
                 ))
             })
@@ -316,7 +321,7 @@ fn substitute_config_dir(value: &mut toml::Value, dir: &str) {
 /// merged (via `extend` or multiple matches) we can no longer tell which file a
 /// given property came from.
 fn substitute_profile_config_dir(profile: &mut ProfileConfig, dir: &str) {
-    for value in profile.properties.values_mut() {
+    for value in profile.systemd.values_mut() {
         substitute_config_dir(value, dir);
     }
     if let Some(network) = profile.network.as_mut() {
@@ -455,7 +460,7 @@ mod tests {
         props.insert("CPUQuota".to_owned(), toml::Value::String(cpu.to_owned()));
         ProfileConfig {
             r#match: Some(vec![MatchEntry::Simple("app".to_owned())]),
-            properties: props,
+            systemd: props,
             ..Default::default()
         }
     }
@@ -470,8 +475,18 @@ mod tests {
     fn absent_match_never_matches() {
         // The section name is an identifier, not a pattern: without `match` the
         // profile is reachable only through `extend` or `--profile`.
-        let patterns = patterns_of("[curl]\nMemoryMax = \"256M\"\n", "curl").unwrap();
+        let patterns = patterns_of("[curl]\nsystemd.MemoryMax = \"256M\"\n", "curl").unwrap();
         assert!(patterns.is_empty());
+    }
+
+    /// Systemd properties belong in the `systemd` sub-table, so a stray key at
+    /// the top level is a typo (or the pre-`systemd` layout) rather than a
+    /// property — and saying so beats silently dropping it.
+    #[test]
+    fn unknown_profile_key_is_rejected() {
+        let err = toml::from_str::<ConfigMap>("[curl]\nMemoryMax = \"256M\"\n")
+            .expect_err("unknown key at the profile level");
+        assert!(err.to_string().contains("unknown field `MemoryMax`"));
     }
 
     #[test]
@@ -576,14 +591,14 @@ mod tests {
         );
         let mut profile = ProfileConfig {
             exec: Some("$SCUDO_CONFIG_DIR/wrapper.sh".to_owned()),
-            properties: props,
+            systemd: props,
             ..Default::default()
         };
 
         substitute_profile_config_dir(&mut profile, "/home/user");
 
         assert_eq!(
-            profile.properties.get("BindReadOnlyPaths"),
+            profile.systemd.get("BindReadOnlyPaths"),
             Some(&toml::Value::Array(vec![
                 toml::Value::String("/home/user/allow.txt".to_owned()),
                 toml::Value::String("/other".to_owned()),
@@ -605,7 +620,7 @@ mod tests {
         let higher = ProfileConfig {
             r#match: Some(vec![MatchEntry::Simple("app".to_owned())]),
             extend: vec!["app".to_owned()],
-            properties: higher_props,
+            systemd: higher_props,
             ..Default::default()
         };
 

@@ -113,20 +113,27 @@ Each TOML section defines a profile. The section name identifies the profile for
 | `arg_aliases` | table | Maps variable names to the flag(s) that populate them; see [Command argument variables](#command-argument-variables) |
 | `arg_flags` | array of strings | Flags that take no value (boolean flags); needed for correct positional detection |
 | `network` | table | Network policy; see [Network filtering](#network-filtering) |
+| `systemd` | table | Unit properties passed to `systemd-run`; see below |
 
-All other keys are passed directly to `systemd-run` as `-p Key=value` properties. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays.
+Every key of the `systemd` table is passed directly to `systemd-run` as `-p Key=value`. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays. Write it either as a sub-table header (`[curl.systemd]`) or with dotted keys (`systemd.MemoryMax = "256M"`).
+
+Any other key is a typo and scudo says so instead of ignoring it.
 
 ### Example
 
 ```toml
 # Base profile — no `match`, so it is never matched directly, only used via extend
 [sandboxed]
+
+[sandboxed.systemd]
 ReadOnlyPaths = ["/"]
 ReadWritePaths = ["/tmp", "$XDG_RUNTIME_DIR"]
 PrivateTmp = true
 
 [sandboxed-home]
 extend = "sandboxed"
+
+[sandboxed-home.systemd]
 TemporaryFileSystem = "$HOME"
 BindPaths = ["$HOME/.cache"]
 
@@ -134,6 +141,8 @@ BindPaths = ["$HOME/.cache"]
 [curl]
 match = "curl"
 extend = "sandboxed"
+
+[curl.systemd]
 PrivateNetwork = false
 MemoryMax = "256M"
 
@@ -141,6 +150,8 @@ MemoryMax = "256M"
 [code]
 match = { pattern = "^(vs)?cod(e|e-oss|ium)?$", type = "regex" }
 extend = "sandboxed-home"
+
+[code.systemd]
 ReadWritePaths = ["...", "/proc", "/dev/shm", "/dev/dri"]
 BindPaths = [
   "...",
@@ -159,12 +170,18 @@ BindPaths = [
 
 # npm: extend the sandboxed-home profile with npm-specific paths, including $HOME/.npm and $HOME/.npmrc and the current working directory
 [npm]
+match = "npm"
 extend = "sandboxed-home"
+
+[npm.systemd]
 BindPaths = ["...", "$HOME/.npm", "$PWD"]
 BindReadOnlyPaths = ["$HOME/.npmrc"]
 
 [pnpm]
+match = "pnpm"
 extend = "npm"
+
+[pnpm.systemd]
 BindPaths = ["...", "$HOME/.pnpm-store"]
 ```
 
@@ -175,6 +192,7 @@ finer: deny everything by default and allow only what the command actually needs
 
 ```toml
 [cargo]
+match = "cargo"
 extend = "sandboxed-home"
 
 [cargo.network]
@@ -421,8 +439,8 @@ By default an array value replaces the one defined in the extended profile. Plac
 [my-curl]
 extend = "curl"
 exec = "/usr/bin/curl"
-ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
-#                 ^ prepend               ^ base  ^ append
+systemd.ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
+#                         ^ prepend               ^ base  ^ append
 ```
 
 `"..."` may appear at most once per array.
@@ -434,8 +452,8 @@ By default a profile in a higher-priority config file completely replaces any sa
 ```toml
 # ~/.config/scudo/config.toml
 [curl]
-extend = ["curl", "sandboxed"]   # inherit system curl, then also apply sandboxed
-MemoryMax = "512M"               # override or add properties on top
+extend = ["curl", "sandboxed"]    # inherit system curl, then also apply sandboxed
+systemd.MemoryMax = "512M"        # override or add properties on top
 ```
 
 When scudo loads this file and finds an existing `[curl]` from `/etc/scudo/config.toml`, it renames the system profile to an internal key and rewrites the self-reference, so the resolution chain becomes: system curl → sandboxed → user curl. Without the self-reference, the system `[curl]` would be silently discarded.
@@ -453,7 +471,7 @@ Inside a profile, `$SCUDO_CONFIG_DIR` (also `${SCUDO_CONFIG_DIR}`) expands to th
 ```toml
 [myapp]
 exec = "$SCUDO_CONFIG_DIR/wrapper.sh"
-BindReadOnlyPaths = ["$SCUDO_CONFIG_DIR/allowlist.txt"]
+systemd.BindReadOnlyPaths = ["$SCUDO_CONFIG_DIR/allowlist.txt"]
 ```
 
 The value is substituted when the config is loaded, before `$arg_*` and other `$VAR` expansion. When a profile inherits values via `extend`, each inherited value keeps the config dir of the file it was written in.
@@ -471,7 +489,7 @@ Short options and custom variable names require an `arg_aliases` declaration:
 ```toml
 [install]
 arg_aliases = { target_directory = ["-t", "--target-directory"] }
-BindPaths = ["$HOME/.cache", "$arg_target_directory"]
+systemd.BindPaths = ["$HOME/.cache", "$arg_target_directory"]
 ```
 
 Named flag variables **accumulate** across multiple occurrences — `--flag a --flag b` produces a two-element array that, when used in a `BindPaths` array, expands to two separate entries.
@@ -491,7 +509,7 @@ Flags listed in `arg_flags` are treated as boolean (they never consume the next 
 ```toml
 [mkdir]
 arg_flags = ["-p", "--parents", "-v", "--verbose"]
-BindPaths = ["$arg_1"]   # first positional argument
+systemd.BindPaths = ["$arg_1"]   # first positional argument
 ```
 
 With this profile, `mkdir -p /my/dir` correctly sets `$arg_1 = /my/dir`.
@@ -514,7 +532,7 @@ When a named flag variable holds multiple values and appears inside a string tem
 ```toml
 [rsync]
 arg_aliases = { include = ["-I", "--include"] }
-BindReadOnlyPaths = ["/prefix/$arg_include"]
+systemd.BindReadOnlyPaths = ["/prefix/$arg_include"]
 # -I a -I b  →  ["/prefix/a", "/prefix/b"]
 ```
 
@@ -527,7 +545,7 @@ When a variable (`$arg_*` or `$VAR`) is used inside a systemd property that expe
 ```toml
 [rsync]
 arg_aliases = { include = ["-I", "--include"] }
-BindReadOnlyPaths = ["$arg_include"]
+systemd.BindReadOnlyPaths = ["$arg_include"]
 # rsync -I ./src  →  BindReadOnlyPaths=/abs/cwd/src
 ```
 
@@ -535,7 +553,7 @@ Only the **expanded variable value** is canonicalized — literal text in the te
 
 ```toml
 [app]
-ReadWritePaths = ["-$arg_1"]
+systemd.ReadWritePaths = ["-$arg_1"]
 # ./relative  →  -/abs/cwd/relative   ('-' is literal, path is made absolute)
 ```
 
