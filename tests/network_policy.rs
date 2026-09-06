@@ -67,7 +67,7 @@ fn config_with(network: &str) -> tempdir::TempDir {
     std::fs::create_dir_all(&scudo_dir).expect("creating the config directory");
     let mut file =
         std::fs::File::create(scudo_dir.join("config.toml")).expect("creating the config");
-    write!(file, "[probe]\nmatch = []\n{network}").expect("writing the config");
+    write!(file, "[probe]\n{network}").expect("writing the config");
     dir
 }
 

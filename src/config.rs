@@ -103,8 +103,7 @@ pub enum MatchEntry {
 
 /// Deserialize the `match` field.
 ///
-/// - field absent → `None`  (serde `default` handles this; use section name, exact)
-/// - `[]`         → `Some(vec![])` (never match)
+/// - field absent → `None`  (serde `default` handles this; the profile never matches)
 /// - single entry → `Some(vec![entry])`
 /// - array        → `Some(entries)`
 fn deserialize_match_field<'de, D>(de: D) -> Result<Option<Vec<MatchEntry>>, D::Error>
@@ -126,8 +125,8 @@ where
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ProfileConfig {
-    /// `None` = absent (use section name, exact).
-    /// `Some([])` = never match.
+    /// `None` = absent: the profile never matches a command on its own and is
+    /// reachable only through `extend` or `--profile`.
     /// `Some([…])` = match with the listed pattern(s).
     #[serde(
         rename = "match",
@@ -230,50 +229,38 @@ fn validate_network(name: &str, table: &toml::Table) -> Result<()> {
 
 /// Convert the raw `match` field into a vec of compiled patterns.
 ///
-/// - `None` (field absent) → `[Exact(section_name)]`
-/// - `Some([])` (`[]`) → `[]` (never matches)
+/// - `None` (field absent) → `[]` (never matches)
 /// - `Some([…])` → compiled entries
 fn build_patterns(name: &str, decl: Option<Vec<MatchEntry>>) -> Result<Vec<CommandPattern>> {
-    let Some(entries) = decl else {
-        return Ok(vec![CommandPattern::Exact(
-            name.to_owned(),
-            MatchTarget::Command,
-        )]);
-    };
-    entries
+    decl.unwrap_or_default()
         .into_iter()
         .map(|e| compile_entry(name, e))
         .collect()
 }
 
 fn compile_entry(name: &str, e: MatchEntry) -> Result<CommandPattern> {
-    match e {
-        MatchEntry::Simple(s) if s == "..." => Ok(CommandPattern::Sentinel),
-        MatchEntry::Simple(s) => Ok(CommandPattern::Exact(s, MatchTarget::Command)),
+    let (pattern, match_type, target) = match e {
+        MatchEntry::Simple(s) if s == "..." => return Ok(CommandPattern::Sentinel),
+        MatchEntry::Simple(s) => {
+            return Ok(CommandPattern::Exact(s, MatchTarget::Command));
+        }
         MatchEntry::Extended {
             pattern,
             match_type,
             target,
-        } => match match_type {
-            MatchType::Exact => Ok(CommandPattern::Exact(
-                pattern.unwrap_or_else(|| name.to_owned()),
-                target,
-            )),
-            MatchType::Glob => {
-                let p = pattern
-                    .with_context(|| format!("profile '{name}': glob match requires a pattern"))?;
-                Pattern::new(&p)
-                    .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
-                    .map(|pat| CommandPattern::Glob(pat, target))
-            }
-            MatchType::Regex => {
-                let p = pattern
-                    .with_context(|| format!("profile '{name}': regex match requires a pattern"))?;
-                Regex::new(&p)
-                    .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
-                    .map(|r| CommandPattern::Regex(r, target))
-            }
-        },
+        } => (pattern, match_type, target),
+    };
+    // The table form has no implicit pattern: there is nothing sensible to fall
+    // back to now that the section name no longer doubles as one.
+    let p = pattern.with_context(|| format!("profile '{name}': match entry requires a pattern"))?;
+    match match_type {
+        MatchType::Exact => Ok(CommandPattern::Exact(p, target)),
+        MatchType::Glob => Pattern::new(&p)
+            .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
+            .map(|pat| CommandPattern::Glob(pat, target)),
+        MatchType::Regex => Regex::new(&p)
+            .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
+            .map(|r| CommandPattern::Regex(r, target)),
     }
 }
 
@@ -383,7 +370,7 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
                     let n = synthetic_counter.entry(name.clone()).or_insert(0);
                     let synthetic = format!("\x00{name}\x00{n}");
                     *n = n.saturating_add(1);
-                    existing.r#match = Some(vec![]); // prevent direct command matching
+                    existing.r#match = Some(vec![]); // drop its patterns: only the new profile matches
                     merged.insert(synthetic.clone(), existing);
                     if let Some(slot) = new_profile.extend.get_mut(pos) {
                         *slot = synthetic;
@@ -461,13 +448,57 @@ mod tests {
         merged.try_into()
     }
 
+    /// A profile named `app` that also matches the `app` command, so that the
+    /// tests below can reach it through `resolve` and not just by name.
     fn simple_profile(cpu: &str) -> ProfileConfig {
         let mut props = HashMap::new();
         props.insert("CPUQuota".to_owned(), toml::Value::String(cpu.to_owned()));
         ProfileConfig {
+            r#match: Some(vec![MatchEntry::Simple("app".to_owned())]),
             properties: props,
             ..Default::default()
         }
+    }
+
+    fn patterns_of(src: &str, profile: &str) -> Result<Vec<CommandPattern>> {
+        let raw: ConfigMap = toml::from_str(src)?;
+        let config = raw.get(profile).context("profile present")?.clone();
+        build_patterns(profile, config.r#match)
+    }
+
+    #[test]
+    fn absent_match_never_matches() {
+        // The section name is an identifier, not a pattern: without `match` the
+        // profile is reachable only through `extend` or `--profile`.
+        let patterns = patterns_of("[curl]\nMemoryMax = \"256M\"\n", "curl").unwrap();
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn match_entry_without_pattern_is_rejected() {
+        // No implicit fallback to the section name in the table form either.
+        for src in [
+            "[curl]\nmatch = { type = \"exact\" }\n",
+            "[curl]\nmatch = { target = \"full_command\" }\n",
+            "[curl]\nmatch = { type = \"glob\" }\n",
+            "[curl]\nmatch = { type = \"regex\" }\n",
+        ] {
+            let err = patterns_of(src, "curl").expect_err("pattern is required");
+            assert!(
+                format!("{err:#}").contains("requires a pattern"),
+                "unexpected error for {src:?}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_pattern_is_reported() {
+        let err = patterns_of(
+            "[curl]\nmatch = { pattern = \"[\", type = \"regex\" }\n",
+            "curl",
+        )
+        .expect_err("invalid regex");
+        assert!(format!("{err:#}").contains("invalid regex"));
     }
 
     #[test]
@@ -572,6 +603,7 @@ mod tests {
             toml::Value::String("256M".to_owned()),
         );
         let higher = ProfileConfig {
+            r#match: Some(vec![MatchEntry::Simple("app".to_owned())]),
             extend: vec!["app".to_owned()],
             properties: higher_props,
             ..Default::default()

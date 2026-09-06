@@ -100,11 +100,11 @@ Approved files are recorded in `$XDG_CONFIG_HOME/scudo/trusted.toml`. Matching i
 
 ### Profiles
 
-Each TOML section defines a profile. The section name is also the default match pattern.
+Each TOML section defines a profile. The section name identifies the profile for `extend` and `--profile`; it is not a match pattern.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `match` | see [Match patterns](#match-patterns) | Pattern(s) to match against the command name. Absent = use section name (exact). `null` or `[]` = never match directly (base profile only). |
+| `match` | see [Match patterns](#match-patterns) | Pattern(s) to match against the command name. Absent = the profile never matches a command on its own and is reachable only through `extend` or `--profile`. |
 | `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
 | `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
@@ -119,21 +119,20 @@ All other keys are passed directly to `systemd-run` as `-p Key=value` properties
 ### Example
 
 ```toml
-# Base profile — never matched directly, only used via extend
+# Base profile — no `match`, so it is never matched directly, only used via extend
 [sandboxed]
-match = []
 ReadOnlyPaths = ["/"]
 ReadWritePaths = ["/tmp", "$XDG_RUNTIME_DIR"]
 PrivateTmp = true
 
 [sandboxed-home]
-match = []
 extend = "sandboxed"
 TemporaryFileSystem = "$HOME"
 BindPaths = ["$HOME/.cache"]
 
 # curl: exact match, extends the base sandbox
 [curl]
+match = "curl"
 extend = "sandboxed"
 PrivateNetwork = false
 MemoryMax = "256M"
@@ -371,8 +370,7 @@ The `match` field controls which commands a profile applies to:
 
 | Form | Meaning |
 |------|---------|
-| absent | section name, exact match |
-| `match = []` | never match — base profile usable only via `extend` |
+| absent | never match — base profile usable only via `extend` or `--profile` |
 | `match = "curl"` | exact match for `curl` |
 | `match = { pattern = "curl" }` | same, explicit table form |
 | `match = { pattern = "curl*", type = "glob" }` | glob match |
@@ -380,7 +378,7 @@ The `match` field controls which commands a profile applies to:
 | `match = { pattern = "git commit*", type = "glob", target = "full_command" }` | glob match against full command line |
 | `match = [...]` | array of any of the above forms |
 
-The `type` field accepts `exact` (default), `glob`, or `regex`. The `target` field accepts `command` (default, matches against the command name only) or `full_command` (matches against the command name and all arguments joined with spaces). `target` is only available in the table form; the simple string form always targets the command name. When the `match` field is an array, `"..."` splices the first parent profile's patterns at that position — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
+In the table form `pattern` is required. The `type` field accepts `exact` (default), `glob`, or `regex`. The `target` field accepts `command` (default, matches against the command name only) or `full_command` (matches against the command name and all arguments joined with spaces). `target` is only available in the table form; the simple string form always targets the command name. When the `match` field is an array, `"..."` splices the first parent profile's patterns at that position — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
 
 When multiple profiles match the same command, they are merged in order of increasing specificity: glob < regex < exact. Within each tier, the last match wins for scalar values.
 
@@ -394,7 +392,7 @@ When multiple profiles match the same command, they are merged in order of incre
 
 ### Selecting profiles explicitly
 
-`--profile <NAME>` applies a profile by name, whatever its `match` field says — including base profiles declared with `match = []`. It is repeatable and also accepts a comma-separated list. Named profiles are applied *after* the ones that matched, so they take precedence; among themselves they are applied in the order given on the command line, with the last one winning.
+`--profile <NAME>` applies a profile by name, whatever its `match` field says — including base profiles that declare no `match` at all. It is repeatable and also accepts a comma-separated list. Named profiles are applied *after* the ones that matched, so they take precedence; among themselves they are applied in the order given on the command line, with the last one winning.
 
 `--no-match` skips pattern matching altogether. Combined with `--profile` it means "use exactly these profiles and nothing else"; on its own it runs the command with no profile at all.
 

@@ -120,6 +120,9 @@ pub fn resolve_with(
                 Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
                 Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
                 Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
+                // A profile without `match` has no patterns, so `all` above was
+                // vacuously true; it is dropped here instead. This is the normal
+                // shape of a base profile, reachable only via `extend`/`--profile`.
                 _ => {}
             }
         }
@@ -960,6 +963,25 @@ mod tests {
         assert!(r.systemd_args.is_empty());
     }
 
+    /// End-to-end through the config pipeline: the section name is an identifier,
+    /// not a pattern, so a profile without `match` is invisible to the matcher —
+    /// but still reachable by name.
+    #[test]
+    fn profile_without_match_is_only_reachable_by_name() {
+        let configs = configs_from_toml(
+            r#"
+            [curl]
+            CPUQuota = "50%"
+            "#,
+        );
+        let r = resolve(&configs, "curl", &[]).unwrap();
+        assert!(r.systemd_args.is_empty());
+
+        let names = args(&["curl"]);
+        let r = resolve_with(&configs, "curl", &[], select(&names, false)).unwrap();
+        assert!(has_arg(&r.systemd_args, "CPUQuota=50%"));
+    }
+
     #[test]
     fn extend() {
         let base = never_profile(vec![
@@ -1590,6 +1612,7 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [curl]
+            match = "curl"
             network.dest.allow = ["1.1.1.1"]
             network.ports.allow = [53]
             "#,
@@ -1607,6 +1630,7 @@ mod tests {
         let configs = configs_from_toml(
             r#"
             [curl]
+            match = "curl"
             network.dest.allow = ["1.1.1.1"]
             MemoryMax = "256M"
             "#,
@@ -1626,12 +1650,12 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [base]
-            match = []
             network.dest.allow = ["1.1.1.1"]
             network.dest.deny = ["10.0.0.0/8"]
             network.on_unavailable = "no-network"
 
             [curl]
+            match = "curl"
             extend = "base"
             network.dest.allow = ["...", "api.github.com"]
             "#,
@@ -1668,11 +1692,11 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [base]
-            match = []
             network.dest.allow = ["1.1.1.1"]
             network.ports.deny = [22]
 
             [curl]
+            match = "curl"
             extend = "base"
             network.ports.allow = [443]
             "#,
@@ -1697,10 +1721,10 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [base]
-            match = []
             network.dest.allow = ["1.1.1.1"]
 
             [curl]
+            match = "curl"
             extend = "base"
             network.dest.allow = ["api.github.com"]
             "#,
@@ -1718,12 +1742,12 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [base]
-            match = []
             network.default = "deny"
             network.on_unavailable = "fail"
             network.dest.allow = ["1.1.1.1"]
 
             [curl]
+            match = "curl"
             extend = "base"
             network.on_unavailable = "no-network"
             "#,
@@ -1741,6 +1765,7 @@ mod tests {
         let configs = configs_from_toml(
             r#"
             [curl]
+            match = "curl"
             network.dest.allow = ["1.1.1.1", "example.com"]
             "#,
         );
@@ -1754,10 +1779,11 @@ mod tests {
     #[test]
     fn deny_all_policy_adds_no_properties() {
         let configs = configs_from_toml(
-            "
+            r#"
             [curl]
+            match = "curl"
             network = {}
-            ",
+            "#,
         );
         let resolved = resolve(&configs, "curl", &[]).unwrap();
         assert!(resolved.systemd_args.is_empty());
@@ -1770,6 +1796,7 @@ mod tests {
         let configs = configs_from_toml(
             r#"
             [curl]
+            match = "curl"
             network.default = "allow"
             network.inbound = "allow"
             "#,
@@ -1783,6 +1810,7 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [curl]
+            match = "curl"
             network.dest.allow = ["$arg_1"]
             "#,
             "curl",
@@ -1801,6 +1829,7 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [curl]
+            match = "curl"
             arg_aliases.host = { flags = ["--host"], nargs = "+" }
             network.dest.allow = ["$arg_host"]
             "#,
@@ -1823,6 +1852,7 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [curl]
+            match = "curl"
             arg_aliases.port = { flags = ["--port"], nargs = "+" }
             network.dest.allow = ["api.github.com"]
             network.ports.allow = ["$arg_port"]
@@ -1858,6 +1888,7 @@ mod tests {
         let policy = resolved_policy(
             r#"
             [curl]
+            match = "curl"
             network.dest.allow = ["1.1.1.1", "$arg_2"]
             "#,
             "curl",
@@ -1871,6 +1902,7 @@ mod tests {
         let raw: crate::config::ConfigMap = toml::from_str(
             r#"
             [curl]
+            match = "curl"
             network.dest.allow = ["10.0.0.0/33"]
             "#,
         )
