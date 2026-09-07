@@ -87,6 +87,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "3"
 toml = { version = "1", features = ["display"] }
+tracing = "0.1"
+# No env-filter: a level is all that is configurable, and env-filter would pull
+# in `matchers` and its own regex engine for directives nothing here accepts.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
+tracing-journald = "0.3"
+# aya and fuser log through the `log` facade; without this bridge their records
+# are dropped on the floor.
+tracing-log = "0.2"
 
 aya = { version = "0.14", optional = true }
 scudo-bpf-common = { path = "ebpf/scudo-bpf-common", optional = true }

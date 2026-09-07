@@ -51,7 +51,7 @@ where
     }
 }
 
-use crate::{policy::NetworkConfig, trust};
+use crate::{logging::LogConfig, policy::NetworkConfig, trust};
 
 /// Match type for a pattern entry. Defaults to `exact` when unspecified.
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -162,6 +162,11 @@ pub struct ProfileConfig {
     /// by field with the same array semantics as every other property.
     #[serde(default)]
     pub network: Option<toml::Table>,
+    /// The `[<profile>.log]` sub-table: level and destination. Unlike `network`
+    /// it holds no lists, so there is no `"..."` splicing to preserve and it can
+    /// be parsed into its final shape here rather than merged as raw TOML.
+    #[serde(default)]
+    pub log: LogConfig,
     /// The `[<profile>.systemd]` sub-table: unit properties keyed by their exact
     /// systemd name. Values are either a single string/bool/integer or an array
     /// thereof. Keeping them in a table of their own is what lets the profile's
@@ -182,6 +187,7 @@ pub struct ValidatedProfileConfig {
     pub arg_aliases: ArgAliases,
     pub arg_flags: Vec<String>,
     pub network: Option<toml::Table>,
+    pub log: LogConfig,
     pub properties: HashMap<String, toml::Value>,
 }
 
@@ -210,6 +216,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                         arg_aliases: config.arg_aliases,
                         arg_flags: config.arg_flags,
                         network: config.network,
+                        log: config.log,
                         properties: config.systemd,
                     },
                 ))
@@ -333,6 +340,11 @@ fn substitute_profile_config_dir(profile: &mut ProfileConfig, dir: &str) {
         && exec.contains(CONFIG_DIR_VAR)
     {
         *exec = substitute_config_dir_str(exec, dir);
+    }
+    if let Some(path) = profile.log.path.as_mut()
+        && path.contains(CONFIG_DIR_VAR)
+    {
+        *path = substitute_config_dir_str(path, dir);
     }
 }
 

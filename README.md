@@ -12,13 +12,17 @@ Arguments:
   [COMMAND_ARGS]...  
 
 Options:
-  -v, --verbose                    Enable verbose output
-      --confirm                    Confirm before running the command
-  -P, --property <PROPERTY=VALUE>  Set a property for the systemd-run command
-  -p, --profile <NAME>             Apply the named profile, ignoring its match rules (repeatable, comma-separated)
-      --no-match                   Skip profile matching; apply only the profiles given with --profile
-  -h, --help                       Print help
-  -V, --version                    Print version
+  -v, --verbose                         Enable verbose output. A shorthand for `--log-level debug`
+      --log-level <LEVEL>               How much to report: off, error, warn, info, debug or trace [env: SCUDO_LOG_LEVEL]
+      --log-target <TARGET>             Where to report it: stderr, file, syslog or journald (repeatable) [env: SCUDO_LOG_TARGET]
+      --log-file <PATH>                 Write the log to this file. Implies `--log-target file` [env: SCUDO_LOG_FILE]
+      --log-syslog-facility <FACILITY>  The syslog facility to log under. Only used by `--log-target syslog` [env: SCUDO_LOG_SYSLOG_FACILITY]
+      --confirm                         Confirm before running the command
+  -P, --property <PROPERTY=VALUE>       Set a property for the systemd-run command
+  -p, --profile <NAME>                  Apply the named profile, ignoring its match rules (repeatable, comma-separated)
+      --no-match                        Skip profile matching; apply only the profiles given with --profile
+  -h, --help                            Print help
+  -V, --version                         Print version
 ```
 
 **Via symlink** — scudo detects it is being called through a symlink and selects the matching profile automatically:
@@ -108,11 +112,12 @@ Each TOML section defines a profile. The section name identifies the profile for
 | `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
 | `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
-| `verbose` | bool | Print the full `systemd-run` command to stderr before executing (default: `false`) |
+| `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
 | `arg_aliases` | table | Maps variable names to the flag(s) that populate them; see [Command argument variables](#command-argument-variables) |
 | `arg_flags` | array of strings | Flags that take no value (boolean flags); needed for correct positional detection |
 | `network` | table | Network policy; see [Network filtering](#network-filtering) |
+| `log` | table | Level and destination for scudo's own output; see [Logging](#logging) |
 | `systemd` | table | Unit properties passed to `systemd-run`; see below |
 
 Every key of the `systemd` table is passed directly to `systemd-run` as `-p Key=value`. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays. Write it either as a sub-table header (`[curl.systemd]`) or with dotted keys (`systemd.MemoryMax = "256M"`).
@@ -391,9 +396,17 @@ all, so a policy that is one rule too tight looks like a program that is simply 
 
 ```console
 $ scudo --verbose -- curl -sS https://example.com/
-scudo: blocked DNS lookup of example.com (no rule names it)
-scudo: blocked connect to 1.1.1.1:443/tcp
+scudo: warning: blocked DNS lookup of example.com (no rule names it)
+scudo: warning: blocked connect to 1.1.1.1:443/tcp
 scudo: curl: blocked example.com (2x), 1.1.1.1:443 (7x) [5 repeats suppressed]
+```
+
+Each refusal is a `warn` event and the closing summary an `info` one, so they follow whatever
+[logging](#logging) is configured. On journald they carry the address, port, stage and
+transport as fields of their own, which is what makes them filterable there:
+
+```console
+$ journalctl -t scudo F_STAGE=connect -o json | jq -r '.F_ADDR + ":" + .F_PORT'
 ```
 
 Refused DNS lookups are on the same stream, and usually come first: naming a host in a rule is
@@ -407,6 +420,61 @@ collapsed into one line — a denied connection is retried, and one `curl` would
 the screen — and the closing summary counts every attempt, including the ones that were never
 printed. A policy realised as `PrivateNetwork=yes` has no programs attached and therefore
 nothing to report; `--verbose` says so rather than leaving the silence to be misread.
+
+### Logging
+
+Everything scudo says about itself — warnings, the resolution trace, what a sandbox refused —
+goes through one leveled logger. Both the level and the destination come from a `log` table on
+the profile:
+
+```toml
+[curl]
+match = "curl"
+log.level = "debug"                  # off, error, warn, info, debug, trace
+log.target = "file"                  # stderr, file, syslog, journald
+log.path = "$SCUDO_CONFIG_DIR/scudo.log"
+log.syslog_facility = "user"         # only read by target = "syslog"
+```
+
+`log.target` takes one target or a list of them, and a message goes to all of them. Naming a
+`log.path` and no target selects the file, since there is nothing else the path could be for.
+The default is `warn` on stderr — exactly the set of messages scudo printed before it had
+levels at all.
+
+There is no reserved section for a global default; a profile that matches everything is one:
+
+```toml
+[default]
+match = { type = "glob", pattern = "*" }
+log.level = "info"
+log.target = "journald"
+```
+
+Because this is an ordinary profile, the ordinary precedence applies (glob < regex < exact,
+and `--profile` above all), so a command can be made **quieter** than the default as well as
+louder — unlike `verbose`, which only ever adds. `verbose = true` is still accepted and means
+`log.level = "debug"`; a level written out next to it wins, being the more specific of the two.
+
+The command line overrides the profiles:
+
+```console
+$ scudo --log-level debug -- curl https://example.com/
+$ scudo --log-file /tmp/scudo.log -- npm install
+$ scudo --log-target syslog,stderr -- rsync -a src/ dst/
+```
+
+`-v`/`--verbose` raises the floor to `debug` rather than setting it, so it cannot quieten a
+`--log-level trace` written beside it. Each flag also reads an environment variable
+(`SCUDO_LOG_LEVEL`, `SCUDO_LOG_TARGET`, `SCUDO_LOG_FILE`, `SCUDO_LOG_SYSLOG_FACILITY`).
+
+Anything scudo emits while it is still reading the config obeys the command line and the
+environment, not the config — the setting is not known yet. Use `--log-level` or
+`SCUDO_LOG_LEVEL` to see that part of a run.
+
+Stderr keeps the shape it always had (`scudo: warning: …`), with the event's fields appended
+only at `debug` and below; a file adds a timestamp and the level; syslog and journald receive
+the fields as fields. The confirmation prompt and the trust diff are **not** logs: they are
+interactive output and always go to stderr, whatever the destination.
 
 ### Match patterns
 

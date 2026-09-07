@@ -6,6 +6,7 @@ use toml::Value;
 
 use crate::{
     config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig},
+    logging::{Level, LogConfig},
     policy::{NetworkConfig, NetworkPolicy, Policy},
 };
 
@@ -13,7 +14,9 @@ use crate::{
 pub struct ResolvedProfile {
     pub systemd_args: Vec<String>,
     pub exec: Option<String>,
-    pub verbose: bool,
+    /// Level and destination for scudo's own output, still without the command
+    /// line's say: the caller layers that on top.
+    pub log: LogConfig,
     pub confirm: bool,
     pub match_log: Vec<String>,
     /// Policies to hand to `scudo-bpfd` before the command starts.
@@ -37,6 +40,7 @@ struct ProfileMeta {
     /// Raw network policy, still in TOML form so that it merges with the same
     /// array semantics as every other property.
     network: Option<Properties>,
+    log: LogConfig,
 }
 
 /// Options controlling which profiles [`resolve_with`] applies.
@@ -155,6 +159,7 @@ pub fn resolve_with(
         meta.arg_aliases.extend(m.arg_aliases);
         meta.arg_flags.extend(m.arg_flags);
         merge_network(&mut meta.network, m.network)?;
+        meta.log = m.log.over(meta.log);
     }
 
     let arg_vars = parse_command_args(command_args, &meta.arg_aliases, &meta.arg_flags);
@@ -301,6 +306,7 @@ fn expand_extend(
         base_meta.arg_aliases.extend(parent_meta.arg_aliases);
         base_meta.arg_flags.extend(parent_meta.arg_flags);
         merge_network(&mut base_meta.network, parent_meta.network)?;
+        base_meta.log = parent_meta.log.over(base_meta.log);
     }
 
     // Current profile's values override everything inherited from parents.
@@ -322,6 +328,7 @@ fn expand_extend(
         arg_aliases: merged_aliases,
         arg_flags: merged_flags,
         network,
+        log: profile.log.clone().over(base_meta.log),
     };
     merge_into(&mut base, profile.properties.clone())?;
     Ok((base, meta))
@@ -617,10 +624,20 @@ fn build_args(
     // ends up degraded would restrict the command for no benefit.
     let policies = build_policies(meta.network, arg_vars)?;
 
+    let mut log = meta.log;
+    // `verbose` predates the log table and asks for the same thing in fewer
+    // words. A level written out says more than the boolean can, so it wins.
+    if meta.verbose == Some(true) && log.level.is_none() {
+        log.level = Some(Level::Debug);
+    }
+    if let Some(path) = log.path {
+        log.path = Some(expand_env(&path)?);
+    }
+
     Ok(ResolvedProfile {
         systemd_args: args,
         exec: meta.exec,
-        verbose: meta.verbose.unwrap_or(false),
+        log,
         confirm: meta.confirm.unwrap_or(false),
         match_log,
         policies,
@@ -830,8 +847,7 @@ fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>
 
 /// Expand `$VAR` and `${VAR}` using the current process environment.
 /// Returns an error if a referenced variable is not set.
-/// Thin wrapper around `expand_vars` for use in tests and callers that don't need arg vars.
-#[cfg(test)]
+/// Thin wrapper around `expand_vars` for callers that don't need arg vars.
 fn expand_env(s: &str) -> Result<String> {
     let mut results = expand_vars(s, &ArgVars::new(), false)?;
     Ok(results.pop().unwrap_or_default())
@@ -845,6 +861,7 @@ mod tests {
     use super::*;
     use crate::{
         config::ArgAliasDecl,
+        logging::Target,
         policy::network::{
             Action, Destination, LogLevel, OnUnavailable, PortRange, PortRule, Protocol,
         },
@@ -869,6 +886,7 @@ mod tests {
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
             network: None,
+            log: LogConfig::default(),
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         }
     }
@@ -883,6 +901,7 @@ mod tests {
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
             network: None,
+            log: LogConfig::default(),
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         }
     }
@@ -1607,6 +1626,88 @@ mod tests {
         let names = args(&["a", "b"]);
         let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
         assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
+    }
+
+    #[test]
+    fn log_settings_inherit_through_extend() {
+        let configs = configs_from_toml(
+            r#"
+            [base]
+            log.level = "debug"
+            log.target = "file"
+            log.path = "/tmp/scudo.log"
+
+            [curl]
+            match = "curl"
+            extend = "base"
+            log.level = "trace"
+            "#,
+        );
+        let resolved = resolve(&configs, "curl", &[]).unwrap();
+        assert_eq!(resolved.log.level, Some(Level::Trace));
+        // What the child said nothing about still comes from the parent.
+        assert_eq!(resolved.log.targets, Some(vec![Target::File]));
+        assert_eq!(resolved.log.path.as_deref(), Some("/tmp/scudo.log"));
+    }
+
+    /// A catch-all glob is how a global default is written, so an exact match
+    /// has to be able to turn it down as well as up.
+    #[test]
+    fn an_exact_match_overrides_the_catch_all_in_both_directions() {
+        let configs = configs_from_toml(
+            r#"
+            [default]
+            match = { type = "glob", pattern = "*" }
+            log.level = "debug"
+
+            [curl]
+            match = "curl"
+            log.level = "error"
+            "#,
+        );
+        assert_eq!(
+            resolve(&configs, "curl", &[]).unwrap().log.level,
+            Some(Level::Error)
+        );
+        assert_eq!(
+            resolve(&configs, "wget", &[]).unwrap().log.level,
+            Some(Level::Debug)
+        );
+    }
+
+    /// `verbose` predates the log table; it is the same request in fewer words.
+    #[test]
+    fn verbose_asks_for_debug() {
+        let configs = configs_from_toml("[curl]\nmatch = \"curl\"\nverbose = true\n");
+        assert_eq!(
+            resolve(&configs, "curl", &[]).unwrap().log.level,
+            Some(Level::Debug)
+        );
+    }
+
+    /// A level written out says more than the boolean can, so it is not
+    /// overruled by it.
+    #[test]
+    fn an_explicit_level_beats_verbose() {
+        let configs =
+            configs_from_toml("[curl]\nmatch = \"curl\"\nverbose = true\nlog.level = \"error\"\n");
+        assert_eq!(
+            resolve(&configs, "curl", &[]).unwrap().log.level,
+            Some(Level::Error)
+        );
+    }
+
+    #[test]
+    fn a_log_path_expands_environment_variables() {
+        // SAFETY: single-threaded test setup, as elsewhere in this file.
+        unsafe { std::env::set_var("SCUDO_TEST_LOG_DIR", "/var/tmp") }
+        let configs = configs_from_toml(
+            "[curl]\nmatch = \"curl\"\nlog.path = \"$SCUDO_TEST_LOG_DIR/s.log\"\n",
+        );
+        assert_eq!(
+            resolve(&configs, "curl", &[]).unwrap().log.path.as_deref(),
+            Some("/var/tmp/s.log")
+        );
     }
 
     #[test]

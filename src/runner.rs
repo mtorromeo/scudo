@@ -3,12 +3,18 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use tracing::{debug, warn};
+
+use crate::logging::{Level, LogConfig, Target};
 
 /// How to start the command inside the transient unit.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Options<'a> {
     pub verbose: bool,
     pub confirm: bool,
+    /// Passed on to the watcher, which is spawned too late to read the config
+    /// for itself.
+    pub log: &'a LogConfig,
     /// When set, run the command through scudo's own shim, which claims the
     /// policies registered under this token before it execs the command.
     ///
@@ -29,6 +35,7 @@ pub fn exec(
     let Options {
         verbose,
         confirm,
+        log,
         shim_token,
         log_denials,
     } = *options;
@@ -61,14 +68,14 @@ pub fn exec(
                 anyhow::bail!("aborted");
             }
         } else {
-            eprintln!("scudo: running command: {cmdline}");
+            debug!("running command: {cmdline}");
         }
     }
 
     // After the prompt, so that declining leaves nothing behind, and before the
     // exec, which is the last moment this process gets to start anything.
     if log_denials && let Some(token) = shim_token {
-        spawn_watcher(token, command);
+        spawn_watcher(token, command, log);
     }
 
     let err = cmd.exec();
@@ -81,27 +88,56 @@ pub fn exec(
 /// and the shim inside the unit becomes the command itself, so neither is left
 /// to read anything. The watcher keeps our stderr and outlives us both, ending
 /// when the daemon closes the stream on it.
-fn spawn_watcher(token: &str, command: &Path) {
+fn spawn_watcher(token: &str, command: &Path, log: &LogConfig) {
     let self_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("scudo: warning: cannot report blocked network accesses: {err}");
+            warn!("cannot report blocked network accesses: {err}");
             return;
         }
     };
     // Only stderr is inherited: the watcher must not hold the command's own
     // input or output open, nor read from a terminal the command is using.
-    let spawned = std::process::Command::new(self_exe)
-        .arg("--bpf-watch")
+    let mut cmd = std::process::Command::new(self_exe);
+    cmd.arg("--bpf-watch")
         .arg(token)
         .arg("--")
         .arg(command)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn();
-    if let Err(err) = spawned {
-        eprintln!("scudo: warning: cannot report blocked network accesses: {err}");
+        .stdout(Stdio::null());
+    for (key, value) in watcher_log_env(log) {
+        cmd.env(key, value);
     }
+    if let Err(err) = cmd.spawn() {
+        warn!("cannot report blocked network accesses: {err}");
+    }
+}
+
+/// The logging settings the watcher inherits, as environment variables.
+///
+/// It is a process of its own and never reads a config file, so whatever the
+/// profiles decided has to travel to it this way. Its floor is `info`: the
+/// watcher exists only because the denials were asked for, and its closing
+/// summary must not then be filtered out by a quieter level.
+fn watcher_log_env(log: &LogConfig) -> Vec<(&'static str, String)> {
+    let mut env = vec![("SCUDO_LOG_LEVEL", log.level().max(Level::Info).to_string())];
+    if let Some(targets) = log.targets.as_ref() {
+        env.push((
+            "SCUDO_LOG_TARGET",
+            targets
+                .iter()
+                .map(Target::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+    }
+    if let Some(path) = log.path.as_ref() {
+        env.push(("SCUDO_LOG_FILE", path.clone()));
+    }
+    if let Some(facility) = log.syslog_facility {
+        env.push(("SCUDO_LOG_SYSLOG_FACILITY", facility.to_string()));
+    }
+    env
 }
 
 /// Ask the user for confirmation on stdin. Returns true if confirmed.

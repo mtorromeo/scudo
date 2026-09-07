@@ -1,7 +1,6 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    io::IsTerminal as _,
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::exit,
@@ -9,15 +8,40 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
-use scudo::bpfd::protocol::{Notification, Stage, Transport};
+use scudo::{
+    bpfd::protocol::{Notification, Stage, Transport},
+    logging::{Facility, Level, LogConfig, Target},
+};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Parser)]
 #[command(about, version, author)]
 #[expect(clippy::struct_field_names)]
 struct Args {
-    /// Enable verbose output.
+    /// Enable verbose output. A shorthand for `--log-level debug`.
     #[arg(short, long)]
     verbose: bool,
+
+    /// How much to report: off, error, warn, info, debug or trace.
+    #[arg(long, value_name = "LEVEL", env = "SCUDO_LOG_LEVEL")]
+    log_level: Option<Level>,
+
+    /// Where to report it: stderr, file, syslog or journald (repeatable).
+    #[arg(
+        long,
+        value_name = "TARGET",
+        value_delimiter = ',',
+        env = "SCUDO_LOG_TARGET"
+    )]
+    log_target: Vec<Target>,
+
+    /// Write the log to this file. Implies `--log-target file`.
+    #[arg(long, value_name = "PATH", env = "SCUDO_LOG_FILE")]
+    log_file: Option<String>,
+
+    /// The syslog facility to log under. Only used by `--log-target syslog`.
+    #[arg(long, value_name = "FACILITY", env = "SCUDO_LOG_SYSLOG_FACILITY")]
+    log_syslog_facility: Option<Facility>,
 
     /// Confirm before running the command.
     #[arg(long)]
@@ -52,9 +76,35 @@ struct Args {
     command_args: Vec<String>,
 }
 
+impl Args {
+    /// What the command line asks of the logging, on its own.
+    ///
+    /// This is the highest-priority source: it is layered over whatever the
+    /// profiles said, so a flag left off has to stay `None` rather than become
+    /// a default that would silently overrule the config.
+    fn log_config(&self) -> LogConfig {
+        let mut config = LogConfig {
+            level: self.log_level,
+            targets: (!self.log_target.is_empty()).then(|| self.log_target.clone()),
+            path: self.log_file.clone(),
+            syslog_facility: self.log_syslog_facility,
+        };
+        // `-v` raises the floor rather than setting the level, so it cannot
+        // quieten an explicit `--log-level trace` next to it.
+        if self.verbose {
+            config.raise_to(Level::Debug);
+        }
+        config
+    }
+}
+
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("scudo: {e:#}");
+    // Before anything else: an error while reading the command line or the
+    // config is still an error worth reporting, and there is nothing to report
+    // it with until this returns.
+    let logging = scudo::logging::init();
+    if let Err(e) = run(&logging) {
+        error!("{e:#}");
         exit(1);
     }
 }
@@ -88,7 +138,7 @@ fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
     anyhow::bail!("command not found: {}", command.display())
 }
 
-fn run() -> Result<()> {
+fn run(logging: &scudo::logging::Handle) -> Result<()> {
     let self_exe = std::env::current_exe().and_then(std::fs::canonicalize)?;
     let mut args: Vec<_> = std::env::args().collect();
 
@@ -109,6 +159,11 @@ fn run() -> Result<()> {
     }
 
     let args = Args::parse_from(args);
+
+    // The command line is known now; the config is not. Apply what we have, so
+    // that reading the config is itself reported at the level asked for.
+    let cli_log = args.log_config();
+    logging.reconfigure(&cli_log)?;
 
     if let Some(token) = args.bpf_shim.as_deref() {
         return shim(token, &args);
@@ -131,18 +186,21 @@ fn run() -> Result<()> {
         },
     )?;
 
-    if args.verbose {
-        resolved.verbose = true;
-    }
+    // The command line has the last word, so it goes on top of what the
+    // profiles settled on.
+    let log = cli_log.over(resolved.log);
+    logging.reconfigure(&log)?;
+
+    // Everything `--verbose` used to switch on now hangs off the level, so that
+    // `log.level = "debug"` in a profile buys exactly what `-v` does.
+    let verbose = log.level() >= Level::Debug;
 
     if args.confirm {
         resolved.confirm = true;
     }
 
-    if resolved.verbose {
-        for line in &resolved.match_log {
-            eprintln!("scudo: {line}");
-        }
+    for line in &resolved.match_log {
+        debug!("{line}");
     }
 
     let bin = match resolved.exec {
@@ -150,8 +208,8 @@ fn run() -> Result<()> {
         None => bin,
     };
 
-    // The flag can only make scudo louder, the way it does for everything else.
-    if resolved.verbose {
+    // The level can only make scudo louder, the way it does for everything else.
+    if verbose {
         for policy in &mut resolved.policies {
             policy.report_denials();
         }
@@ -163,16 +221,16 @@ fn run() -> Result<()> {
 
     // Only when nothing else is being reported: with a second policy still
     // watched, saying there is nothing to report would be plainly wrong.
-    if resolved.verbose && !reporting && deny_all(&resolved.policies) {
-        eprintln!(
-            "scudo: the network is taken away entirely, so there is nothing to report \
+    if !reporting && deny_all(&resolved.policies) {
+        debug!(
+            "the network is taken away entirely, so there is nothing to report \
              blocked accesses from"
         );
     }
 
     let applied = scudo::policy::apply(&resolved.policies)?;
     for warning in &applied.warnings {
-        eprintln!("scudo: warning: {warning}");
+        warn!("{warning}");
     }
     resolved.systemd_args.extend(applied.systemd_args);
     let shim_token = applied.token;
@@ -182,12 +240,10 @@ fn run() -> Result<()> {
         .extend(args.property.iter().map(|p| format!("--property={p}")));
 
     if resolved.systemd_args.is_empty() && shim_token.is_none() {
-        if resolved.verbose {
-            eprintln!(
-                "scudo: warning: no profile matched or empty systemd-run options for '{}'",
-                args.command
-            );
-        }
+        debug!(
+            "no profile matched or empty systemd-run options for '{}'",
+            args.command
+        );
         let err = std::process::Command::new(&bin)
             .args(&args.command_args)
             .exec();
@@ -199,8 +255,9 @@ fn run() -> Result<()> {
         &args.command_args,
         &resolved.systemd_args,
         &scudo::runner::Options {
-            verbose: resolved.verbose,
+            verbose,
             confirm: resolved.confirm,
+            log: &log,
             shim_token: shim_token.as_deref(),
             log_denials: reporting,
         },
@@ -237,19 +294,57 @@ fn watch(token: &str, args: &Args) -> Result<()> {
     let command = Path::new(&args.command)
         .file_name()
         .map_or_else(|| args.command.clone(), |name| name.display().to_string());
-    // systemd-run --pty leaves the terminal in raw mode, where a bare newline
-    // moves down without returning to the first column and every line after the
-    // first comes out indented further than the last.
-    let newline = if std::io::stderr().is_terminal() {
-        "\r\n"
-    } else {
-        "\n"
-    };
 
     while let Some(event) = reader.read::<Notification>()? {
-        eprint!("scudo: {}{newline}", describe(&event, &command));
+        report(&event, &command);
     }
     Ok(())
+}
+
+/// Say what the sandbox turned away.
+///
+/// The human sentence is the message, unchanged, so stderr reads as it always
+/// did; the parts it is made of go alongside it as fields, which is what
+/// journald and syslog consumers can actually filter on.
+fn report(event: &Notification, command: &str) {
+    let line = describe(event, command);
+    match event {
+        Notification::Blocked {
+            stage,
+            transport,
+            addr,
+            port,
+        } => warn!(
+            %addr,
+            port,
+            stage = stage_name(*stage),
+            transport = transport_name(*transport),
+            "{line}"
+        ),
+        Notification::DnsRefused { name, .. } => warn!(name, "{line}"),
+        // The closing line of a run that was watched: not a problem in itself,
+        // and the one thing said even when nothing was blocked at all.
+        Notification::Summary {
+            suppressed, lost, ..
+        } => info!(suppressed, lost, "{line}"),
+    }
+}
+
+fn stage_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Connect => "connect",
+        Stage::Sendmsg => "sendmsg",
+        Stage::Egress => "egress",
+        Stage::Ingress => "ingress",
+    }
+}
+
+fn transport_name(transport: Transport) -> &'static str {
+    match transport {
+        Transport::Tcp => "tcp",
+        Transport::Udp => "udp",
+        Transport::Other => "other",
+    }
 }
 
 /// Take ourselves out of the terminal's interrupt handling.
