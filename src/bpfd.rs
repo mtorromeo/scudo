@@ -8,6 +8,7 @@
 pub mod cgroup;
 pub mod client;
 pub mod protocol;
+pub mod report;
 
 #[cfg(feature = "bpf")]
 pub mod caps;

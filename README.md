@@ -21,6 +21,8 @@ Options:
   -P, --property <PROPERTY=VALUE>       Set a property for the systemd-run command
   -p, --profile <NAME>                  Apply the named profile, ignoring its match rules (repeatable, comma-separated)
       --no-match                        Skip profile matching; apply only the profiles given with --profile
+      --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
+      --tui-prefix <KEY>                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
   -h, --help                            Print help
   -V, --version                         Print version
 ```
@@ -85,6 +87,18 @@ Profiles are loaded from the following paths in order, with later files taking p
 | `/.scudo.toml` … `$PWD/.scudo.toml` | per-directory |
 
 For the per-directory tier, scudo walks every ancestor of `$PWD` from the filesystem root down to the current directory, loading each `.scudo.toml` it finds. This lets a project directory override settings defined higher up the tree. For example, with `$PWD` set to `/home/user/projects/myapp`, the lookup order is `/.scudo.toml`, `/home/.scudo.toml`, `/home/user/.scudo.toml`, `/home/user/projects/.scudo.toml`, `/home/user/projects/myapp/.scudo.toml`.
+
+Every top-level section is a profile, with one exception: `[scudo]` holds settings that are
+about scudo itself rather than about a command — the [logging](#logging) defaults and the
+[terminal UI](#terminal-ui). It is merged key by key across the files above like everything
+else, and `scudo` is therefore not available as a profile name.
+
+```toml
+[scudo]
+log.level = "info"
+tui.prefix = "C-b"
+tui.scrollback = 20000
+```
 
 ### Trust confirmation for per-directory configs
 
@@ -401,6 +415,13 @@ scudo: warning: blocked connect to 1.1.1.1:443/tcp
 scudo: curl: blocked example.com (2x), 1.1.1.1:443 (7x) [5 repeats suppressed]
 ```
 
+Mixed into the command's own output, those lines are easy to lose; the
+[terminal UI](#terminal-ui) puts them in a panel of their own instead:
+
+```console
+$ scudo --tui -- curl -sS https://example.com/
+```
+
 Each refusal is a `warn` event and the closing summary an `info` one, so they follow whatever
 [logging](#logging) is configured. On journald they carry the address, port, stage and
 transport as fields of their own, which is what makes them filterable there:
@@ -441,19 +462,27 @@ log.syslog_facility = "user"         # only read by target = "syslog"
 The default is `warn` on stderr — exactly the set of messages scudo printed before it had
 levels at all.
 
-There is no reserved section for a global default; a profile that matches everything is one:
+Defaults for every command go in the reserved `[scudo]` section:
+
+```toml
+[scudo]
+log.level = "info"
+log.target = "journald"
+```
+
+It sits **under** the profiles rather than over them, which is what makes it a default: a
+profile can be quieter than it as well as louder — unlike `verbose`, which only ever adds. A
+profile matching everything says the same thing and is still perfectly good:
 
 ```toml
 [default]
 match = { type = "glob", pattern = "*" }
 log.level = "info"
-log.target = "journald"
 ```
 
-Because this is an ordinary profile, the ordinary precedence applies (glob < regex < exact,
-and `--profile` above all), so a command can be made **quieter** than the default as well as
-louder — unlike `verbose`, which only ever adds. `verbose = true` is still accepted and means
-`log.level = "debug"`; a level written out next to it wins, being the more specific of the two.
+Between two profiles the ordinary precedence applies (glob < regex < exact, and `--profile`
+above all). `verbose = true` is still accepted and means `log.level = "debug"`; a level
+written out next to it wins, being the more specific of the two.
 
 The command line overrides the profiles:
 
@@ -475,6 +504,111 @@ Stderr keeps the shape it always had (`scudo: warning: …`), with the event's f
 only at `debug` and below; a file adds a timestamp and the level; syslog and journald receive
 the fields as fields. The confirmation prompt and the trust diff are **not** logs: they are
 interactive output and always go to stderr, whatever the destination.
+
+### Terminal UI
+
+`--tui` runs the command inside scudo rather than in place of it: a full terminal on the left,
+and on the right a live list of what the sandbox turned away.
+
+```console
+$ scudo --tui -- curl https://example.com/
+$ scudo --tui -- bash
+```
+
+```
+┌ bash ─────────────────────────────┬─ blocked (3) ──────┐
+│ $ curl https://ads.example/        │ ads.example    2x  │
+│ curl: (6) Could not resolve host   │ 1.1.1.1:443    1x  │
+│ $                                  │                    │
+│                                    ├────────────────────┤
+│                                    │  1s blocked DNS …  │
+│                                    │  4s blocked conn…  │
+├────────────────────────────────────┴────────────────────┤
+│ ^A ? help │ terminal │ blocked 3                        │
+└─────────────────────────────────────────────────────────┘
+```
+
+The left panel is a terminal in full: colours, resizing, scrollback, the mouse, and job
+control. A shell runs in it as it would anywhere, `Ctrl-C` and `Ctrl-Z` included — in this
+mode they are bytes for the command, not signals for scudo.
+
+Asking for the UI also turns denial reporting on for the run, the same way `--verbose` does;
+without it the right panel would have nothing to show. When there is nothing to report the
+panel says which of the reasons applies — no network policy, a policy that took the network
+away entirely, or a sandbox that could not be watched — rather than sitting empty.
+
+The mode is only available when scudo is invoked by its own name. Called through a symlink or
+the FUSE shim, everything after the command name belongs to the command, so `--tui` is passed
+straight through to it.
+
+#### Keys
+
+Every key goes to the command except the prefix, `Ctrl-A` by default, which introduces one of
+scudo's own:
+
+| Key | Effect |
+|-----|--------|
+| `^A q` | leave, stopping the command if it is still running |
+| `^A ^A` | send `Ctrl-A` to the command |
+| `^A Tab` | move between the terminal and the panel |
+| `^A [` | read the scrollback — arrows, `PgUp`/`PgDn`, `Esc` to return |
+| `^A r` | set how wide the panel is — arrows by one, `h`/`l` by five, `=` back to automatic, `Esc` to return |
+| `^A w` | show or hide the panel |
+| `^A s` | show or hide what scudo decided: the profiles that matched and the command line it built |
+| `^A ?` | the list above |
+
+Change the prefix with `tui.prefix` in `[scudo]` or with `--tui-prefix`; it is written as
+`C-a`, `M-x` or `F12`, and must carry a modifier, since a bare character would be taken away
+from the command with no way to type it.
+
+The mouse is handed to the program in the terminal only while that program asks for it, so
+selecting and copying with the mouse keeps working everywhere else — at the cost of taking
+whole screen rows, panel included, since scudo is drawing one screen.
+
+When the command exits, the UI stays up so the last screen and the full list can be read; any
+key then leaves. scudo exits with the command's own code, and the closing summary of what was
+blocked is printed to stderr once the terminal has been given back, so it lands in the
+scrollback you keep.
+
+#### How wide the panel is
+
+By default the panel takes a quarter of the screen, never narrower than 34 columns and never
+wider than 60 — past that it has all the room its contents can use, and the rest would be
+taken from the terminal for nothing. On a 120-column window that is the same 34 columns it
+always was; on a 240-column one it is 60.
+
+| screen | panel |
+|--------|-------|
+| 100 | 34 |
+| 160 | 40 |
+| 200 | 50 |
+| 240 and wider | 60 |
+
+`^A r` sets it by hand. The keys move the **edge** between the two panels, not the panel's
+width, so `←` and `h` widen the panel that sits to the right of that edge and `→` and `l`
+narrow it; the arrows move it a column at a time and the letters five at a time. The command
+inside is told about its new size as it happens, so a full-screen program redraws itself while
+you are still moving the edge.
+
+A width set this way is **remembered**, in `$XDG_CONFIG_HOME/scudo/state.toml`, and applies to
+the next run. It also stops following the screen: resizing the window no longer moves it.
+`=` in the resize mode puts it back to automatic, and that too is remembered.
+
+That file is state, not configuration — scudo writes it, and nothing in it was typed by hand.
+There is deliberately no `panel_width` in `[scudo.tui]`: two sources for one width could only
+ever differ in order to disagree, and a config that still names it will say so rather than be
+quietly ignored.
+
+The panel is dropped altogether when the window is too narrow to leave the terminal 40
+columns: a shell wrapping into nonsense costs more than the panel shows.
+
+#### Settings
+
+```toml
+[scudo]
+tui.prefix = "C-b"          # default "C-a"
+tui.scrollback = 20000      # default 10000 lines
+```
 
 ### Match patterns
 
@@ -657,6 +791,17 @@ Absolute paths are passed through unchanged. Canonicalization is purely lexical 
 
 ```
 cargo build --release
+```
+
+Two features are on by default and can be dropped:
+
+| Feature | Drops |
+|---------|-------|
+| `bpf` | `scudo-bpfd` and the eBPF programs, along with the nightly toolchain and `bpf-linker` needed to build them. scudo still talks to a daemon that is installed. |
+| `tui` | `--tui` and the terminal UI. A config naming `[scudo.tui]` still parses, so one shared with a full build is not rejected. |
+
+```
+cargo build --release --no-default-features --features bpf
 ```
 
 ## License

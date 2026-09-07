@@ -26,6 +26,55 @@ pub struct Options<'a> {
     pub log_denials: bool,
 }
 
+/// Build the `systemd-run` command line, without starting anything.
+///
+/// Split out from [`exec`] because the terminal UI needs the same command and a
+/// different fate for it: it spawns it on a pty of its own rather than becoming
+/// it, and there is nothing about how it is put together that should differ.
+pub fn build(
+    command: &Path,
+    args: &[String],
+    systemd_args: &[String],
+    options: &Options<'_>,
+) -> Result<std::process::Command> {
+    let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
+    cmd.args(["--user", "--wait", "-Pdt"]).args(systemd_args);
+
+    if !options.verbose {
+        cmd.arg("-q");
+    }
+
+    cmd.arg("--");
+    if let Some(token) = options.shim_token {
+        let self_exe = std::env::current_exe().context("locating the scudo binary")?;
+        cmd.arg(self_exe).arg("--bpf-shim").arg(token).arg("--");
+    }
+    cmd.arg(command).args(args);
+    Ok(cmd)
+}
+
+/// A command line as it would be typed into a shell.
+#[must_use]
+pub fn render(cmd: &std::process::Command) -> String {
+    core::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Show the command line and ask, when asking was requested and there is
+/// somebody there to answer. Errors when the answer is no.
+pub fn confirm(cmdline: &str, wanted: bool) -> Result<()> {
+    if !wanted || !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    if prompt_confirm(format!("{cmdline}\nProceed?"))? {
+        return Ok(());
+    }
+    anyhow::bail!("aborted")
+}
+
 pub fn exec(
     command: &Path,
     args: &[String],
@@ -34,39 +83,19 @@ pub fn exec(
 ) -> Result<()> {
     let Options {
         verbose,
-        confirm,
+        confirm: wanted,
         log,
         shim_token,
         log_denials,
     } = *options;
 
-    let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
-    cmd.args(["--user", "--wait", "-Pdt"]).args(systemd_args);
-
-    if !verbose {
-        cmd.arg("-q");
-    }
-
-    cmd.arg("--");
-    if let Some(token) = shim_token {
-        let self_exe = std::env::current_exe().context("locating the scudo binary")?;
-        cmd.arg(self_exe).arg("--bpf-shim").arg(token).arg("--");
-    }
-    cmd.arg(command).args(args);
-
+    let mut cmd = build(command, args, systemd_args, options)?;
     let interactive = std::io::stdin().is_terminal();
 
-    if verbose || (confirm && interactive) {
-        let cmdline = core::iter::once(cmd.get_program())
-            .chain(cmd.get_args())
-            .map(shell_quote)
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        if confirm && interactive {
-            if !prompt_confirm(format!("{cmdline}\nProceed?"))? {
-                anyhow::bail!("aborted");
-            }
+    if verbose || (wanted && interactive) {
+        let cmdline = render(&cmd);
+        if wanted && interactive {
+            confirm(&cmdline, true)?;
         } else {
             debug!("running command: {cmdline}");
         }

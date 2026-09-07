@@ -7,3 +7,4 @@ pub mod policy;
 pub mod profile;
 pub mod runner;
 pub mod trust;
+pub mod tui;

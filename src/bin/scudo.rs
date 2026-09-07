@@ -9,14 +9,25 @@ use std::{
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use scudo::{
-    bpfd::protocol::{Notification, Stage, Transport},
+    bpfd::{protocol::Notification, report},
     logging::{Facility, Level, LogConfig, Target},
 };
-use tracing::{debug, error, info, warn};
+#[cfg(feature = "tui")]
+use tracing::info;
+use tracing::{debug, error, warn};
 
 #[derive(Debug, Parser)]
 #[command(about, version, author)]
-#[expect(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names, reason = "the log flags share a prefix")]
+// Only with the UI does the count of flags reach the limit; without it the
+// expectation would go unfulfilled, which is itself a warning.
+#[cfg_attr(
+    feature = "tui",
+    expect(
+        clippy::struct_excessive_bools,
+        reason = "each is a flag the person typed, and they are independent"
+    )
+)]
 struct Args {
     /// Enable verbose output. A shorthand for `--log-level debug`.
     #[arg(short, long)]
@@ -58,6 +69,19 @@ struct Args {
     /// Skip profile matching; apply only the profiles given with --profile.
     #[arg(long)]
     no_match: bool,
+
+    // Reachable only when scudo is invoked by name, and nothing checks: the
+    // argv[0] dispatch rewrites a symlinked call into `scudo -- <command> …`,
+    // after which every flag belongs to the command.
+    /// Run the command in scudo's terminal UI, beside a live list of blocks.
+    #[cfg(feature = "tui")]
+    #[arg(long)]
+    tui: bool,
+
+    /// The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`.
+    #[cfg(feature = "tui")]
+    #[arg(long, value_name = "KEY", requires = "tui")]
+    tui_prefix: Option<String>,
 
     /// Internal: claim the policies registered under TOKEN, then exec the
     /// command. Set by scudo itself when starting a sandboxed unit.
@@ -175,9 +199,9 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
 
     let bin = which(&args.command, &self_exe)?;
 
-    let configs = scudo::config::load_configs()?;
+    let loaded = scudo::config::load_configs()?;
     let mut resolved = scudo::profile::resolve_with(
-        &configs,
+        &loaded.profiles,
         &args.command,
         &args.command_args,
         scudo::profile::ResolveOptions {
@@ -187,13 +211,17 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     )?;
 
     // The command line has the last word, so it goes on top of what the
-    // profiles settled on.
-    let log = cli_log.over(resolved.log);
+    // profiles settled on, which in turn sit on the `[scudo]` defaults.
+    let log = cli_log.over(resolved.log).over(loaded.settings.log.clone());
     logging.reconfigure(&log)?;
 
     // Everything `--verbose` used to switch on now hangs off the level, so that
     // `log.level = "debug"` in a profile buys exactly what `-v` does.
     let verbose = log.level() >= Level::Debug;
+    #[cfg(feature = "tui")]
+    let tui = args.tui;
+    #[cfg(not(feature = "tui"))]
+    let tui = false;
 
     if args.confirm {
         resolved.confirm = true;
@@ -208,8 +236,9 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         None => bin,
     };
 
-    // The level can only make scudo louder, the way it does for everything else.
-    if verbose {
+    // The level can only make scudo louder, the way it does for everything
+    // else, and asking for the panel is asking for what fills it.
+    if verbose || tui {
         for policy in &mut resolved.policies {
             policy.report_denials();
         }
@@ -229,6 +258,8 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     }
 
     let applied = scudo::policy::apply(&resolved.policies)?;
+    #[cfg(feature = "tui")]
+    let shim_token_present = applied.token.is_some();
     for warning in &applied.warnings {
         warn!("{warning}");
     }
@@ -239,29 +270,172 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         .systemd_args
         .extend(args.property.iter().map(|p| format!("--property={p}")));
 
-    if resolved.systemd_args.is_empty() && shim_token.is_none() {
+    let options = scudo::runner::Options {
+        verbose,
+        confirm: resolved.confirm,
+        log: &log,
+        shim_token: shim_token.as_deref(),
+        log_denials: reporting,
+    };
+
+    let unsandboxed = resolved.systemd_args.is_empty() && shim_token.is_none();
+    if unsandboxed {
         debug!(
             "no profile matched or empty systemd-run options for '{}'",
             args.command
         );
+    }
+
+    #[cfg(feature = "tui")]
+    if tui {
+        let cmd = if unsandboxed {
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.args(&args.command_args);
+            cmd
+        } else {
+            scudo::runner::build(&bin, &args.command_args, &resolved.systemd_args, &options)?
+        };
+        return start_ui(
+            cmd,
+            &args,
+            logging,
+            &log,
+            &loaded.settings.tui,
+            UiContext {
+                match_log: &resolved.match_log,
+                token: shim_token,
+                reporting: reporting_state(
+                    reporting,
+                    shim_token_present,
+                    deny_all(&resolved.policies),
+                ),
+                confirm: resolved.confirm,
+            },
+        );
+    }
+
+    if unsandboxed {
         let err = std::process::Command::new(&bin)
             .args(&args.command_args)
             .exec();
         return Err(anyhow::Error::from(err).context("exec failed"));
     }
 
-    scudo::runner::exec(
-        &bin,
-        &args.command_args,
-        &resolved.systemd_args,
-        &scudo::runner::Options {
-            verbose,
-            confirm: resolved.confirm,
-            log: &log,
-            shim_token: shim_token.as_deref(),
-            log_denials: reporting,
+    scudo::runner::exec(&bin, &args.command_args, &resolved.systemd_args, &options)
+}
+
+/// What the UI needs that the command line does not carry.
+#[cfg(feature = "tui")]
+struct UiContext<'a> {
+    match_log: &'a [String],
+    token: Option<String>,
+    reporting: scudo::tui::Reporting,
+    confirm: bool,
+}
+
+/// Why the panel would be empty, so it can say so rather than look broken.
+#[cfg(feature = "tui")]
+fn reporting_state(reporting: bool, enforced: bool, deny_all: bool) -> scudo::tui::Reporting {
+    use scudo::tui::Reporting;
+    if reporting {
+        Reporting::Watching
+    } else if deny_all {
+        // Nothing is attached, so nothing observes what the command then fails
+        // to reach; an empty panel here is the truth and not a fault.
+        Reporting::DenyAll
+    } else if enforced {
+        Reporting::Unavailable
+    } else {
+        Reporting::NoPolicy
+    }
+}
+
+/// Hand the command to the terminal UI, and give the terminal back afterwards.
+/// Never returns: scudo stands in for the command, so the last thing it does is
+/// take on its exit code.
+#[expect(clippy::exit, reason = "the command's code has to become scudo's")]
+#[cfg(feature = "tui")]
+fn start_ui(
+    cmd: std::process::Command,
+    args: &Args,
+    logging: &scudo::logging::Handle,
+    log: &LogConfig,
+    settings: &scudo::tui::TuiConfig,
+    context: UiContext<'_>,
+) -> Result<()> {
+    let cmdline = scudo::runner::render(&cmd);
+    // Before the screen is taken over, so declining leaves the terminal exactly
+    // as it was found.
+    scudo::runner::confirm(&cmdline, context.confirm)?;
+
+    let command = Path::new(&args.command)
+        .file_name()
+        .map_or_else(|| args.command.clone(), |name| name.display().to_string());
+
+    // What `--verbose` would have printed goes into the UI's own context area
+    // instead: printing it would put it underneath the drawing, where it would
+    // be both invisible and in the way.
+    let mut lines: Vec<String> = context.match_log.to_vec();
+    lines.push(format!("running: {cmdline}"));
+
+    let config = match args.tui_prefix.clone() {
+        Some(prefix) => scudo::tui::TuiConfig {
+            prefix: Some(prefix),
+            ..settings.clone()
         },
-    )
+        None => settings.clone(),
+    };
+
+    // The UI owns the screen for as long as it runs, and stderr is that same
+    // screen: a warning written to it would land in the middle of the drawing.
+    // Anything worth saying is said once the terminal has been handed back.
+    let quiet = if log.writes_to_stderr() {
+        LogConfig {
+            level: Some(Level::Off),
+            ..log.clone()
+        }
+    } else {
+        log.clone()
+    };
+    logging.reconfigure(&quiet)?;
+
+    // Not configuration: what the UI was left set to last time, which it can
+    // change again from the inside.
+    let remembered = scudo::tui::state::load();
+    let outcome = scudo::tui::run(
+        cmd,
+        &scudo::tui::Options {
+            command: &command,
+            context: lines,
+            token: context.token,
+            reporting: context.reporting,
+            config,
+            panel_width: remembered.tui.panel_width,
+        },
+    );
+
+    logging.reconfigure(log)?;
+    let outcome = outcome?;
+
+    // Written once, on the way out, and only when it actually changed: the
+    // resize keys must not put the disk to work on every press.
+    if outcome.panel_width != remembered.tui.panel_width {
+        let state = scudo::tui::state::State {
+            tui: scudo::tui::state::TuiState {
+                panel_width: outcome.panel_width,
+            },
+        };
+        if let Err(err) = scudo::tui::state::save(&state) {
+            warn!("cannot remember the panel width: {err:#}");
+        }
+    }
+
+    if let Some(summary) = outcome.summary {
+        info!("{summary}");
+    }
+    // scudo stands in for the command, so what the command exited with is what
+    // whoever ran scudo has to see.
+    exit(outcome.code);
 }
 
 /// `true` when a policy leaves the command with no network at all, which
@@ -272,9 +446,6 @@ fn deny_all(policies: &[scudo::policy::Policy]) -> bool {
         scudo::policy::Policy::Network(network) => network.is_deny_all(),
     })
 }
-
-/// How many refused targets the closing summary names before it gives up.
-const SUMMARY_TARGETS: usize = 5;
 
 /// Run as the watcher: print what the sandbox turns away, until it is gone.
 ///
@@ -296,55 +467,9 @@ fn watch(token: &str, args: &Args) -> Result<()> {
         .map_or_else(|| args.command.clone(), |name| name.display().to_string());
 
     while let Some(event) = reader.read::<Notification>()? {
-        report(&event, &command);
+        report::report(&event, &command);
     }
     Ok(())
-}
-
-/// Say what the sandbox turned away.
-///
-/// The human sentence is the message, unchanged, so stderr reads as it always
-/// did; the parts it is made of go alongside it as fields, which is what
-/// journald and syslog consumers can actually filter on.
-fn report(event: &Notification, command: &str) {
-    let line = describe(event, command);
-    match event {
-        Notification::Blocked {
-            stage,
-            transport,
-            addr,
-            port,
-        } => warn!(
-            %addr,
-            port,
-            stage = stage_name(*stage),
-            transport = transport_name(*transport),
-            "{line}"
-        ),
-        Notification::DnsRefused { name, .. } => warn!(name, "{line}"),
-        // The closing line of a run that was watched: not a problem in itself,
-        // and the one thing said even when nothing was blocked at all.
-        Notification::Summary {
-            suppressed, lost, ..
-        } => info!(suppressed, lost, "{line}"),
-    }
-}
-
-fn stage_name(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Connect => "connect",
-        Stage::Sendmsg => "sendmsg",
-        Stage::Egress => "egress",
-        Stage::Ingress => "ingress",
-    }
-}
-
-fn transport_name(transport: Transport) -> &'static str {
-    match transport {
-        Transport::Tcp => "tcp",
-        Transport::Udp => "udp",
-        Transport::Other => "other",
-    }
 }
 
 /// Take ourselves out of the terminal's interrupt handling.
@@ -356,75 +481,6 @@ fn ignore_interrupts() {
             libc::signal(signal, libc::SIG_IGN);
         }
     }
-}
-
-/// One line of output for one notification.
-fn describe(event: &Notification, command: &str) -> String {
-    match event {
-        Notification::Blocked {
-            stage,
-            transport,
-            addr,
-            ..
-        } => {
-            let target = format!(
-                "{}{}",
-                event.target().unwrap_or_else(|| addr.to_string()),
-                match transport {
-                    Transport::Tcp => "/tcp",
-                    Transport::Udp => "/udp",
-                    // Nothing with a port, so nothing to qualify.
-                    Transport::Other => "",
-                }
-            );
-            match stage {
-                Stage::Connect => format!("blocked connect to {target}"),
-                Stage::Sendmsg => format!("blocked sendmsg to {target}"),
-                Stage::Egress => format!("blocked packet to {target}"),
-                Stage::Ingress => format!("blocked packet from {target}"),
-            }
-        }
-        Notification::DnsRefused { name, reason } => {
-            format!("blocked DNS lookup of {name} ({reason})")
-        }
-        Notification::Summary {
-            targets,
-            suppressed,
-            lost,
-        } => summarise(command, targets, *suppressed, *lost),
-    }
-}
-
-/// The closing line: what was refused, how often, and what was not shown.
-fn summarise(command: &str, targets: &[(String, u64)], suppressed: u64, lost: u64) -> String {
-    if targets.is_empty() {
-        return format!("{command}: nothing was blocked");
-    }
-    let mut named: Vec<String> = targets
-        .iter()
-        .take(SUMMARY_TARGETS)
-        .map(|(target, count)| format!("{target} ({count}x)"))
-        .collect();
-    if let Some(rest) = targets.len().checked_sub(SUMMARY_TARGETS)
-        && rest > 0
-    {
-        named.push(format!("and {rest} more"));
-    }
-    // Repeats folded together are worth saying so the counts above add up;
-    // events that never arrived are worth saying because they are missing.
-    let mut notes = Vec::new();
-    if suppressed > 0 {
-        notes.push(format!("{suppressed} repeats suppressed"));
-    }
-    if lost > 0 {
-        notes.push(format!("{lost} events lost"));
-    }
-    let trailer = if notes.is_empty() {
-        String::new()
-    } else {
-        format!(" [{}]", notes.join(", "))
-    };
-    format!("{command}: blocked {}{trailer}", named.join(", "))
 }
 
 /// Run as the in-unit shim: claim the registered policies for this cgroup, then
@@ -441,90 +497,4 @@ fn shim(token: &str, args: &Args) -> Result<()> {
         .args(&args.command_args)
         .exec();
     Err(anyhow::Error::from(err).context("exec failed"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn blocked(stage: Stage, transport: Transport, addr: &str, port: u16) -> Notification {
-        Notification::Blocked {
-            stage,
-            transport,
-            addr: addr.parse().expect("a valid test address"),
-            port,
-        }
-    }
-
-    #[test]
-    fn each_stage_says_what_it_did_and_which_way_round() {
-        let line =
-            |stage, transport, addr, port| describe(&blocked(stage, transport, addr, port), "curl");
-        assert_eq!(
-            line(Stage::Connect, Transport::Tcp, "1.1.1.1", 443),
-            "blocked connect to 1.1.1.1:443/tcp"
-        );
-        assert_eq!(
-            line(Stage::Sendmsg, Transport::Udp, "8.8.8.8", 53),
-            "blocked sendmsg to 8.8.8.8:53/udp"
-        );
-        // On ingress the address is where it came from, not where it was going.
-        assert_eq!(
-            line(Stage::Ingress, Transport::Tcp, "10.0.0.5", 80),
-            "blocked packet from 10.0.0.5:80/tcp"
-        );
-        // ICMP has no port and no transport to name.
-        assert_eq!(
-            line(Stage::Egress, Transport::Other, "10.0.0.5", 0),
-            "blocked packet to 10.0.0.5"
-        );
-    }
-
-    #[test]
-    fn a_refused_lookup_says_why() {
-        let event = Notification::DnsRefused {
-            name: "ads.example".to_owned(),
-            reason: "no rule names it".to_owned(),
-        };
-        assert_eq!(
-            describe(&event, "curl"),
-            "blocked DNS lookup of ads.example (no rule names it)"
-        );
-    }
-
-    /// Silence would be ambiguous: it reads the same as the reporting having
-    /// failed to start.
-    #[test]
-    fn a_run_that_was_never_blocked_says_so() {
-        assert_eq!(summarise("curl", &[], 0, 0), "curl: nothing was blocked");
-    }
-
-    #[test]
-    fn the_summary_counts_attempts_and_owns_up_to_what_it_dropped() {
-        let targets = vec![
-            ("1.1.1.1:443".to_owned(), 42),
-            ("ads.example".to_owned(), 4),
-        ];
-        assert_eq!(
-            summarise("curl", &targets, 39, 2),
-            "curl: blocked 1.1.1.1:443 (42x), ads.example (4x) [39 repeats suppressed, 2 events lost]"
-        );
-        // Nothing hidden, nothing to add.
-        assert_eq!(
-            summarise("curl", &targets, 0, 0),
-            "curl: blocked 1.1.1.1:443 (42x), ads.example (4x)"
-        );
-    }
-
-    /// A command that was refused everywhere must not fill the screen with its
-    /// own summary.
-    #[test]
-    fn a_long_summary_is_cut_short_rather_than_scrolled() {
-        let targets: Vec<(String, u64)> = (0..SUMMARY_TARGETS + 3)
-            .map(|i| (format!("10.0.0.{i}:443"), 1))
-            .collect();
-        let line = summarise("curl", &targets, 0, 0);
-        assert!(line.ends_with("and 3 more"), "{line}");
-        assert_eq!(line.matches("10.0.0.").count(), SUMMARY_TARGETS);
-    }
 }

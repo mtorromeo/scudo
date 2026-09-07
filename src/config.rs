@@ -51,7 +51,7 @@ where
     }
 }
 
-use crate::{logging::LogConfig, policy::NetworkConfig, trust};
+use crate::{logging::LogConfig, policy::NetworkConfig, trust, tui::TuiConfig};
 
 /// Match type for a pattern entry. Defaults to `exact` when unspecified.
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -176,6 +176,44 @@ pub struct ProfileConfig {
 }
 
 pub type ConfigMap = HashMap<String, ProfileConfig>;
+
+/// The name of the reserved table, which is therefore not a profile name.
+pub const SETTINGS_SECTION: &str = "scudo";
+
+/// The `[scudo]` table: what holds for scudo itself rather than for one command.
+///
+/// It is the *lowest* priority source for everything it carries, sitting under
+/// the profiles and under the command line. That is what makes it a default
+/// rather than an override: a profile can still be quieter than it, which a
+/// setting that won would not allow.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    /// Default level and destination for scudo's own output.
+    #[serde(default)]
+    pub log: LogConfig,
+    #[serde(default)]
+    pub tui: TuiConfig,
+}
+
+impl Settings {
+    /// Fields set on `self` win; the rest fall back to `lower`. Used to layer
+    /// the config files over each other in priority order.
+    #[must_use]
+    fn over(self, lower: Self) -> Self {
+        Settings {
+            log: self.log.over(lower.log),
+            tui: self.tui.over(lower.tui),
+        }
+    }
+}
+
+/// Everything the config files had to say.
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    pub profiles: ValidatedConfigMap,
+    pub settings: Settings,
+}
 
 #[derive(Debug, Clone)]
 pub struct ValidatedProfileConfig {
@@ -348,9 +386,39 @@ fn substitute_profile_config_dir(profile: &mut ProfileConfig, dir: &str) {
     }
 }
 
+/// Substitute `$SCUDO_CONFIG_DIR` in the reserved table, which reaches only the
+/// log path — the other settings name keys and sizes, never paths.
+fn substitute_settings_config_dir(settings: &mut Settings, dir: &str) {
+    if let Some(path) = settings.log.path.as_mut()
+        && path.contains(CONFIG_DIR_VAR)
+    {
+        *path = substitute_config_dir_str(path, dir);
+    }
+}
+
+/// Take the reserved `[scudo]` table out of a parsed file, leaving the profiles.
+///
+/// Splitting the table by hand rather than with `#[serde(flatten)]` is what
+/// keeps `deny_unknown_fields` working on `ProfileConfig`: flattening turns
+/// every unknown profile key into a candidate for the outer struct, and a typo
+/// would stop being an error.
+fn split_settings(mut table: toml::Table, path: &std::path::Path) -> Result<(ConfigMap, Settings)> {
+    let settings = match table.remove(SETTINGS_SECTION) {
+        Some(value) => value
+            .try_into::<Settings>()
+            .with_context(|| format!("parsing [{SETTINGS_SECTION}] in {}", path.display()))?,
+        None => Settings::default(),
+    };
+    let profiles = toml::Value::Table(table)
+        .try_into::<ConfigMap>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    Ok((profiles, settings))
+}
+
 /// Load and merge configs from all search paths (lowest to highest priority).
-pub fn load_configs() -> Result<ValidatedConfigMap> {
+pub fn load_configs() -> Result<Loaded> {
     let mut merged: ConfigMap = HashMap::new();
+    let mut settings = Settings::default();
     for path in config_search_paths() {
         if !path.is_file() {
             continue;
@@ -364,8 +432,9 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
             trust::check_and_confirm(&canonical, &content)?;
         }
 
-        let file_configs: ConfigMap =
+        let table: toml::Table =
             toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
+        let (file_configs, mut file_settings) = split_settings(table, &path)?;
 
         // Directory containing this config file — the value of `$SCUDO_CONFIG_DIR`
         // for every profile defined in it.
@@ -373,6 +442,9 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
+
+        substitute_settings_config_dir(&mut file_settings, &config_dir);
+        settings = file_settings.over(settings);
 
         let mut synthetic_counter: HashMap<String, usize> = HashMap::new();
         for (name, mut new_profile) in file_configs {
@@ -399,7 +471,10 @@ pub fn load_configs() -> Result<ValidatedConfigMap> {
             merged.insert(name, new_profile);
         }
     }
-    merged.try_into()
+    Ok(Loaded {
+        profiles: merged.try_into()?,
+        settings,
+    })
 }
 
 pub fn user_path() -> Result<PathBuf, VarError> {
@@ -434,6 +509,89 @@ fn config_search_paths() -> Vec<PathBuf> {
 #[expect(clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// Parse one config file the way `load_configs` does.
+    fn split(src: &str) -> Result<(ConfigMap, Settings)> {
+        let table: toml::Table = toml::from_str(src)?;
+        split_settings(table, std::path::Path::new("test.toml"))
+    }
+
+    #[test]
+    fn the_reserved_table_is_taken_out_and_the_rest_are_profiles() {
+        let (profiles, settings) = split(
+            r#"
+            [scudo]
+            log.level = "info"
+            tui.prefix = "C-b"
+            tui.scrollback = 20000
+
+            [curl]
+            match = "curl"
+            systemd.MemoryMax = "256M"
+            "#,
+        )
+        .expect("the file parses");
+
+        assert_eq!(settings.log.level, Some(crate::logging::Level::Info));
+        assert_eq!(settings.tui.prefix(), "C-b");
+        assert_eq!(settings.tui.scrollback(), 20000);
+        // `scudo` is settings, not a profile that happens to be named that.
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles.contains_key("curl"));
+    }
+
+    /// The section is optional, and a config without it is every config written
+    /// before it existed.
+    #[test]
+    fn a_config_without_the_reserved_table_still_parses() {
+        let (profiles, settings) = split("[curl]\nmatch = \"curl\"\n").expect("the file parses");
+        assert_eq!(settings, Settings::default());
+        assert_eq!(profiles.len(), 1);
+    }
+
+    /// A typo in the reserved table has to be an error, or the setting silently
+    /// does nothing and the fault shows up as behaviour rather than a message.
+    #[test]
+    fn a_typo_in_the_reserved_table_is_reported_against_it() {
+        let err = split("[scudo]\ntui.prefx = \"C-b\"\n").expect_err("the typo is caught");
+        let message = format!("{err:#}");
+        assert!(message.contains("[scudo]"), "{message}");
+        assert!(message.contains("prefx"), "{message}");
+    }
+
+    /// The reserved name is not a profile, so a profile key inside it is a
+    /// mistake rather than a profile definition.
+    #[test]
+    fn the_reserved_table_does_not_accept_profile_keys() {
+        split("[scudo]\nmatch = \"scudo\"\n").expect_err("a profile key is not a setting");
+    }
+
+    /// Same priority order as everything else: the file read last wins, key by
+    /// key, so a user config can change the prefix without restating the level.
+    #[test]
+    fn a_higher_priority_file_overrides_only_what_it_mentions() {
+        let lower = Settings {
+            log: LogConfig {
+                level: Some(crate::logging::Level::Warn),
+                ..LogConfig::default()
+            },
+            tui: TuiConfig {
+                prefix: Some("C-a".to_owned()),
+                scrollback: Some(30_000),
+            },
+        };
+        let higher = Settings {
+            tui: TuiConfig {
+                prefix: Some("C-b".to_owned()),
+                ..TuiConfig::default()
+            },
+            ..Settings::default()
+        };
+        let merged = higher.over(lower);
+        assert_eq!(merged.tui.prefix(), "C-b");
+        assert_eq!(merged.tui.scrollback(), 30_000);
+        assert_eq!(merged.log.level, Some(crate::logging::Level::Warn));
+    }
 
     /// Simulate loading two config layers (lower-priority first, then higher-priority)
     /// and return the resulting `ValidatedConfigMap`.

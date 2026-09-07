@@ -254,6 +254,15 @@ impl LogConfig {
         self.level = Some(self.level().max(floor));
     }
 
+    /// `true` when messages go to the terminal.
+    ///
+    /// Asked by anything that is about to draw on that terminal itself: a log
+    /// line written underneath a full-screen UI lands in the middle of it.
+    #[must_use]
+    pub fn writes_to_stderr(&self) -> bool {
+        self.resolved_targets().contains(&Target::Stderr)
+    }
+
     /// The targets in force. Naming a path without naming a target means the
     /// file: there is nothing else the path could have been for.
     fn resolved_targets(&self) -> Vec<Target> {

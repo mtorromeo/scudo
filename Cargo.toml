@@ -21,11 +21,15 @@ codegen-units = 1
 overflow-checks = false
 
 [features]
-default = ["bpf"]
+default = ["bpf", "tui"]
 # Build scudo-bpfd and the eBPF programs it loads. Turning this off drops the
 # nightly toolchain and bpf-linker build requirements; scudo itself still talks
 # to the daemon when one is installed.
 bpf = ["dep:aya", "dep:aya-build", "dep:scudo-bpf-common"]
+# Build the terminal UI behind `--tui`. Turning it off drops ratatui and the
+# terminal emulator; the `tui` sub-table in a profile still parses, so a config
+# written for a full build is not rejected by a build without it.
+tui = ["dep:ratatui", "dep:tui-term", "dep:vt100"]
 
 [[bin]]
 name = "scudo-bpfd"
@@ -106,6 +110,16 @@ aya-build = { version = "0.2", optional = true }
 clap = { version = "4", features = ["derive", "env"] }
 fuser = "0.17"
 libc = "0.2"
+
+# `ratatui` re-exports the crossterm it was built against, so the backend is
+# never named twice and cannot drift out of step with it.
+ratatui = { version = "0.30", optional = true, default-features = false, features = [
+    "crossterm",
+    "layout-cache",
+    "underline-color",
+] }
+tui-term = { version = "0.3", optional = true, default-features = false, features = ["vt100"] }
+vt100 = { version = "0.16", optional = true }
 
 [profile.release]
 opt-level = "z"
