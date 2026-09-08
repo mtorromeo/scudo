@@ -630,7 +630,7 @@ scudo's own:
 | `^A q` | leave, stopping the command if it is still running |
 | `^A ^A` | send `Ctrl-A` to the command |
 | `^A Tab` | move between the terminal and the panel |
-| `^A [` | read the scrollback — arrows, `PgUp`/`PgDn`, `Esc` to return |
+| `^A PgUp` | read the scrollback — arrows, `PgUp`/`PgDn`, `Esc` to return |
 | `^A r` | set how wide the panel is — arrows by one, `h`/`l` by five, `=` back to automatic, `Esc` to return |
 | `^A w` | show or hide the panel |
 | `^A s` | show or hide what scudo decided: the profiles that matched and the command line it built |
@@ -653,10 +653,10 @@ The mouse is handed to the program in the terminal only while that program asks 
 selecting and copying with the mouse keeps working everywhere else — at the cost of taking
 whole screen rows, panel included, since scudo is drawing one screen.
 
-When the command exits, the UI stays up so the last screen and the full list can be read; any
-key then leaves. scudo exits with the command's own code, and the closing summary of what was
-blocked is printed to stderr once the terminal has been given back, so it lands in the
-scrollback you keep.
+When the command exits, the UI stays up so the last screen and the full list can be read; `q`,
+`Esc` or `^d` can be used to close. scudo exits with the command's own code, and the closing
+summary of what was blocked is printed to stderr once the terminal has been given back, so it
+lands in the scrollback you keep.
 
 #### How wide the panel is
 

@@ -391,7 +391,7 @@ fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
     let (message, style) = match (view.finished, view.mode) {
         (Some(code), _) => (
             format!(
-                "{} exited with {code} — press any key to leave",
+                "{} exited with {code} — press q, Esc or ^d to leave",
                 view.command
             ),
             Style::default().bg(Color::Blue).fg(Color::White),
@@ -450,7 +450,7 @@ fn draw_help(frame: &mut Frame<'_>, view: &View<'_>) {
         format!("{prefix} q     leave, stopping the command if it still runs"),
         format!("{prefix} {prefix}    send {prefix} to the command"),
         format!("{prefix} Tab   move between the terminal and the panel"),
-        format!("{prefix} [     read the scrollback"),
+        format!("{prefix} PgUp  read the scrollback"),
         format!("{prefix} r     set how wide the panel is"),
         format!("{prefix} w     show or hide the panel"),
         format!("{prefix} s     show or hide what scudo decided"),

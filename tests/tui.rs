@@ -125,8 +125,8 @@ fn the_command_runs_and_its_output_is_on_the_screen() {
 fn a_finished_command_waits_for_a_key_and_says_what_it_exited_with() {
     let mut cmd = scudo();
     cmd.args(["--tui", "--", "/bin/sh", "-c", "exit 3"]);
-    let (screen, code) = drive(&mut cmd, &[("exited with 3", b" ")]);
-    assert!(screen.contains("press any key"), "{screen}");
+    let (screen, code) = drive(&mut cmd, &[("exited with 3", b"q")]);
+    assert!(screen.contains("press q, Esc"), "{screen}");
     // scudo stands in for the command, so its code is the command's.
     assert_eq!(code, 3);
 }
@@ -259,7 +259,7 @@ fn resizing_the_panel_resizes_the_command_s_terminal() {
             // which is what a terminal does and not something to work around.
             ("panel 54 columns", b"q\r"),
             // The UI stays up after the command is over; this lets it go.
-            ("press any key", b" "),
+            ("press q, Esc", b"q"),
         ],
     );
     assert!(
@@ -309,7 +309,7 @@ fn the_width_is_remembered_for_the_next_run() {
     let first = run(&[
         ("39x86", b"\x01rhhhh"),
         ("panel 54 columns", b"q\r"),
-        ("press any key", b" "),
+        ("press q, Esc", b"q"),
     ]);
     assert!(first.contains("39x66"), "the size after resizing: {first}");
     assert!(
@@ -318,7 +318,7 @@ fn the_width_is_remembered_for_the_next_run() {
     );
 
     // Second run: the same width is in force from the first frame.
-    let second = run(&[("39x66", b"\r"), ("press any key", b" ")]);
+    let second = run(&[("39x66", b"\r"), ("press q, Esc", b"q")]);
     assert!(
         !second.contains("39x86"),
         "the remembered width should have applied straight away: {second}"
@@ -346,17 +346,17 @@ fn going_back_to_automatic_is_remembered_too() {
     run(&[
         ("39x86", b"\x01rhhhh"),
         ("panel 54 columns", b"q\r"),
-        ("press any key", b" "),
+        ("press q, Esc", b"q"),
     ]);
     // `=` in the resize mode puts it back to following the screen.
     let back = run(&[
         ("39x66", b"\x01r="),
         ("(automatic)", b"q\r"),
-        ("press any key", b" "),
+        ("press q, Esc", b"q"),
     ]);
     assert!(back.contains("39x86"), "back to automatic: {back}");
 
-    let third = run(&[("39x86", b"\r"), ("press any key", b" ")]);
+    let third = run(&[("39x86", b"\r"), ("press q, Esc", b"q")]);
     assert!(third.contains("39x86"), "still automatic: {third}");
 
     drop(std::fs::remove_dir_all(&home));

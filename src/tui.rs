@@ -53,7 +53,7 @@ mod run {
     use ratatui::crossterm::{
         event::{
             DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-            Event as TermEvent, KeyCode, KeyEvent, MouseEvent,
+            Event as TermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
         },
         execute,
     };
@@ -431,7 +431,11 @@ mod run {
             // The command is over: the UI is only still up so its last screen
             // can be read, and any key says it has been.
             if self.finished.is_some() {
-                self.leaving = true;
+                if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d'))
+                    || matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+                {
+                    self.leaving = true;
+                }
                 return;
             }
 
@@ -495,7 +499,7 @@ mod run {
                         Focus::Panel => Focus::Terminal,
                     };
                 }
-                KeyCode::Char('[') => self.mode = Mode::Scroll,
+                KeyCode::PageUp => self.mode = Mode::Scroll,
                 KeyCode::Char('r') => {
                     // Nothing to set while the panel is not on screen.
                     if self.show_panel {
