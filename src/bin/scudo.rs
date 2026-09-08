@@ -242,6 +242,28 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         for policy in &mut resolved.policies {
             policy.report_denials();
         }
+        // A profile that hides half of `$HOME` and says nothing about
+        // reporting is the ordinary case, and an empty panel beside a command
+        // that just died on a missing file is the whole problem this exists to
+        // solve. So asking to be told about a sandboxed command is taken as
+        // asking about its files too.
+        //
+        // Only for a command that is actually being restricted: an unsandboxed
+        // one has nothing that could have been taken from it, and the
+        // registration it would need is not free — it costs the shim, and
+        // `ProtectControlGroups=`.
+        let restricted = !resolved.systemd_args.is_empty();
+        let declared = resolved
+            .policies
+            .iter()
+            .any(|policy| matches!(policy, scudo::policy::Policy::Filesystem(_)));
+        if restricted && !declared {
+            resolved.policies.push(scudo::policy::Policy::Filesystem(
+                scudo::policy::FilesystemPolicy {
+                    log: scudo::policy::LogLevel::Denied,
+                },
+            ));
+        }
     }
     let reporting = resolved
         .policies
@@ -444,6 +466,8 @@ fn start_ui(
 fn deny_all(policies: &[scudo::policy::Policy]) -> bool {
     policies.iter().any(|policy| match policy {
         scudo::policy::Policy::Network(network) => network.is_deny_all(),
+        // It says nothing about the network either way.
+        scudo::policy::Policy::Filesystem(_) => false,
     })
 }
 

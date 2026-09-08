@@ -3,16 +3,12 @@
 //! One object is loaded per sandbox, so its maps and `.rodata` belong to that
 //! sandbox alone: no policy id, no shared state, and cleanup is just a drop.
 
-use core::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{
     fs::File,
     os::fd::AsRawFd as _,
     path::Path,
     sync::{Arc, Mutex},
-    thread::JoinHandle,
 };
 
 use anyhow::{Context as _, Result};
@@ -34,53 +30,23 @@ use crate::{
         protocol::{Notification, Stage, Transport},
         resolver::{self, Config as ResolverConfig, HostRule, Resolver, Sockets},
         trie::{self, DestKey},
+        worker::{POLL_INTERVAL_MS, Shutdown, Worker},
     },
     policy::network::{Action, NetworkPolicy, PortRule, Protocol},
 };
-
-/// How often the ring buffer reader wakes to check whether it should stop, and
-/// to pick up the count of events that did not fit. The same half second the
-/// resolver's loop uses.
-const POLL_INTERVAL_MS: i32 = 500;
 
 /// The compiled programs, built by `build.rs`.
 static PROGRAM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scudo-net"));
 
 /// A loaded, attached policy. Dropping it detaches every program and stops the
-/// threads that went with it.
+/// threads that went with it — each [`Worker`] ends its own thread and waits
+/// for it, so the maps a reader holds never outlive the object they came from.
 pub struct Attached {
     /// Keeping the object alive is what keeps the programs attached.
     _bpf: Arc<Mutex<Ebpf>>,
-    resolver: Option<Worker>,
-    events: Option<Worker>,
-}
-
-/// A thread belonging to one sandbox, and the flag that ends it.
-struct Worker {
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl Worker {
-    /// Ask the thread to stop and wait for it. Both of ours wake at least twice
-    /// a second, so this is a short wait.
-    fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            drop(handle.join());
-        }
-    }
-}
-
-impl Drop for Attached {
-    fn drop(&mut self) {
-        for worker in [self.events.as_mut(), self.resolver.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            worker.stop();
-        }
-    }
+    /// Held rather than read: dropping a [`Worker`] is what ends its thread.
+    _resolver: Option<Worker>,
+    _events: Option<Worker>,
 }
 
 fn action_value(action: Action) -> u8 {
@@ -290,8 +256,8 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path, bus: &Arc<Bus>) -> Result<A
 
     Ok(Attached {
         _bpf: bpf,
-        resolver,
-        events,
+        _resolver: resolver,
+        _events: events,
     })
 }
 
@@ -321,16 +287,8 @@ fn start_events(bpf: &mut Ebpf, bus: Arc<Bus>) -> Result<Worker> {
         .try_into()
         .context("DROPPED is not a per-CPU array")?;
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread_stop = Arc::clone(&stop);
-    let handle = std::thread::Builder::new()
-        .name("events".to_owned())
-        .spawn(move || read_events(ring, &dropped, &bus, &thread_stop))
-        .context("starting the event reader thread")?;
-
-    Ok(Worker {
-        stop,
-        handle: Some(handle),
+    Worker::spawn("events", move |stop| {
+        read_events(ring, &dropped, &bus, stop);
     })
 }
 
@@ -339,16 +297,25 @@ fn read_events(
     mut ring: RingBuf<MapData>,
     dropped: &PerCpuArray<MapData, u64>,
     bus: &Bus,
-    stop: &AtomicBool,
+    stop: &Shutdown,
 ) {
-    let mut fds = [libc::pollfd {
-        fd: ring.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    }];
+    // The wakeup goes in the same wait as the ring buffer, so a teardown does
+    // not have to sit out the rest of the interval.
+    let mut fds = [
+        libc::pollfd {
+            fd: ring.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: stop.wake_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
     let mut reported = 0u64;
 
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.stopping() {
         while let Some(item) = ring.next() {
             if let Some(event) = DenialEvent::from_bytes(&item)
                 && let Some(notification) = notification(&event)
@@ -433,18 +400,8 @@ fn start_resolver(
         resolve_unknown: policy.resolves_unknown_names(),
         upstreams: resolver::system_upstreams(),
     };
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread_stop = Arc::clone(&stop);
-    let handle = std::thread::Builder::new()
-        .name("resolver".to_owned())
-        .spawn(move || {
-            Resolver::new(sockets, config, bpf, bus).run(&thread_stop);
-        })
-        .context("starting the resolver thread")?;
-
-    Ok(Worker {
-        stop,
-        handle: Some(handle),
+    Worker::spawn("resolver", move |stop| {
+        Resolver::new(sockets, config, bpf, bus).run(stop);
     })
 }
 

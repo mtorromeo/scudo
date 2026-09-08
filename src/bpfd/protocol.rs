@@ -80,6 +80,60 @@ pub enum Transport {
     Other,
 }
 
+/// What the sandbox was trying to do with a path.
+///
+/// Only operations that name a path are here: a syscall working on a file
+/// descriptor has already got past the sandbox, and the open that produced the
+/// descriptor is the one that would have been refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOp {
+    Open,
+    Stat,
+    Access,
+    Exec,
+    Readlink,
+    Unlink,
+    Mkdir,
+    Rename,
+    Chdir,
+    Truncate,
+}
+
+/// How the sandbox got in the way, as the kernel put it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileError {
+    /// `ENOENT`: the path is not there. Under `TemporaryFileSystem=` or
+    /// `PrivateTmp=` that is what a hidden file looks like — and it is also
+    /// what a path that never existed looks like, which is why [`Outside`] has
+    /// to be consulted before calling this a refusal.
+    NotFound,
+    /// `EACCES` or `EPERM`, which is what `InaccessiblePaths=` produces.
+    Permission,
+    /// `EROFS`: writing under `ReadOnlyPaths=` or `ProtectSystem=`.
+    ReadOnly,
+}
+
+/// Whether a file of that name exists outside the sandbox.
+///
+/// The daemon lives outside the unit's mount namespace, so it can simply look.
+/// This answers "is there a file by this name out there", not "is it the same
+/// inode" — which is the question worth asking, because it is the one that
+/// separates a path the sandbox hid from one the command was only guessing at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outside {
+    /// It is there. The sandbox is why the command could not have it.
+    Present,
+    /// It is not there either, so nothing was taken away: the command was
+    /// searching a path, resolving a module, or probing for a config file.
+    Absent,
+    /// Could not be established — a path cut short, or one relative to a
+    /// directory the process no longer has.
+    Unknown,
+}
+
 /// Something the sandbox was not allowed to do.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -97,6 +151,20 @@ pub enum Notification {
     /// is also what permits resolving it, so this is what a missing rule looks
     /// like long before any address is ever reached.
     DnsRefused { name: String, reason: String },
+    /// A file access that failed inside the sandbox.
+    ///
+    /// scudo refuses none of these: systemd hid the path, made it inaccessible
+    /// or read-only by rearranging the unit's mount namespace, and the command
+    /// was simply handed an error with no way to say which path it was about.
+    /// Whether this was a refusal at all is `outside`'s to answer.
+    FileBlocked {
+        op: FileOp,
+        /// Absolute wherever it could be resolved, and ending in `…` when the
+        /// path was too long to carry whole.
+        path: String,
+        error: FileError,
+        outside: Outside,
+    },
     /// The last message on the stream, sent when the sandbox is torn down.
     Summary {
         /// What was refused and how often, most frequent first.
@@ -110,10 +178,12 @@ pub enum Notification {
 }
 
 impl Notification {
-    /// How this reads in a summary: the thing that was refused, without the
-    /// hook or the transport, so that repeats of one destination add up.
+    /// What this event is about, whether or not the sandbox is the reason.
+    ///
+    /// Repeats of one subject add up under this, so it carries neither the hook
+    /// nor the transport nor the operation.
     #[must_use]
-    pub fn target(&self) -> Option<String> {
+    pub fn label(&self) -> Option<String> {
         match self {
             // No port at all is not port zero: ICMP and raw sockets carry none.
             Notification::Blocked { addr, port: 0, .. } => Some(addr.to_string()),
@@ -123,8 +193,41 @@ impl Notification {
                 IpAddr::V6(v6) => format!("[{v6}]:{port}"),
             }),
             Notification::DnsRefused { name, .. } => Some(name.clone()),
+            Notification::FileBlocked { path, .. } => Some(path.clone()),
             Notification::Summary { .. } => None,
         }
+    }
+
+    /// Did the sandbox actually take this away?
+    ///
+    /// Everything the network programs report is a refusal by construction —
+    /// they made it. A file access is not: a program resolving modules or
+    /// searching `$PATH` asks for dozens of files that were never anywhere, and
+    /// they come back with the same `ENOENT` as one the sandbox hid. The only
+    /// thing that tells the two apart is whether the path exists outside.
+    #[must_use]
+    pub fn is_denial(&self) -> bool {
+        !matches!(
+            self,
+            Notification::FileBlocked {
+                error: FileError::NotFound,
+                outside: Outside::Absent,
+                ..
+            } | Notification::Summary { .. }
+        )
+    }
+
+    /// How this reads in a summary: what was refused.
+    ///
+    /// `None` for anything that was not refused at all — counting a file that
+    /// was missing outside the sandbox too under "blocked" would say the
+    /// sandbox had done something it did not do.
+    #[must_use]
+    pub fn target(&self) -> Option<String> {
+        if !self.is_denial() {
+            return None;
+        }
+        self.label()
     }
 }
 

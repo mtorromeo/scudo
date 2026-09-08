@@ -102,7 +102,8 @@ command = "cargo"
 args = ["test", "--locked", "--profile", "${CARGO_PROFILE}"]
 
 # These attach real eBPF programs, so they need the daemon running with its
-# capabilities; see the Network filtering section of the README.
+# capabilities; see the Network filtering section of the README. The filesystem
+# ones additionally need cap_perfmon, which `cargo make install` grants.
 [tasks.test-integration]
 description = "Run the integration tests (needs scudo-bpfd running)"
 category = "Test"
@@ -114,6 +115,8 @@ args = [
     "${CARGO_PROFILE}",
     "--test",
     "network_policy",
+    "--test",
+    "filesystem_policy",
     "--",
     "--ignored",
 ]
@@ -160,6 +163,8 @@ dependencies = ["format-check", "clippy", "test", "build"]
 
 # Installing is not just copying a binary: scudo-bpfd is useless without its file
 # capabilities, since a user service manager may not load BPF programs.
+# cap_perfmon is the one it can do without — it buys only the reporting of
+# refused file accesses, and the daemon starts and works with it missing.
 [tasks.install]
 description = "Install into /usr/bin and grant scudo-bpfd its capabilities"
 category = "Development"
@@ -177,7 +182,7 @@ sudo install -Dm0644 scudo-fuse.service -t "$unitdir"
 
 if [ -f "target/${TARGET_DIR}/scudo-bpfd" ]; then
     sudo install -Dm0755 "target/${TARGET_DIR}/scudo-bpfd" "$bindir/scudo-bpfd"
-    sudo setcap cap_bpf,cap_net_admin=ep "$bindir/scudo-bpfd"
+    sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep "$bindir/scudo-bpfd"
     sudo install -Dm0644 scudo-bpfd.service scudo-bpfd.socket -t "$unitdir"
     echo "installed; start the daemon with: systemctl --user enable --now scudo-bpfd.socket"
 else

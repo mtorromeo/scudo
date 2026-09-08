@@ -26,6 +26,7 @@ use crate::{
     bpfd::{
         caps, cgroup,
         events::Bus,
+        fsmon::{Monitor, Watch},
         loader::{self, Attached},
         protocol::{Notification, Request, Response, read_message, socket_path, write_message},
     },
@@ -76,12 +77,48 @@ struct Sandbox {
     owner_uid: u32,
     bus: Arc<Bus>,
     _attached: Vec<Attached>,
+    /// Held rather than read: dropping a watch takes this sandbox's cgroup out
+    /// of the shared file monitor.
+    _watches: Vec<Watch>,
+}
+
+/// How long the file monitor stays loaded with nobody to watch.
+///
+/// Commands come in runs — a build, a shell doing one thing after another — and
+/// unloading the instant the last one ends means the next one pays to put it
+/// back. It is idle memory and no CPU while it waits: the programs are attached
+/// but every one of them returns on an empty map.
+const FSMON_IDLE_GRACE: Duration = Duration::from_secs(60);
+
+/// The shared file monitor, or the reason there is not one.
+///
+/// A failure is remembered rather than retried. What stops the object loading
+/// is a capability the binary was not granted or a kernel that will not have
+/// it, and neither changes while the daemon runs — file capabilities are fixed
+/// at exec. Retrying would make every command pay for the same doomed load,
+/// under the state lock, for a report it is not going to get.
+#[derive(Default)]
+enum FsMonitor {
+    #[default]
+    Unloaded,
+    Loaded {
+        monitor: Arc<Monitor>,
+        /// When the last sandbox stopped being watched, or `None` while one
+        /// still is.
+        idle_since: Option<Instant>,
+    },
+    Failed(String),
 }
 
 #[derive(Default)]
 struct State {
     pending: HashMap<String, Pending>,
     sandboxes: Vec<Sandbox>,
+    /// Loaded on the first sandbox that asks for it and dropped with the last —
+    /// which is what detaches its tracepoints. Unlike the network programs it
+    /// is one object for the whole daemon, because it sits on the machine's
+    /// syscall tracepoints rather than on a cgroup.
+    fsmon: FsMonitor,
 }
 
 impl State {
@@ -117,6 +154,50 @@ impl State {
             s.bus.close();
             false
         });
+        // The sandboxes that went took their watches with them. With nobody
+        // left to watch, the tracepoints eventually come off the machine rather
+        // than staying attached for ever — but not at once, or a second command
+        // right behind the first would pay to load them again.
+        if let FsMonitor::Loaded {
+            monitor,
+            idle_since,
+        } = &mut self.fsmon
+        {
+            if monitor.is_idle() {
+                match idle_since {
+                    Some(since) if now.duration_since(*since) >= FSMON_IDLE_GRACE => {
+                        self.fsmon = FsMonitor::Unloaded;
+                    }
+                    Some(_) => {}
+                    None => *idle_since = Some(now),
+                }
+            } else {
+                *idle_since = None;
+            }
+        }
+    }
+
+    /// The file monitor, loading it if this is the first sandbox to ask.
+    fn fs_monitor(&mut self) -> Result<Arc<Monitor>> {
+        match &self.fsmon {
+            FsMonitor::Loaded { monitor, .. } => return Ok(Arc::clone(monitor)),
+            FsMonitor::Failed(why) => bail!("{why}"),
+            FsMonitor::Unloaded => {}
+        }
+        match Monitor::load() {
+            Ok(monitor) => {
+                self.fsmon = FsMonitor::Loaded {
+                    monitor: Arc::clone(&monitor),
+                    idle_since: None,
+                };
+                Ok(monitor)
+            }
+            Err(err) => {
+                let why = format!("{err:#}");
+                self.fsmon = FsMonitor::Failed(why.clone());
+                bail!("{why}")
+            }
+        }
     }
 
     /// The bus of a sandbox or registration named by `token`, if the caller is
@@ -354,6 +435,7 @@ fn attach(token: &str, stream: &UnixStream, state: &Mutex<State>) -> Result<Resp
 
     let cgroup_dir = cgroup::dir_of(&cgroup);
     let mut attached = Vec::with_capacity(pending.policies.len());
+    let mut watches = Vec::new();
     for policy in &pending.policies {
         match policy {
             Policy::Network(network) => {
@@ -366,6 +448,17 @@ fn attach(token: &str, stream: &UnixStream, state: &Mutex<State>) -> Result<Resp
                     })?,
                 );
             }
+            Policy::Filesystem(fs) if fs.reports_denials() => {
+                // Watching is a courtesy, not a restriction: a daemon without
+                // CAP_PERFMON cannot do it, and refusing to start the command
+                // over that would be trading something the user asked for
+                // against something they only asked to be told about.
+                match watch_files(&mut state, &cgroup_dir, &pending.bus) {
+                    Ok(watch) => watches.push(watch),
+                    Err(err) => eprintln!("scudo-bpfd: {err:#}"),
+                }
+            }
+            Policy::Filesystem(_) => {}
         }
     }
 
@@ -375,8 +468,16 @@ fn attach(token: &str, stream: &UnixStream, state: &Mutex<State>) -> Result<Resp
         owner_uid: pending.owner_uid,
         bus: pending.bus,
         _attached: attached,
+        _watches: watches,
     });
     Ok(Response::Attached)
+}
+
+/// Put this sandbox's cgroup into the shared file monitor.
+fn watch_files(state: &mut State, cgroup_dir: &std::path::Path, bus: &Arc<Bus>) -> Result<Watch> {
+    let cgroup_id = cgroup::id_of_dir(cgroup_dir)?;
+    let monitor = state.fs_monitor()?;
+    monitor.watch(cgroup_id, Arc::clone(bus))
 }
 
 /// Take the state lock, turning a poisoned lock into a plain error.
@@ -473,6 +574,15 @@ mod tests {
 
     /// A pid that cannot be running: `pid_max` is far below `i32::MAX`.
     const NO_SUCH_PROCESS: i32 = i32::MAX;
+
+    /// The kernel-side map has one slot per sandbox, and the daemon is what
+    /// keeps that from being exceeded. If either number moves, so must the
+    /// other, or a sandbox would silently go unwatched.
+    #[test]
+    fn the_watch_map_has_room_for_every_sandbox_the_daemon_will_hold() {
+        let sandboxes = u32::try_from(MAX_SANDBOXES).expect("a sane bound");
+        assert!(sandboxes <= scudo_bpf_common::fs::MAX_WATCHED);
+    }
 
     /// The gap between registering and claiming holds a `--confirm` prompt, and
     /// a user thinking it over is not a reason to throw the policy away: the

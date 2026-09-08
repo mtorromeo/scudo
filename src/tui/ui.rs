@@ -75,11 +75,11 @@ pub enum Reporting {
 impl Reporting {
     fn note(self) -> &'static str {
         match self {
-            Reporting::Watching => "watching for blocked network accesses",
+            Reporting::Watching => "watching for blocked accesses",
             Reporting::DenyAll => {
                 "the network is taken away entirely, so there is nothing to report"
             }
-            Reporting::NoPolicy => "no network policy applies to this command",
+            Reporting::NoPolicy => "no policy applies to this command",
             Reporting::Unavailable => "the sandbox could not be watched",
         }
     }
@@ -291,10 +291,16 @@ fn draw_panel(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
 }
 
 fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect, focused: bool) {
-    let mut lines = vec![heading(
-        &format!("blocked ({})", view.denials.targets().len()),
-        focused,
-    )];
+    // The held-back count is part of the heading rather than a line of its own:
+    // an empty panel that is empty only because of a toggle has to say so where
+    // the eye already is.
+    let hidden = view.denials.hidden();
+    let title = if hidden > 0 {
+        format!("blocked ({})  +{hidden} hidden", view.denials.shown())
+    } else {
+        format!("blocked ({})", view.denials.shown())
+    };
+    let mut lines = vec![heading(&title, focused)];
 
     if view.denials.is_empty() {
         // Once the stream is closed nothing more can arrive, so an empty panel
@@ -317,9 +323,21 @@ fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect, focused: boo
             let room = width.saturating_sub(count.len()).saturating_sub(1);
             let label = truncate(&target.label, room);
             let padding = " ".repeat(room.saturating_sub(label.chars().count()));
+            // A path that was missing outside the sandbox too is shown greyed:
+            // it is something the command wanted and did not get, but the
+            // sandbox is not the reason, and widening the profile would not
+            // help.
+            let (label_style, count_style) = if target.denial {
+                (Style::default(), Style::default().fg(Color::Yellow))
+            } else {
+                (
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
             lines.push(Line::from(vec![
-                Span::raw(format!(" {label}{padding}")),
-                Span::styled(count, Style::default().fg(Color::Yellow)),
+                Span::styled(format!(" {label}{padding}"), label_style),
+                Span::styled(count, count_style),
             ]));
         }
     }
@@ -332,19 +350,17 @@ fn draw_history(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
     let mut lines = vec![heading("most recent", false)];
     let room = usize::from(area.height).saturating_sub(1);
     // Newest at the bottom, like any log: the eye goes to the last line.
-    let recent: Vec<String> = view
+    let recent: Vec<(String, bool)> = view
         .denials
         .recent()
         .rev()
         .take(room)
-        .map(|(age, line)| format!(" {} {line}", ago(age)))
+        .map(|(age, line, denial)| (format!(" {} {line}", ago(age)), denial))
         .collect();
-    lines.extend(
-        recent
-            .into_iter()
-            .rev()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Gray)))),
-    );
+    lines.extend(recent.into_iter().rev().map(|(line, denial)| {
+        let colour = if denial { Color::Gray } else { Color::DarkGray };
+        Line::from(Span::styled(line, Style::default().fg(colour)))
+    }));
 
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -418,7 +434,7 @@ fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
                     Focus::Terminal => "terminal",
                     Focus::Panel => "panel",
                 },
-                view.denials.received()
+                view.denials.blocked()
             ),
             Style::default().bg(Color::DarkGray).fg(Color::White),
         ),
@@ -438,6 +454,7 @@ fn draw_help(frame: &mut Frame<'_>, view: &View<'_>) {
         format!("{prefix} r     set how wide the panel is"),
         format!("{prefix} w     show or hide the panel"),
         format!("{prefix} s     show or hide what scudo decided"),
+        format!("{prefix} m     show or hide paths missing outside the sandbox too"),
         format!("{prefix} ?     this list"),
     ];
 

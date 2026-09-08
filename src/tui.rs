@@ -489,6 +489,9 @@ mod run {
                     }
                 }
                 KeyCode::Char('s') => self.show_context = !self.show_context,
+                // What the sandbox hid is the point of the panel; what was
+                // never there outside it is context, and only on request.
+                KeyCode::Char('m') => self.denials.toggle_missing(),
                 KeyCode::Char('?') => self.mode = Mode::Help,
                 _ => {}
             }

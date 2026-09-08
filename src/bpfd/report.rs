@@ -5,9 +5,9 @@
 //! and closes with the same summary. Keeping the wording here is what stops the
 //! two from drifting apart.
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::bpfd::protocol::{Notification, Stage, Transport};
+use crate::bpfd::protocol::{FileError, FileOp, Notification, Outside, Stage, Transport};
 
 /// How many refused targets the closing summary names before it gives up.
 pub const SUMMARY_TARGETS: usize = 5;
@@ -33,6 +33,28 @@ pub fn report(event: &Notification, command: &str) {
             "{line}"
         ),
         Notification::DnsRefused { name, .. } => warn!(name, "{line}"),
+        Notification::FileBlocked {
+            op,
+            path,
+            error,
+            outside,
+        } => {
+            // Decided before the names shadow the values they came from.
+            let volume = volume(*error, *outside);
+            let op = op_name(*op);
+            let error = error_name(*error);
+            let outside = outside_name(*outside);
+            // The same event at three volumes. A program resolving modules or
+            // searching a library path asks for hundreds of files that were
+            // never anywhere, and they arrive here indistinguishable from the
+            // one the sandbox hid except for `outside` — so that is what
+            // decides whether a default run says anything at all.
+            match volume {
+                Volume::Warn => warn!(path, op, error, outside, "{line}"),
+                Volume::Info => info!(path, op, error, outside, "{line}"),
+                Volume::Debug => debug!(path, op, error, outside, "{line}"),
+            }
+        }
         // The closing line of a run that was watched: not a problem in itself,
         // and the one thing said even when nothing was blocked at all.
         Notification::Summary {
@@ -57,6 +79,63 @@ pub fn transport_name(transport: Transport) -> &'static str {
         Transport::Tcp => "tcp",
         Transport::Udp => "udp",
         Transport::Other => "other",
+    }
+}
+
+#[must_use]
+pub fn op_name(op: FileOp) -> &'static str {
+    match op {
+        FileOp::Open => "open",
+        FileOp::Stat => "stat",
+        FileOp::Access => "access",
+        FileOp::Exec => "exec",
+        FileOp::Readlink => "readlink",
+        FileOp::Unlink => "unlink",
+        FileOp::Mkdir => "mkdir",
+        FileOp::Rename => "rename",
+        FileOp::Chdir => "chdir",
+        FileOp::Truncate => "truncate",
+    }
+}
+
+#[must_use]
+pub fn error_name(error: FileError) -> &'static str {
+    match error {
+        FileError::NotFound => "not_found",
+        FileError::Permission => "permission",
+        FileError::ReadOnly => "read_only",
+    }
+}
+
+#[must_use]
+pub fn outside_name(outside: Outside) -> &'static str {
+    match outside {
+        Outside::Present => "present",
+        Outside::Absent => "absent",
+        Outside::Unknown => "unknown",
+    }
+}
+
+/// How loudly a refused file access is worth saying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Volume {
+    Warn,
+    Info,
+    Debug,
+}
+
+/// The rule that keeps the common case quiet without hiding it.
+///
+/// A permission or read-only error is the sandbox by construction, whatever is
+/// outside. `ENOENT` is not, and only [`Outside`] can say which it was.
+fn volume(error: FileError, outside: Outside) -> Volume {
+    match (error, outside) {
+        // Never there in the first place: worth keeping, not worth saying.
+        (FileError::NotFound, Outside::Absent) => Volume::Debug,
+        // We could not tell. Said, but not as a warning — claiming the sandbox
+        // hid something it may never have touched is the worse mistake.
+        (FileError::NotFound, Outside::Unknown) => Volume::Info,
+        _ => Volume::Warn,
     }
 }
 
@@ -90,11 +169,39 @@ pub fn describe(event: &Notification, command: &str) -> String {
         Notification::DnsRefused { name, reason } => {
             format!("blocked DNS lookup of {name} ({reason})")
         }
+        Notification::FileBlocked {
+            op,
+            path,
+            error,
+            outside,
+        } => describe_file(*op, path, *error, *outside),
         Notification::Summary {
             targets,
             suppressed,
             lost,
         } => summarise(command, targets, *suppressed, *lost),
+    }
+}
+
+/// One line for one refused file access.
+///
+/// A path that was not there outside either was never blocked, and the sentence
+/// says so rather than calling it one: the word "blocked" is what a person
+/// reads to decide whether to go and widen the profile.
+fn describe_file(op: FileOp, path: &str, error: FileError, outside: Outside) -> String {
+    let op = op_name(op);
+    match (error, outside) {
+        (FileError::NotFound, Outside::Absent) => {
+            format!("{op} of {path} failed: not there outside the sandbox either")
+        }
+        (FileError::NotFound, Outside::Unknown) => {
+            format!("{op} of {path} failed: cannot tell whether it exists outside")
+        }
+        (FileError::NotFound, Outside::Present) => {
+            format!("blocked {op} of {path} (hidden by the sandbox)")
+        }
+        (FileError::Permission, _) => format!("blocked {op} of {path} (permission denied)"),
+        (FileError::ReadOnly, _) => format!("blocked {op} of {path} (read-only)"),
     }
 }
 
@@ -178,6 +285,115 @@ mod tests {
             describe(&event, "curl"),
             "blocked DNS lookup of ads.example (no rule names it)"
         );
+    }
+
+    fn file(op: FileOp, path: &str, error: FileError, outside: Outside) -> Notification {
+        Notification::FileBlocked {
+            op,
+            path: path.to_owned(),
+            error,
+            outside,
+        }
+    }
+
+    /// The whole point of looking outside: the same `ENOENT` reads as a block
+    /// or as a miss depending on what is out there.
+    #[test]
+    fn the_same_error_reads_differently_depending_on_what_is_outside() {
+        let hidden = file(
+            FileOp::Open,
+            "/home/me/.bashrc",
+            FileError::NotFound,
+            Outside::Present,
+        );
+        assert_eq!(
+            describe(&hidden, "bash"),
+            "blocked open of /home/me/.bashrc (hidden by the sandbox)"
+        );
+
+        let missing = file(
+            FileOp::Open,
+            "/usr/lib/libx.so",
+            FileError::NotFound,
+            Outside::Absent,
+        );
+        assert_eq!(
+            describe(&missing, "bash"),
+            "open of /usr/lib/libx.so failed: not there outside the sandbox either"
+        );
+
+        let unsure = file(
+            FileOp::Stat,
+            "build/out",
+            FileError::NotFound,
+            Outside::Unknown,
+        );
+        assert_eq!(
+            describe(&unsure, "bash"),
+            "stat of build/out failed: cannot tell whether it exists outside"
+        );
+    }
+
+    /// A permission or read-only error is the sandbox whatever is outside, so
+    /// it never softens.
+    #[test]
+    fn a_refusal_the_sandbox_made_outright_says_so_whatever_is_outside() {
+        for outside in [Outside::Present, Outside::Absent, Outside::Unknown] {
+            let denied = file(FileOp::Open, "/etc/shadow", FileError::Permission, outside);
+            assert_eq!(
+                describe(&denied, "cat"),
+                "blocked open of /etc/shadow (permission denied)"
+            );
+            assert_eq!(volume(FileError::Permission, outside), Volume::Warn);
+        }
+        let ro = file(
+            FileOp::Mkdir,
+            "/usr/lib/x",
+            FileError::ReadOnly,
+            Outside::Present,
+        );
+        assert_eq!(
+            describe(&ro, "sh"),
+            "blocked mkdir of /usr/lib/x (read-only)"
+        );
+    }
+
+    /// The level is what keeps a linker's search out of a default run without
+    /// throwing it away.
+    #[test]
+    fn only_a_path_that_was_never_there_is_kept_quiet() {
+        assert_eq!(volume(FileError::NotFound, Outside::Absent), Volume::Debug);
+        assert_eq!(volume(FileError::NotFound, Outside::Unknown), Volume::Info);
+        assert_eq!(volume(FileError::NotFound, Outside::Present), Volume::Warn);
+    }
+
+    /// Every operation has a word, or the sentence would name nothing.
+    #[test]
+    fn every_operation_and_error_has_a_name() {
+        for op in [
+            FileOp::Open,
+            FileOp::Stat,
+            FileOp::Access,
+            FileOp::Exec,
+            FileOp::Readlink,
+            FileOp::Unlink,
+            FileOp::Mkdir,
+            FileOp::Rename,
+            FileOp::Chdir,
+            FileOp::Truncate,
+        ] {
+            assert!(!op_name(op).is_empty());
+        }
+        for error in [
+            FileError::NotFound,
+            FileError::Permission,
+            FileError::ReadOnly,
+        ] {
+            assert!(!error_name(error).is_empty());
+        }
+        for outside in [Outside::Present, Outside::Absent, Outside::Unknown] {
+            assert!(!outside_name(outside).is_empty());
+        }
     }
 
     /// Silence would be ambiguous: it reads the same as the reporting having

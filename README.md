@@ -372,12 +372,15 @@ step outside the policy.
 
 ```bash
 sudo install -m755 target/release/scudo-bpfd /usr/bin/scudo-bpfd
-sudo setcap cap_bpf,cap_net_admin=ep /usr/bin/scudo-bpfd
+sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
 ```
 
 The daemon holds `CAP_BPF` and `CAP_NET_ADMIN` as file capabilities, so anyone on the system
-can execute it. What keeps that harmless is that it offers exactly one operation — *add*
+can execute it. `CAP_PERFMON` is a third it can do without: it is needed only to load the
+tracepoint programs behind [file access reporting](#seeing-what-the-filesystem-restrictions-hid),
+and a daemon started without it does everything else and says so when that one thing is asked
+for. What keeps that harmless is that it offers exactly one operation — *add*
 restrictions to a cgroup the caller already owns — and no way to remove them: policies are
 detached only when the cgroup itself disappears. It refuses any cgroup outside the calling
 user's own systemd subtree, which it establishes from `SO_PEERCRED` rather than from anything
@@ -441,6 +444,82 @@ collapsed into one line — a denied connection is retried, and one `curl` would
 the screen — and the closing summary counts every attempt, including the ones that were never
 printed. A policy realised as `PrivateNetwork=yes` has no programs attached and therefore
 nothing to report; `--verbose` says so rather than leaving the silence to be misread.
+
+### Seeing what the filesystem restrictions hid
+
+`ReadOnlyPaths=`, `TemporaryFileSystem=`, `InaccessiblePaths=`, `ProtectHome=` and `PrivateTmp=`
+are applied by systemd, by rearranging the unit's mount namespace. scudo has no part in the
+verdict and no hook that sees it: the command is handed an `ENOENT`, `EACCES` or `EROFS` with
+no way to say which path it was about, and a profile that is one `BindPaths=` short looks
+exactly like a program that is broken.
+
+`filesystem.log = "denied"` on the profile — or `--verbose`, or `--tui` — asks `scudo-bpfd` to
+watch the syscalls that name a path and report the ones that come back with an error a sandbox
+could have caused:
+
+```console
+$ scudo --verbose --profile sandboxed-home -- bash -lc 'git status'
+scudo: warning: blocked open of /home/me/.bashrc (hidden by the sandbox)
+scudo: warning: blocked open of /home/me/.gitconfig (hidden by the sandbox)
+scudo: warning: blocked open of /etc/shadow (permission denied)
+```
+
+```toml
+[code]
+match = ["code"]
+filesystem.log = "denied"          # off (the default) | denied
+
+[code.systemd]
+TemporaryFileSystem = "$HOME"
+BindPaths = ["$HOME/.config/Code"]
+```
+
+**Not every `ENOENT` is a refusal, and telling them apart is the point.** A shell walking
+`$PATH`, a linker searching for a library, `node` resolving a module — all of them ask for
+dozens of files that were never anywhere, and the kernel answers them exactly as it answers a
+file the sandbox hid. So the daemon, which lives outside the unit's mount namespace, simply
+goes and looks:
+
+| What happened | How it reads |
+|---|---|
+| The path is there outside the sandbox | `blocked open of … (hidden by the sandbox)`, a `warn` |
+| `EACCES`/`EPERM`, whatever is outside | `blocked open of … (permission denied)`, a `warn` |
+| `EROFS`, whatever is outside | `blocked mkdir of … (read-only)`, a `warn` |
+| It was not there outside either | `open of … failed: not there outside the sandbox either`, a `debug` |
+| Could not be established | `… cannot tell whether it exists outside`, an `info` |
+
+Nothing is thrown away — the level is what keeps a linker's search out of an ordinary run. Raise
+the level to `debug` to see all of it, or in the [terminal UI](#terminal-ui) press `^A m`, which
+shows the missing paths greyed beside the ones that were really taken away. On journald the
+path, operation, error and outside verdict are fields of their own:
+
+```console
+$ journalctl -t scudo F_OUTSIDE=present -o json | jq -r .F_PATH
+```
+
+Only calls that name a path are watched: `open`, `openat`, `openat2`, `creat`, `stat`, `lstat`,
+`newfstatat`, `statx`, `access`, `faccessat`, `faccessat2`, `readlink`, `readlinkat`, `execve`,
+`execveat`, `unlink`, `unlinkat`, `rmdir`, `mkdir`, `mkdirat`, `rename`, `renameat`,
+`renameat2`, `truncate` and `chdir`. One working on a file descriptor has already got past the
+sandbox: the open that produced the descriptor is the call that would have been refused.
+
+Unlike the network programs, which are loaded once per sandbox and attached to its cgroup,
+these sit on the machine's `sys_enter` and `sys_exit` tracepoints, so one object is loaded for
+the whole daemon — on the first sandbox that asks, and unloaded with the last. The cgroups
+being watched live in a map the programs consult first, which is also what keeps a path
+belonging to any other process on the machine from ever leaving the kernel.
+
+They are *raw* tracepoints, attached by name through `bpf(2)`. A classic tracepoint per syscall
+would be the obvious shape, but attaching one means reading its id out of
+`<tracefs>/events/…/id`, and tracefs is `drwx------ root` on an ordinary system — no capability
+opens it. Only x86-64 is implemented, since the syscall numbers are per-architecture and a
+table guessed for another one would report the wrong calls rather than fail.
+
+Reporting is off unless asked for, and asking for it costs the command a registration with the
+daemon and a `ProtectControlGroups=yes` it would not otherwise have — the events are matched on
+the cgroup they came from, and a command that can move itself out of that cgroup stops being
+reported. A daemon without `CAP_PERFMON` says so and the command runs anyway: not being able to
+watch something is never a reason not to run it.
 
 ### Logging
 
@@ -555,6 +634,7 @@ scudo's own:
 | `^A r` | set how wide the panel is — arrows by one, `h`/`l` by five, `=` back to automatic, `Esc` to return |
 | `^A w` | show or hide the panel |
 | `^A s` | show or hide what scudo decided: the profiles that matched and the command line it built |
+| `^A m` | show or hide paths that were missing outside the sandbox too — see [file access reporting](#seeing-what-the-filesystem-restrictions-hid) |
 | `^A ?` | the list above |
 
 Change the prefix with `tui.prefix` in `[scudo]` or with `--tui-prefix`; it is written as

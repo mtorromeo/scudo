@@ -38,6 +38,19 @@ pub fn dir_of(cgroup: &str) -> PathBuf {
     Path::new(CGROUP_ROOT).join(relative)
 }
 
+/// The id the kernel names this cgroup by.
+///
+/// On cgroup2 that id *is* the inode number of the cgroup's directory, which is
+/// what `bpf_get_current_cgroup_id()` returns inside a program. Asking the
+/// filesystem is therefore not an approximation of the id — it is the id.
+pub fn id_of_dir(dir: &Path) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata =
+        std::fs::metadata(dir).with_context(|| format!("reading cgroup {}", dir.display()))?;
+    Ok(metadata.ino())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +77,22 @@ mod tests {
             "/user.slice/user-10000.slice/user@10000.service/app.slice/x.service",
             1000
         ));
+    }
+
+    /// The id a program sees is the directory's inode, so the two have to agree
+    /// on any real cgroup — our own will do.
+    #[test]
+    fn a_cgroups_id_is_its_directorys_inode() {
+        let mine = i32::try_from(std::process::id()).expect("pid fits in an i32");
+        let Ok(cgroup) = of_pid(mine) else {
+            // Not a cgroup2 system; nothing to check.
+            return;
+        };
+        let dir = dir_of(&cgroup);
+        let Ok(id) = id_of_dir(&dir) else {
+            return;
+        };
+        assert_ne!(id, 0, "a cgroup id is never zero");
     }
 
     #[test]

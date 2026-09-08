@@ -51,7 +51,12 @@ where
     }
 }
 
-use crate::{logging::LogConfig, policy::NetworkConfig, trust, tui::TuiConfig};
+use crate::{
+    logging::LogConfig,
+    policy::{FilesystemConfig, NetworkConfig},
+    trust,
+    tui::TuiConfig,
+};
 
 /// Match type for a pattern entry. Defaults to `exact` when unspecified.
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
@@ -162,6 +167,11 @@ pub struct ProfileConfig {
     /// by field with the same array semantics as every other property.
     #[serde(default)]
     pub network: Option<toml::Table>,
+    /// The `[<profile>.filesystem]` sub-table: whether the sandbox says which
+    /// paths its restrictions turned away. Parsed here rather than kept raw for
+    /// the same reason as `log` — it holds no lists to splice.
+    #[serde(default)]
+    pub filesystem: FilesystemConfig,
     /// The `[<profile>.log]` sub-table: level and destination. Unlike `network`
     /// it holds no lists, so there is no `"..."` splicing to preserve and it can
     /// be parsed into its final shape here rather than merged as raw TOML.
@@ -225,6 +235,7 @@ pub struct ValidatedProfileConfig {
     pub arg_aliases: ArgAliases,
     pub arg_flags: Vec<String>,
     pub network: Option<toml::Table>,
+    pub filesystem: FilesystemConfig,
     pub log: LogConfig,
     pub properties: HashMap<String, toml::Value>,
 }
@@ -254,6 +265,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
                         arg_aliases: config.arg_aliases,
                         arg_flags: config.arg_flags,
                         network: config.network,
+                        filesystem: config.filesystem,
                         log: config.log,
                         properties: config.systemd,
                     },

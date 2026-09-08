@@ -7,8 +7,14 @@
 //! the address itself, and ports live in the bitmaps this module lays out — so
 //! what used to be a scanned array of rules is now two map lookups with no loop
 //! in sight.
+//!
+//! The network ABI is this module; [`fs`] holds the one for reporting file
+//! accesses the sandbox turned away. The two share nothing but the convention
+//! that both ends are the same machine, so every integer is in native order.
 
 #![no_std]
+
+pub mod fs;
 
 /// The policy default, and the verdict a destination trie stands for.
 pub const ACTION_DENY: u8 = 0;

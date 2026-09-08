@@ -58,8 +58,11 @@ package() {
     install -Dm0755 target/release/scudo-bpfd "$pkgdir/usr/bin/scudo-bpfd"
 
     # scudo-bpfd exists precisely because a user service manager may not load BPF
-    # programs, so without these capabilities it can do nothing at all.
-    setcap cap_bpf,cap_net_admin=ep "$pkgdir/usr/bin/scudo-bpfd"
+    # programs, so without the first two capabilities it can do nothing at all.
+    # cap_perfmon is only for reporting refused file accesses: drop it and the
+    # daemon still works, it just says nothing about what the filesystem
+    # restrictions turned away.
+    setcap cap_bpf,cap_net_admin,cap_perfmon=ep "$pkgdir/usr/bin/scudo-bpfd"
 
     install -Dm0644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service \
         -t "$pkgdir/usr/lib/systemd/user"

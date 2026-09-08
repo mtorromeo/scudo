@@ -139,7 +139,9 @@ fn the_panel_says_why_it_has_nothing_in_it() {
     cmd.args(["--tui", "--", "/bin/echo", "marker-panel"]);
     let (screen, _) = drive(&mut cmd, &[("marker-panel", b"q")]);
     assert!(screen.contains("blocked (0)"), "{screen}");
-    assert!(screen.contains("no network policy"), "{screen}");
+    // Nothing restricts this command, so there is nothing that could have been
+    // taken from it — not on the network and not on disk.
+    assert!(screen.contains("no policy applies"), "{screen}");
 }
 
 /// A terminal that could not be typed into would be a picture of one. This is

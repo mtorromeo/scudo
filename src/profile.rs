@@ -7,7 +7,7 @@ use toml::Value;
 use crate::{
     config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig},
     logging::{Level, LogConfig},
-    policy::{NetworkConfig, NetworkPolicy, Policy},
+    policy::{FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkPolicy, Policy},
 };
 
 #[derive(Debug)]
@@ -37,6 +37,7 @@ struct ProfileMeta {
     confirm: Option<bool>,
     arg_aliases: ArgAliases,
     arg_flags: Vec<String>,
+    filesystem: FilesystemConfig,
     /// Raw network policy, still in TOML form so that it merges with the same
     /// array semantics as every other property.
     network: Option<Properties>,
@@ -160,6 +161,7 @@ pub fn resolve_with(
         meta.arg_flags.extend(m.arg_flags);
         merge_network(&mut meta.network, m.network)?;
         meta.log = m.log.over(meta.log);
+        meta.filesystem = m.filesystem.over(meta.filesystem);
     }
 
     let arg_vars = parse_command_args(command_args, &meta.arg_aliases, &meta.arg_flags);
@@ -307,6 +309,7 @@ fn expand_extend(
         base_meta.arg_flags.extend(parent_meta.arg_flags);
         merge_network(&mut base_meta.network, parent_meta.network)?;
         base_meta.log = parent_meta.log.over(base_meta.log);
+        base_meta.filesystem = parent_meta.filesystem.over(base_meta.filesystem);
     }
 
     // Current profile's values override everything inherited from parents.
@@ -329,6 +332,7 @@ fn expand_extend(
         arg_flags: merged_flags,
         network,
         log: profile.log.clone().over(base_meta.log),
+        filesystem: profile.filesystem.over(base_meta.filesystem),
     };
     merge_into(&mut base, profile.properties.clone())?;
     Ok((base, meta))
@@ -622,7 +626,7 @@ fn build_args(
     // The properties a policy needs are added by `policy::apply`, once it knows
     // the policy is actually being enforced: emitting them for a policy that
     // ends up degraded would restrict the command for no benefit.
-    let policies = build_policies(meta.network, arg_vars)?;
+    let policies = build_policies(meta.network, meta.filesystem, arg_vars)?;
 
     let mut log = meta.log;
     // `verbose` predates the log table and asks for the same thing in fewer
@@ -644,28 +648,40 @@ fn build_args(
     })
 }
 
-/// Turn the merged raw network table into a normalised policy.
-fn build_policies(network: Option<Properties>, arg_vars: &ArgVars) -> Result<Vec<Policy>> {
-    let Some(network) = network else {
-        return Ok(Vec::new());
-    };
+/// Turn the merged sub-tables into normalised policies.
+///
+/// A profile that asked for neither produces none, and the command is then
+/// never registered with the daemon at all.
+fn build_policies(
+    network: Option<Properties>,
+    filesystem: FilesystemConfig,
+    arg_vars: &ArgVars,
+) -> Result<Vec<Policy>> {
+    let mut policies = Vec::new();
 
-    let mut table = toml::Table::new();
-    for (key, val) in network {
-        if let Some(expanded) = expand_network_value(val, arg_vars, false)? {
-            table.insert(key, expanded);
+    if let Some(network) = network {
+        let mut table = toml::Table::new();
+        for (key, val) in network {
+            if let Some(expanded) = expand_network_value(val, arg_vars, false)? {
+                table.insert(key, expanded);
+            }
+        }
+
+        let config: NetworkConfig = toml::Value::Table(table)
+            .try_into()
+            .context("invalid network policy")?;
+        let policy = NetworkPolicy::try_from(config).context("invalid network policy")?;
+        if !policy.is_unrestricted() {
+            policies.push(Policy::Network(policy));
         }
     }
 
-    let config: NetworkConfig = toml::Value::Table(table)
-        .try_into()
-        .context("invalid network policy")?;
-    let policy = NetworkPolicy::try_from(config).context("invalid network policy")?;
-
-    if policy.is_unrestricted() {
-        return Ok(Vec::new());
+    // A table that said nothing is not a policy that says off: leaving it out
+    // is what lets `--tui` fill the gap with one of its own.
+    if !filesystem.is_empty() {
+        policies.push(Policy::Filesystem(FilesystemPolicy::from(filesystem)));
     }
-    Ok(vec![Policy::Network(policy)])
+    Ok(policies)
 }
 
 /// Expand `$VAR` and `$arg_*` references inside a network policy value.
@@ -886,6 +902,7 @@ mod tests {
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
             network: None,
+            filesystem: FilesystemConfig::default(),
             log: LogConfig::default(),
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         }
@@ -901,6 +918,7 @@ mod tests {
             arg_aliases: HashMap::new(),
             arg_flags: vec![],
             network: None,
+            filesystem: FilesystemConfig::default(),
             log: LogConfig::default(),
             properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         }
@@ -913,15 +931,18 @@ mod tests {
         raw.try_into().unwrap()
     }
 
-    #[expect(clippy::panic)]
     fn resolved_policy(src: &str, command: &str, args: &[&str]) -> NetworkPolicy {
         let configs = configs_from_toml(src);
         let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
-        let mut resolved = resolve(&configs, command, &args).unwrap();
-        match resolved.policies.pop() {
-            Some(Policy::Network(policy)) => policy,
-            None => panic!("expected a network policy"),
-        }
+        let resolved = resolve(&configs, command, &args).unwrap();
+        resolved
+            .policies
+            .into_iter()
+            .find_map(|policy| match policy {
+                Policy::Network(network) => Some(network),
+                Policy::Filesystem(_) => None,
+            })
+            .expect("expected a network policy")
     }
 
     fn str(s: &str) -> Value {
@@ -1725,6 +1746,102 @@ mod tests {
         assert_eq!(policy.dest.allow.len(), 1);
         assert_eq!(policy.ports.allow.len(), 1);
         assert!(policy.requires_enforcer());
+    }
+
+    fn filesystem_policy(src: &str, command: &str) -> Option<FilesystemPolicy> {
+        let configs = configs_from_toml(src);
+        resolve(&configs, command, &[])
+            .unwrap()
+            .policies
+            .into_iter()
+            .find_map(|policy| match policy {
+                Policy::Filesystem(fs) => Some(fs),
+                Policy::Network(_) => None,
+            })
+    }
+
+    #[test]
+    fn filesystem_reporting_is_resolved_from_the_profile() {
+        let policy = filesystem_policy(
+            r#"
+            [curl]
+            match = ["curl"]
+            filesystem.log = "denied"
+            "#,
+            "curl",
+        )
+        .expect("a filesystem policy");
+        assert!(policy.reports_denials());
+    }
+
+    /// A profile that says nothing about it produces no policy at all, which is
+    /// what leaves room for `--tui` to add one.
+    #[test]
+    fn a_profile_that_says_nothing_produces_no_filesystem_policy() {
+        assert!(
+            filesystem_policy(
+                r#"
+                [curl]
+                match = ["curl"]
+                systemd.PrivateTmp = true
+                "#,
+                "curl",
+            )
+            .is_none()
+        );
+    }
+
+    /// It merges field by field like `log`, so a child that only turns it off
+    /// does not have to restate anything.
+    #[test]
+    fn filesystem_settings_inherit_through_extend() {
+        let src = r#"
+            [base]
+            filesystem.log = "denied"
+
+            [curl]
+            match = ["curl"]
+            extend = ["base"]
+
+            [wget]
+            match = ["wget"]
+            extend = ["base"]
+            filesystem.log = "off"
+        "#;
+        assert!(
+            filesystem_policy(src, "curl")
+                .expect("inherited")
+                .reports_denials()
+        );
+        // Written out, so it wins over what it extends — and it is still a
+        // policy, because saying "off" is not the same as saying nothing.
+        assert!(
+            !filesystem_policy(src, "wget")
+                .expect("declared off")
+                .reports_denials()
+        );
+    }
+
+    /// A `filesystem` table must not leak into the flattened systemd
+    /// properties: it is scudo's setting, not a unit property.
+    #[test]
+    fn filesystem_is_not_a_systemd_property() {
+        let configs = configs_from_toml(
+            r#"
+            [curl]
+            match = ["curl"]
+            filesystem.log = "denied"
+            "#,
+        );
+        let resolved = resolve(&configs, "curl", &[]).unwrap();
+        assert!(
+            !resolved
+                .systemd_args
+                .iter()
+                .any(|a| a.starts_with("filesystem")),
+            "{:?}",
+            resolved.systemd_args
+        );
     }
 
     /// A `network` table must not leak into the flattened systemd properties.

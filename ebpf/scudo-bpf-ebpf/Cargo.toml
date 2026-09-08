@@ -12,3 +12,17 @@ scudo-bpf-common = { path = "../scudo-bpf-common" }
 [[bin]]
 name = "scudo-net"
 path = "src/main.rs"
+
+# The file monitor is a separate object because it is loaded once for the whole
+# daemon, not once per sandbox. `aya-build` builds every bin and drops each one
+# in OUT_DIR under its own name, so build.rs needs nothing.
+[[bin]]
+name = "scudo-fs"
+path = "src/fs.rs"
+
+# `bpf_target_arch` is set by aya-build through RUSTFLAGS, not by cargo, so
+# cargo does not know it is a real cfg.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(bpf_target_arch, values(any()))',
+] }

@@ -5,11 +5,13 @@
 //! later kinds (file access, exec) be added without touching the wire protocol
 //! or the shim.
 
+pub mod filesystem;
 pub mod network;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub use filesystem::{FilesystemConfig, FilesystemPolicy};
 pub use network::{LogLevel, NetworkConfig, NetworkPolicy, OnUnavailable};
 
 /// A single enforcement policy.
@@ -17,6 +19,9 @@ pub use network::{LogLevel, NetworkConfig, NetworkPolicy, OnUnavailable};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Policy {
     Network(NetworkPolicy),
+    /// Reporting only: systemd applies the filesystem restrictions and this
+    /// asks the daemon to say which paths they turned away.
+    Filesystem(FilesystemPolicy),
 }
 
 impl Policy {
@@ -25,6 +30,7 @@ impl Policy {
     pub fn reports_denials(&self) -> bool {
         match self {
             Policy::Network(policy) => policy.reports_denials(),
+            Policy::Filesystem(policy) => policy.reports_denials(),
         }
     }
 
@@ -33,6 +39,7 @@ impl Policy {
     pub fn report_denials(&mut self) {
         match self {
             Policy::Network(policy) => policy.log = policy.log.max(LogLevel::Denied),
+            Policy::Filesystem(policy) => policy.log = policy.log.max(LogLevel::Denied),
         }
     }
 
@@ -66,6 +73,16 @@ impl Policy {
                     }
                 }
             }
+            // Nothing is being enforced, so nothing has to be shut off to keep
+            // it enforceable — except the one property that decides whether the
+            // programs see the command at all: the events are matched on the
+            // cgroup they came from, and a command that can move itself out of
+            // that cgroup simply stops being reported.
+            Policy::Filesystem(policy) => {
+                if policy.reports_denials() {
+                    props.push(("ProtectControlGroups".to_owned(), "yes".to_owned()));
+                }
+            }
         }
         props.extend(self.service_manager_properties());
         props
@@ -87,7 +104,8 @@ impl Policy {
                 .into_iter()
                 .map(|path| ("InaccessiblePaths".to_owned(), path))
                 .collect(),
-            Policy::Network(_) => Vec::new(),
+            // Watching a command is no reason to take anything away from it.
+            Policy::Network(_) | Policy::Filesystem(_) => Vec::new(),
         }
     }
 }
@@ -135,6 +153,12 @@ where
                     // `systemd --user` to start a sibling unit that has one.
                     push_property(&mut applied, "PrivateNetwork", "yes");
                     push_properties(&mut applied, &policy.service_manager_properties());
+                    continue;
+                }
+                to_enforce.push(policy.clone());
+            }
+            Policy::Filesystem(fs) => {
+                if !fs.reports_denials() {
                     continue;
                 }
                 to_enforce.push(policy.clone());
@@ -211,6 +235,10 @@ fn degrade(applied: &mut Applied, policies: &[Policy], reason: &str) -> Result<(
         .iter()
         .map(|policy| match policy {
             Policy::Network(net) => net.on_unavailable,
+            // Not being able to watch a command is never a reason not to run
+            // it. `min` takes the strictest, so this can only ever lose to a
+            // network policy that asked for more.
+            Policy::Filesystem(_) => OnUnavailable::Warn,
         })
         .min()
         .unwrap_or_default();

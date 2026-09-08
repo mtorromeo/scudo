@@ -17,10 +17,16 @@ pub mod dns;
 #[cfg(feature = "bpf")]
 pub mod events;
 #[cfg(feature = "bpf")]
+pub mod fsmon;
+#[cfg(feature = "bpf")]
 pub mod loader;
+#[cfg(feature = "bpf")]
+pub mod outside;
 #[cfg(feature = "bpf")]
 pub mod resolver;
 #[cfg(feature = "bpf")]
 pub mod server;
 #[cfg(feature = "bpf")]
 pub mod trie;
+#[cfg(feature = "bpf")]
+pub mod worker;

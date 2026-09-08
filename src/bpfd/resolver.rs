@@ -15,7 +15,6 @@
 
 use core::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 use std::{
@@ -36,6 +35,7 @@ use crate::{
         events::Bus,
         protocol::Notification,
         trie::{self, DestKey},
+        worker::{POLL_INTERVAL_MS, Shutdown},
     },
     policy::network::Action,
 };
@@ -46,9 +46,6 @@ const MAX_MESSAGE: usize = 4096;
 
 /// How long to wait for the upstream nameserver.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How often the poll loop checks whether it should stop.
-const POLL_INTERVAL_MS: i32 = 500;
 
 /// A record's TTL is clamped into this range before it becomes an expiry.
 ///
@@ -227,8 +224,8 @@ impl Resolver {
         dns::refuse(query)
     }
 
-    /// Serve queries until `stop` is set.
-    pub fn run(&self, stop: &AtomicBool) {
+    /// Serve queries until `stop` says otherwise.
+    pub fn run(&self, stop: &Shutdown) {
         let mut fds: Vec<libc::pollfd> = Vec::new();
         for socket in &self.sockets.udp {
             fds.push(pollfd(socket.as_raw_fd()));
@@ -236,8 +233,11 @@ impl Resolver {
         for listener in &self.sockets.tcp {
             fds.push(pollfd(listener.as_raw_fd()));
         }
+        // Last, so the index arithmetic below still names a socket: nothing
+        // matches it, which is exactly right — there is nothing to serve on it.
+        fds.push(pollfd(stop.wake_fd()));
 
-        while !stop.load(Ordering::Relaxed) {
+        while !stop.stopping() {
             // Every turn, whether or not anything arrived: this is what makes a
             // TTL run out, so it must not depend on traffic.
             self.sweep();
