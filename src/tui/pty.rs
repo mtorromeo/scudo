@@ -35,6 +35,19 @@ pub struct Pty {
 /// `ptsname_r` writes into a buffer we size; slave names are far shorter.
 const PTSNAME_MAX: usize = 128;
 
+/// Where the command reads from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Input {
+    /// The terminal itself, which is what an interactive command reads.
+    Terminal,
+    /// Whatever the caller already put on the `Command` — scudo's own standard
+    /// input, unless something else was set. It is what makes
+    /// `cat file | scudo --tui -- less` mean inside the UI what it means
+    /// outside it: the pipe has to reach the command, and a terminal in its
+    /// place is not the same thing wearing a different hat.
+    Given,
+}
+
 pub fn open(rows: u16, cols: u16) -> Result<Pty> {
     // SAFETY: a plain syscall wrapper taking no memory of ours. O_NOCTTY keeps
     // the master from becoming this process's controlling terminal, which would
@@ -117,14 +130,18 @@ impl Pty {
     /// tidiness: a terminal is at its end when the last writer closes it, so
     /// one forgotten copy here would mean the reader never saw the command's
     /// output finish, and would wait for an end that could no longer come.
-    pub fn spawn(&mut self, cmd: &mut Command) -> Result<Child> {
+    ///
+    /// `input` decides only where the command reads: what it writes always goes
+    /// to this terminal, so it is drawn wherever the caller draws it.
+    pub fn spawn(&mut self, cmd: &mut Command, input: Input) -> Result<Child> {
         let slave = self
             .slave
             .take()
             .context("this pty has already started a command")?;
-        cmd.stdin(stdio(&slave)?)
-            .stdout(stdio(&slave)?)
-            .stderr(stdio(&slave)?);
+        if input == Input::Terminal {
+            cmd.stdin(stdio(&slave)?);
+        }
+        cmd.stdout(stdio(&slave)?).stderr(stdio(&slave)?);
 
         // SAFETY: the closure runs in the forked child, between fork and
         // exec, where only async-signal-safe calls are allowed; `claim_terminal`
@@ -175,9 +192,10 @@ fn claim_terminal() -> io::Result<()> {
     if unsafe { libc::setsid() } < 0i32 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: fd 0 is the slave — `stdin` in `spawn` put it there — and
-    // TIOCSCTTY takes its argument by value, not through a pointer.
-    if unsafe { libc::ioctl(0i32, libc::TIOCSCTTY, 0i32) } < 0i32 {
+    // SAFETY: fd 1 is the slave — `stdout` in `spawn` put it there, whichever
+    // way `stdin` went — and TIOCSCTTY takes its argument by value, not through
+    // a pointer.
+    if unsafe { libc::ioctl(1i32, libc::TIOCSCTTY, 0i32) } < 0i32 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -207,7 +225,7 @@ mod tests {
     /// the slave is for: with a copy left behind this would never return.
     fn run(rows: u16, cols: u16, cmd: &mut Command) -> String {
         let mut pty = open(rows, cols).expect("a pty");
-        let mut child = pty.spawn(cmd).expect("the command starts");
+        let mut child = pty.spawn(cmd, Input::Terminal).expect("the command starts");
         let mut reader = pty.reader().expect("a reader");
         child.wait().expect("the command finishes");
 
@@ -241,13 +259,44 @@ mod tests {
     fn a_pty_starts_one_command_and_says_so_if_asked_for_another() {
         let mut pty = open(24, 80).expect("a pty");
         let mut first = Command::new("/bin/true");
-        let mut child = pty.spawn(&mut first).expect("the command starts");
+        let mut child = pty
+            .spawn(&mut first, Input::Terminal)
+            .expect("the command starts");
         child.wait().expect("the command finishes");
 
         let mut second = Command::new("/bin/true");
         let err = pty
-            .spawn(&mut second)
+            .spawn(&mut second, Input::Terminal)
             .expect_err("a second start is refused");
         assert!(err.to_string().contains("already started"), "{err}");
+    }
+
+    /// The other half of [`Input`]: what the caller put on the command is left
+    /// where it was, so a pipe reaches the command rather than being replaced
+    /// by a terminal that has nothing in it.
+    #[test]
+    fn a_command_given_its_own_input_reads_that_and_not_the_terminal() {
+        use std::io::Write as _;
+
+        let mut pty = open(24, 80).expect("a pty");
+        let mut cmd = Command::new("/bin/cat");
+        cmd.stdin(Stdio::piped());
+        let mut child = pty
+            .spawn(&mut cmd, Input::Given)
+            .expect("the command starts");
+
+        // Closed, or `cat` would sit on a pipe nobody is going to write to
+        // again and the read below would never end.
+        let mut stdin = child.stdin.take().expect("the pipe we asked for");
+        stdin
+            .write_all(b"down the pipe\n")
+            .expect("the write lands");
+        drop(stdin);
+
+        let mut reader = pty.reader().expect("a reader");
+        child.wait().expect("the command finishes");
+        let mut out = String::new();
+        drop(std::io::Read::read_to_string(&mut reader, &mut out));
+        assert!(out.contains("down the pipe"), "{out:?}");
     }
 }

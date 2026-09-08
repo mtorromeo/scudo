@@ -29,14 +29,16 @@
 //! is what lets a program stop waiting, whether or not we knew the rest.
 //!
 //! **The host's answers cannot simply be relayed as they arrive.** `crossterm`
-//! owns scudo's own standard input and turns it into key events, so an answer
-//! coming back that way is no longer a sequence anyone could forward. That is
-//! why the host is asked once, at start-up, before the input thread exists.
+//! owns the terminal scudo reads from and turns it into key events, so an
+//! answer coming back that way is no longer a sequence anyone could forward.
+//! That is why the host is asked once, at start-up, before the input thread
+//! exists.
 
 use core::time::Duration;
 use std::{
-    io::{Read as _, Write},
-    os::fd::AsRawFd as _,
+    fs::File,
+    io::{IsTerminal as _, Read as _, Write},
+    os::fd::{AsFd as _, AsRawFd as _},
 };
 
 /// The longest a control sequence may be before we stop waiting for its end.
@@ -383,22 +385,46 @@ fn answered_colour(rest: &[u8]) -> Option<u16> {
     COLOURS.contains(&number).then_some(number)
 }
 
+/// Where an answer is to be read from.
+///
+/// Standard input, when that is the terminal — and the controlling terminal
+/// itself when it is not. A scudo with something piped into it still has a
+/// terminal to ask; it is simply no longer on fd 0, and reading fd 0 there
+/// would swallow the command's input and never see the answer. `crossterm`
+/// makes the same choice for the keys it reads, so both ends of the
+/// conversation stay on the same terminal.
+fn terminal_input() -> Option<File> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        // Duplicated so the reader owns what it reads from either way, and
+        // closes only its own copy.
+        return stdin.as_fd().try_clone_to_owned().ok().map(File::from);
+    }
+    // Missing, or ours to open no longer: there is nobody to answer, and the
+    // caller already treats an answer that never comes as no answer.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+}
+
 /// Read whatever the terminal sends back, until it goes quiet or answers the
 /// fence.
 fn read_reply(timeout: Duration) -> Option<Vec<u8>> {
     let deadline = std::time::Instant::now().checked_add(timeout)?;
     let mut buffer = Vec::with_capacity(MAX_SEQUENCE);
     let mut chunk = [0u8; 64];
-    let mut stdin = std::io::stdin();
+    let mut terminal = terminal_input()?;
 
     while buffer.len() < MAX_SEQUENCE {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() || !readable(stdin.as_raw_fd(), left) {
+        if left.is_zero() || !readable(terminal.as_raw_fd(), left) {
             break;
         }
         // End of input, or a read that gave us nothing to go on: either way
         // there is no more coming.
-        let Ok(read) = stdin.read(&mut chunk) else {
+        let Ok(read) = terminal.read(&mut chunk) else {
             break;
         };
         match chunk.get(..read) {

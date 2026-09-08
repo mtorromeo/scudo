@@ -638,6 +638,24 @@ The left panel is a terminal in full: colours, resizing, scrollback, the mouse, 
 control. A shell runs in it as it would anywhere, `Ctrl-C` and `Ctrl-Z` included — in this
 mode they are bytes for the command, not signals for scudo.
 
+Piping works, and means what it means everywhere else:
+
+```console
+$ cat Cargo.toml | scudo --tui -- less
+```
+
+When scudo's own standard input is not a terminal it belongs to the command, which reads it
+instead of the panel's terminal — a pipe is meant for the command, and handing it an empty
+terminal in its place would make the same command line mean two different things inside and
+outside the UI. Only what the command *writes* is drawn in the panel.
+
+Two consequences, both of them the ones the mode already has outside the UI. `systemd-run`
+falls back from `--pty` to `--pipe` when it is not given a terminal on all three descriptors,
+so a command with something piped into it has no controlling terminal of its own: it is not
+told when the panel is resized, and the keys pressed in the UI reach it only if it opens a
+terminal for itself, as `less` does. And a command given nothing to read gets nothing:
+`scudo --tui -- bash < /dev/null` ends at once rather than opening a shell.
+
 Asking for the UI also turns denial reporting on for the run, the same way `--verbose` does;
 without it the right panel would have nothing to show. When there is nothing to report the
 panel says which of the reasons applies — no network policy, a policy that took the network

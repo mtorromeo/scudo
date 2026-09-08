@@ -62,8 +62,22 @@ fn drive(cmd: &mut Command, steps: &[(&str, &[u8])]) -> (String, i32) {
 
 /// As [`drive`], on a terminal of a given size.
 fn drive_on(cmd: &mut Command, rows: u16, cols: u16, steps: &[(&str, &[u8])]) -> (String, i32) {
+    drive_with(cmd, rows, cols, pty::Input::Terminal, steps)
+}
+
+/// As [`drive_on`], deciding where scudo itself reads from.
+///
+/// [`pty::Input::Given`] leaves whatever the caller set on the command, which
+/// is how a test hands scudo a pipe instead of the terminal.
+fn drive_with(
+    cmd: &mut Command,
+    rows: u16,
+    cols: u16,
+    input: pty::Input,
+    steps: &[(&str, &[u8])],
+) -> (String, i32) {
     let mut pty = pty::open(rows, cols).expect("a terminal");
-    let mut child = pty.spawn(cmd).expect("scudo starts");
+    let mut child = pty.spawn(cmd, input).expect("scudo starts");
     let mut reader = pty.reader().expect("a reader");
     let mut writer = pty.writer().expect("a writer");
 
@@ -117,6 +131,30 @@ fn the_command_runs_and_its_output_is_on_the_screen() {
     cmd.args(["--tui", "--", "/bin/echo", "marker-one-two-three"]);
     let (screen, code) = drive(&mut cmd, &[("marker-one-two-three", b"q")]);
     assert!(screen.contains("marker-one-two-three"), "{screen}");
+    assert_eq!(code, 0);
+}
+
+/// Outside the UI, what is piped into scudo belongs to the command:
+/// `cat file | scudo -- less` shows the file. Inside it, all three descriptors
+/// were the pty, so the pipe stopped at scudo and the command was handed a
+/// terminal with nothing in it. This is that pipe, reaching the command.
+#[test]
+fn what_is_piped_into_scudo_reaches_the_command() {
+    let dir = scratch("piped");
+    let path = dir.join("input");
+    std::fs::write(&path, "marker-down-the-pipe\n").expect("something to pipe in");
+
+    let mut cmd = scudo();
+    cmd.args(["--tui", "--", "/bin/cat"])
+        .stdin(std::fs::File::open(&path).expect("the file opens"));
+    let (screen, code) = drive_with(
+        &mut cmd,
+        40,
+        120,
+        pty::Input::Given,
+        &[("marker-down-the-pipe", b"q")],
+    );
+    assert!(screen.contains("marker-down-the-pipe"), "{screen}");
     assert_eq!(code, 0);
 }
 
@@ -530,7 +568,9 @@ fn the_size_reaches_the_command_through_systemd_run() {
         "-c",
         "stty size; sleep 2; stty size",
     ]);
-    let mut child = pty.spawn(&mut cmd).expect("systemd-run starts");
+    let mut child = pty
+        .spawn(&mut cmd, pty::Input::Terminal)
+        .expect("systemd-run starts");
     let mut reader = pty.reader().expect("a reader");
 
     let (tx, rx) = std::sync::mpsc::channel();

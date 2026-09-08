@@ -213,7 +213,16 @@ mod run {
 
         let mut pty = pty::open(rows, cols)?;
         let mut parser = vt100::Parser::new(rows, cols, options.config.scrollback());
-        let child = pty.spawn(cmd)?;
+        // Standard input is the command's whenever it is not the terminal:
+        // something was piped in, and it was meant for the command, exactly as
+        // it would have been without the UI in the way. Only a terminal on fd 0
+        // is scudo's own, and then the command is given the pty instead.
+        let input = if std::io::stdin().is_terminal() {
+            pty::Input::Terminal
+        } else {
+            pty::Input::Given
+        };
+        let child = pty.spawn(cmd, input)?;
         let pid = i32::try_from(child.id()).unwrap_or(-1i32);
         let mut writer = pty.writer()?;
 
