@@ -28,6 +28,8 @@ mod mouse;
 #[cfg(feature = "tui")]
 pub mod pty;
 #[cfg(feature = "tui")]
+mod query;
+#[cfg(feature = "tui")]
 pub mod state;
 #[cfg(feature = "tui")]
 mod ui;
@@ -62,7 +64,7 @@ mod run {
         config::TuiConfig,
         denials::Denials,
         keys::{self, KeySpec},
-        mouse, pty,
+        mouse, pty, query,
         ui::{self, Focus, Mode, Reporting, View},
     };
     use crate::bpfd::{client, protocol::Notification};
@@ -188,7 +190,12 @@ mod run {
             execute!(std::io::stdout(), EnableBracketedPaste),
         );
 
-        let mut app = App::new(options, prefix);
+        // Before the screen is ours to draw on but after raw mode is, which is
+        // what lets the answer be read at all: in cooked mode it would sit in
+        // the line discipline waiting for a newline nobody is going to send.
+        let host = query::Host::ask();
+
+        let mut app = App::new(options, prefix, host);
         let area = terminal.size().context("measuring the terminal")?;
         let area = ratatui::layout::Rect {
             x: 0,
@@ -288,10 +295,15 @@ mod run {
         /// judged against. Kept because the resize keys need it and the terminal
         /// is not theirs to ask.
         screen_width: u16,
+        /// What the host terminal said about its colours, ready to be repeated
+        /// to a command that asks scudo the same.
+        host: query::Host,
+        /// Scans the command's output for questions and answers them.
+        answerer: query::Answerer,
     }
 
     impl App {
-        fn new(options: &Options<'_>, prefix: KeySpec) -> Self {
+        fn new(options: &Options<'_>, prefix: KeySpec, host: query::Host) -> Self {
             App {
                 denials: Denials::default(),
                 command: options.command.to_owned(),
@@ -315,6 +327,8 @@ mod run {
                 mouse_captured: false,
                 size: (0, 0),
                 screen_width: 0,
+                host,
+                answerer: query::Answerer::default(),
             }
         }
 
@@ -354,7 +368,13 @@ mod run {
             pid: i32,
         ) {
             match event {
-                Event::Pty(bytes) => parser.process(&bytes),
+                Event::Pty(bytes) => {
+                    parser.process(&bytes);
+                    // Answered as soon as the bytes arrive rather than at the
+                    // next frame: the program that asked is waiting on the
+                    // answer, not on anything being drawn.
+                    self.answerer.answer(&bytes, &self.host, parser, writer);
+                }
                 // The command's terminal is gone, but its exit status may not
                 // have been reaped yet; leaving is driven by `Exited` alone.
                 Event::PtyClosed => {}

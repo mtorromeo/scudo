@@ -641,6 +641,14 @@ Change the prefix with `tui.prefix` in `[scudo]` or with `--tui-prefix`; it is w
 `C-a`, `M-x` or `F12`, and must carry a modifier, since a bare character would be taken away
 from the command with no way to type it.
 
+Programs that ask the terminal about itself get an answer. scudo is the terminal here, so it
+answers what it can: what kind of terminal it is, whether it is working, where the cursor is,
+and — from the terminal it is itself drawing on, asked once when the UI starts — what colour
+the foreground, background and cursor are. Anything else goes unanswered, as on any terminal
+that does not implement it; the device-attributes reply is what tells a program to stop waiting
+for the rest. Without this a program like `bat`, which asks about the background colour to
+choose a light or dark theme, waits out its own timeout — a full second — on every run.
+
 The mouse is handed to the program in the terminal only while that program asks for it, so
 selecting and copying with the mouse keeps working everywhere else — at the cost of taking
 whole screen rows, panel included, since scudo is drawing one screen.
