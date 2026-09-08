@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn a_path_below_a_file_is_absent_rather_than_unknown() {
         let mut checker = Checker::new();
-        let (_, outside) = checker.check(b"/etc/hostname/below", AT_FDCWD, pid(), false);
+        let (_, outside) = checker.check(b"Cargo.toml/below", AT_FDCWD, pid(), false);
         assert!(
             matches!(outside, Outside::Absent | Outside::Unknown),
             "got {outside:?}"
@@ -221,16 +221,20 @@ mod tests {
     }
 
     /// A descriptor we hold, which is the other half of resolving a relative
-    /// path.
+    /// path. It names the crate's own directory, because a build in a chroot
+    /// has no `/etc` worth relying on and this is the one tree we know is there.
     #[test]
     fn a_relative_path_is_resolved_against_a_directory_descriptor() {
         use std::os::fd::AsRawFd as _;
 
-        let dir = std::fs::File::open("/etc").expect("/etc is openable");
+        // `/proc/<pid>/fd` answers with links resolved, so the expected name has
+        // to be resolved too or a symlinked source tree would not match.
+        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).expect("the crate directory");
+        let dir = std::fs::File::open(&root).expect("the crate directory is openable");
         let fd = dir.as_raw_fd();
         let mut checker = Checker::new();
-        let (path, outside) = checker.check(b"hostname", fd, pid(), false);
-        assert_eq!(path, "/etc/hostname");
+        let (path, outside) = checker.check(b"Cargo.toml", fd, pid(), false);
+        assert_eq!(path, root.join("Cargo.toml").display().to_string());
         assert_eq!(outside, Outside::Present);
     }
 
@@ -275,9 +279,9 @@ mod tests {
     #[test]
     fn an_answer_is_reused_rather_than_asked_again() {
         let mut checker = Checker::new();
-        checker.check(b"/etc/hostname", AT_FDCWD, pid(), false);
+        checker.check(b"Cargo.toml", AT_FDCWD, pid(), false);
         assert_eq!(checker.seen.len(), 1);
-        checker.check(b"/etc/hostname", AT_FDCWD, pid(), false);
+        checker.check(b"Cargo.toml", AT_FDCWD, pid(), false);
         assert_eq!(checker.seen.len(), 1);
     }
 
