@@ -26,6 +26,8 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+use super::denials::Kind;
+
 /// How many colours the terminal scudo draws on can actually show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Depth {
@@ -66,6 +68,44 @@ impl Depth {
     }
 }
 
+/// How a line of the panel announces itself.
+///
+/// Two questions are asked of every refusal and they are not the same question,
+/// so they are not answered the same way: the *glyph* says which half of the
+/// sandbox it came from, and the *tint* says whether the sandbox is the reason
+/// at all. Splitting them is what lets a glance answer either one — all the
+/// squares are files however they are coloured, and everything in the dimmer
+/// tint is something the command went looking for rather than something that
+/// was taken from it.
+///
+/// Both live here rather than in the drawing because both are choices about how
+/// the panel looks, and this is where those are written down once and said again
+/// for each depth of colour.
+#[derive(Debug, Clone, Copy)]
+pub struct Marks {
+    /// A refused network access.
+    pub network: &'static str,
+    /// A refused file access.
+    pub file: &'static str,
+    /// What the sandbox took away.
+    pub refused: Color,
+    /// What was not there outside it either: the command was searching, not
+    /// being refused, and widening the profile would not help.
+    pub missing: Color,
+}
+
+impl Marks {
+    /// The glyph and the tint for one line.
+    #[must_use]
+    pub fn of(&self, kind: Kind, denial: bool) -> (&'static str, Color) {
+        let glyph = match kind {
+            Kind::Network => self.network,
+            Kind::File => self.file,
+        };
+        (glyph, if denial { self.refused } else { self.missing })
+    }
+}
+
 /// Every colour the drawing is allowed to use.
 ///
 /// The fields that carry a background are [`Style`]s rather than [`Color`]s
@@ -95,6 +135,8 @@ pub struct Theme {
     pub danger: Color,
     /// A command that is over.
     pub ok: Color,
+    /// The glyph and tint each line of the panel's lists is marked with.
+    pub marks: Marks,
     /// The resize mode, which is neither good news nor bad.
     pub alt: Color,
     /// What to write on top of a fill in one of the accents above — a badge in
@@ -114,6 +156,9 @@ impl Theme {
         }
     }
 }
+
+const NETWORK_GLYPH: &str = "\u{25cf}";
+const FILE_GLYPH: &str = "\u{1f5ce}";
 
 /// A cool, dark ground with warm accents kept for the two things worth
 /// interrupting a reader over: what was refused, and what is about to be killed.
@@ -139,6 +184,12 @@ const TRUE_COLOR: Theme = Theme {
     warn: Color::Rgb(0xe0, 0xaf, 0x68),
     danger: Color::Rgb(0xf7, 0x76, 0x8e),
     ok: Color::Rgb(0x9e, 0xce, 0x6a),
+    marks: Marks {
+        network: NETWORK_GLYPH,
+        file: FILE_GLYPH,
+        refused: Color::Rgb(0xe0, 0xaf, 0x68),
+        missing: Color::Rgb(0x6b, 0x73, 0x94),
+    },
     alt: Color::Rgb(0xbb, 0x9a, 0xf7),
     on_accent: Color::Rgb(0x1a, 0x1b, 0x26),
 };
@@ -162,6 +213,12 @@ const INDEXED: Theme = Theme {
     warn: Color::Indexed(179),
     danger: Color::Indexed(210),
     ok: Color::Indexed(149),
+    marks: Marks {
+        network: NETWORK_GLYPH,
+        file: FILE_GLYPH,
+        refused: Color::Indexed(179),
+        missing: Color::Indexed(103),
+    },
     alt: Color::Indexed(141),
     on_accent: Color::Indexed(234),
 };
@@ -188,6 +245,12 @@ const ANSI: Theme = Theme {
     warn: Color::Yellow,
     danger: Color::Red,
     ok: Color::Green,
+    marks: Marks {
+        network: NETWORK_GLYPH,
+        file: FILE_GLYPH,
+        refused: Color::Yellow,
+        missing: Color::DarkGray,
+    },
     alt: Color::Magenta,
     on_accent: Color::Black,
 };
@@ -244,6 +307,12 @@ mod tests {
             ] {
                 assert_ne!(pair.0, pair.1);
             }
+            // The panel's lists rest on these two distinctions: the glyph for
+            // which half of the sandbox a line came from, the tint for whether
+            // the sandbox is the reason. Either one falling together on a level
+            // nobody tested would take a whole column of meaning with it.
+            assert_ne!(theme.marks.network, theme.marks.file);
+            assert_ne!(theme.marks.refused, theme.marks.missing);
             // A heading has to be a filled bar however few colours there are,
             // or it reads as the first row of its own list.
             assert!(theme.header.bg.is_some(), "a heading that is not filled");
@@ -260,6 +329,23 @@ mod tests {
                 assert!(!style.add_modifier.contains(Modifier::REVERSED));
             }
         }
+    }
+
+    /// The glyph turns on the half of the sandbox, the tint on whether the
+    /// sandbox was the reason — and neither is allowed to answer the other's
+    /// question.
+    #[test]
+    fn a_mark_says_the_half_with_its_glyph_and_the_reason_with_its_tint() {
+        let marks = TRUE_COLOR.marks;
+        let (refused_net, hot) = marks.of(Kind::Network, true);
+        let (missing_net, cold) = marks.of(Kind::Network, false);
+        let (refused_file, still_hot) = marks.of(Kind::File, true);
+
+        assert_eq!(refused_net, marks.network);
+        assert_eq!(missing_net, marks.network);
+        assert_eq!(refused_file, marks.file);
+        assert_ne!(hot, cold);
+        assert_eq!(hot, still_hot);
     }
 
     /// The panel is the one thing that must not be the host's colour, except

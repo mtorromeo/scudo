@@ -598,20 +598,28 @@ $ scudo --tui -- bash
                                      │▌ BLOCKED               3 │
  $ curl https://ads.example/         │ ● ads.example      2x    │
  curl: (6) Could not resolve host    │ ● 1.1.1.1:443      1x    │
- $                                   │ ○ /usr/lib/libz.so 9x    │
+ $                                   │ □ /usr/lib/libz.so 9x    │
                                      │                          │
                                      │  RECENT                  │
-                                     │   1s blocked DNS for ads…│
-                                     │   4s blocked connect to …│
+                                     │   1s ● blocked DNS for a…│
+                                     │   4s ■ blocked open of /…│
  ^A  ? for help                        terminal │ blocked 3
 ```
 
 The command's terminal is the only part of the screen left unpainted, so what shows through
 it is the host terminal's own background; everything else — the panel, its two headings, the
-status bar — carries scudo's own dark theme. A filled `●` is something the sandbox refused,
-a hollow `○` a path that was not there outside it either (`^A m`). The headings sit above
-their lists rather than in them, so they stay put while the lists scroll, and each list has
-a scrollbar down its right edge once there is more of it than there is room.
+status bar — carries scudo's own dark theme.
+
+Every line carries a mark, and the mark answers two questions at once. Its **shape** says
+which half of the sandbox the line came from — a round `●` for the network, a square `■` for
+the filesystem — and its **colour** says whether the sandbox is the reason: the warm tint for
+something it refused, the dim one for a path that was not there outside it either, which is
+hidden until `^A m` asks for it. Both the glyphs and the two tints are part of the theme, so
+they hold their meaning on a 256-colour terminal and on a sixteen-colour one.
+
+The headings sit above their lists rather than in them, so they stay put while the lists
+scroll, and each list has a scrollbar down its right edge once there is more of it than there
+is room.
 
 The left panel is a terminal in full: colours, resizing, scrollback, the mouse, and job
 control. A shell runs in it as it would anywhere, `Ctrl-C` and `Ctrl-Z` included — in this
@@ -641,12 +649,38 @@ scudo's own:
 | `^A w` | show or hide the panel |
 | `^A s` | show or hide what scudo decided: the profiles that matched and the command line it built |
 | `^A m` | show or hide paths that were missing outside the sandbox too — see [file access reporting](#seeing-what-the-filesystem-restrictions-hid) |
+| `^A /` | keep only the lines matching a pattern |
+| `^A \` | the same, keeping out what matches instead |
+| `^A n` | the network only, or everything again |
+| `^A f` | the filesystem only, or everything again |
 | `^A ?` | the list above |
 
 With one of the panel's lists focused, the arrows, `PgUp`/`PgDn` and `Home`/`End` move that
 list instead of reaching the command; every other key still reaches it, so the focus never
 swallows what was typed. The tally is read from the top down and the running list from its
 newest line back, and each stops at its own last line.
+
+#### Narrowing the panel
+
+A build or a package manager names thousands of paths, and the handful worth looking at go
+under. Two ways of cutting the panel down, which can be used together:
+
+`^A /` opens a field for a **regular expression** — the same engine the profile matchers use —
+and keeps only the lines that match it; `^A \` opens the same field on the other side, keeping
+out what matches instead. The pattern applies as it is typed: `Tab` turns it round without
+retyping it, `Ctrl-U` clears it, `Enter` keeps it and gives the keyboard back, and `Esc`
+leaves the field putting back whatever was in force before it was opened. Case is ignored
+unless the pattern says otherwise with `(?-i)`. A pattern is unfinished for most of the time
+it is being written, so while it does not compile nothing is narrowed by it and the status bar
+says why, in red, rather than emptying the lists at every intermediate keystroke.
+
+`^A n` and `^A f` cut the panel to the network or to the filesystem alone; the same key again
+puts everything back. The heading of each list shows what is in force — `[net] /usr` — so a
+panel that is narrow because it was asked to be never looks like a panel with nothing in it.
+
+Both are **views and only views**. What is on screen has no bearing on the line printed when
+the UI closes, or on the `blocked N` count in the status bar: those are statements about the
+run, and a run does not change because of what was being looked at while it happened.
 
 Change the prefix with `tui.prefix` in `[scudo]` or with `--tui-prefix`; it is written as
 `C-a`, `M-x` or `F12`, and must carry a modifier, since a bare character would be taken away

@@ -225,6 +225,38 @@ fn the_panel_says_why_it_has_nothing_in_it() {
     assert!(screen.contains("no policy applies"), "{screen}");
 }
 
+/// The one place in the UI where an ordinary character is not the command's.
+/// The field has to open, take what is typed, invert on a key, and give the
+/// keyboard back without leaving anything behind.
+#[test]
+fn the_panel_can_be_narrowed_to_a_pattern_and_the_field_left_again() {
+    let mut cmd = scudo();
+    cmd.args(["--tui", "--", "/bin/echo", "marker-filter"]);
+    let (screen, _) = drive(
+        &mut cmd,
+        &[
+            // `^A /`, which opens the field on what is kept.
+            ("marker-filter", b"\x01/"),
+            // Esc alone, and nothing after it in the same write: an escape with
+            // a byte behind it is how a terminal spells Alt, and crossterm would
+            // read the two as one key.
+            ("include", b"\x1b"),
+            // The other key, the other way round. The bar it is waiting on is
+            // one that has been drawn before, so this fires a step later rather
+            // than on anything new — which is the point: it is the gap between
+            // the writes that matters, not what is on screen in it.
+            ("press q, Esc", b"\x01\\"),
+            ("exclude", b"\x1b"),
+            // And q leaves, which is the proof the field gave the keyboard
+            // back: a q still going into a pattern would hang here instead.
+            ("? for help", b"q"),
+        ],
+    );
+    assert!(screen.contains("FILTER"), "{screen}");
+    assert!(screen.contains("include"), "{screen}");
+    assert!(screen.contains("exclude"), "{screen}");
+}
+
 /// A terminal that could not be typed into would be a picture of one. This is
 /// the round trip: a key pressed here reaches the command, and what the command
 /// makes of it comes back to the screen.

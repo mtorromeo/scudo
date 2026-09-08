@@ -28,7 +28,10 @@ use ratatui::{
 };
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-use crate::tui::{denials::Denials, theme::Theme};
+use crate::tui::{
+    denials::{Denials, Kind},
+    theme::Theme,
+};
 
 /// The narrowest the terminal may become before the panel is dropped
 /// altogether. Below this a shell's own output starts wrapping in ways that
@@ -111,6 +114,8 @@ pub enum Mode {
     Confirm,
     /// Setting how wide the panel is.
     Resize,
+    /// Typing the pattern the panel's lists are being narrowed to.
+    Filter,
     /// The list of prefix commands is up.
     Help,
 }
@@ -183,9 +188,16 @@ const ELLIPSIS: char = '\u{2026}';
 /// The mark down the left of the heading of whichever section has the focus.
 const FOCUS_MARK: &str = "\u{258c}";
 
-/// A refusal, and a path that was simply never there.
-const REFUSED_MARK: &str = "\u{25cf}";
-const MISSING_MARK: &str = "\u{25cb}";
+/// Where the pattern is being typed, in the status bar. The command's own
+/// cursor is drawn by the host terminal and is elsewhere on the screen; this is
+/// a character, so that both can be on show at once without either being taken
+/// for the other.
+const CURSOR: &str = "\u{2588}";
+
+/// The most of the filter a heading gives up to. Past this it is taking the room
+/// the counts need, and the whole pattern is in the status bar anyway for as
+/// long as it is being typed.
+const MAX_FILTER_CHIP: usize = 14;
 
 /// The most context lines shown at once. Past this the panel would be pushing
 /// the terminal off the screen to say what it already said.
@@ -383,6 +395,7 @@ fn draw_terminal(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
 
     let editing = view.focus == Focus::Terminal
         && view.mode != Mode::Scroll
+        && view.mode != Mode::Filter
         && view.mode != Mode::Help
         && view.finished.is_none();
     if editing && !view.screen.hide_cursor() {
@@ -415,6 +428,24 @@ fn draw_panel(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
     draw_history(frame, view, bottom);
 }
 
+/// How many columns a row of spans wants.
+fn columns(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.chars().count()).sum()
+}
+
+/// Cut a heading's right-hand pieces down to what fits beside its label.
+///
+/// Taken from the front, which is what makes the order they are given in an
+/// order of rising importance: the count is what a heading is for and has to
+/// survive a narrow panel, the filter it is being narrowed by is worth more than
+/// the tally of what a toggle is holding back, and on 34 columns not all three
+/// can be there at once.
+fn fit_right(right: &mut Vec<Span<'static>>, room: usize) {
+    while columns(right) > room && !right.is_empty() {
+        drop(right.remove(0));
+    }
+}
+
 /// One section's heading: a filled bar with a label on the left and a figure on
 /// the right, in its own row so that nothing scrolls it away.
 fn draw_heading(
@@ -423,7 +454,7 @@ fn draw_heading(
     theme: &Theme,
     focused: bool,
     label: &str,
-    right: Vec<Span<'static>>,
+    mut right: Vec<Span<'static>>,
 ) {
     if section.height == 0 || section.width == 0 {
         return;
@@ -442,14 +473,9 @@ fn draw_heading(
             Style::new().add_modifier(Modifier::BOLD),
         ),
     ];
-    let used: usize = left
-        .iter()
-        .chain(right.iter())
-        .map(|span| span.content.chars().count())
-        .sum();
-    left.push(Span::raw(
-        " ".repeat(usize::from(section.width).saturating_sub(used)),
-    ));
+    let room = usize::from(section.width).saturating_sub(columns(&left));
+    fit_right(&mut right, room);
+    left.push(Span::raw(" ".repeat(room.saturating_sub(columns(&right)))));
     left.extend(right);
 
     let area = Rect {
@@ -457,6 +483,28 @@ fn draw_heading(
         ..section
     };
     frame.render_widget(Paragraph::new(Line::from(left)).style(style), area);
+}
+
+/// What the heading says about the filter, when there is a filter to say
+/// anything about.
+///
+/// In the danger colour while the pattern does not compile: nothing is being
+/// narrowed by it yet, and the heading is where that has to be owned up to —
+/// otherwise a half-written pattern reads as one that simply matched everything.
+fn filter_chip(view: &View<'_>) -> Option<Span<'static>> {
+    let filter = view.denials.filter();
+    if !filter.is_active() {
+        return None;
+    }
+    let colour = if filter.error().is_some() {
+        view.theme.danger
+    } else {
+        view.theme.accent
+    };
+    Some(Span::styled(
+        format!("{}  ", truncate(&filter.label(), MAX_FILTER_CHIP)),
+        Style::new().fg(colour),
+    ))
 }
 
 fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
@@ -474,6 +522,7 @@ fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
             Style::new().fg(theme.dim),
         ));
     }
+    right.extend(filter_chip(view));
     let shown = view.denials.shown();
     right.push(Span::styled(
         format!("{shown} "),
@@ -491,9 +540,12 @@ fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
     }
 
     if view.denials.is_empty() {
-        // Once the stream is closed nothing more can arrive, so an empty panel
-        // has stopped being a wait and become an answer.
-        let note = if view.denials.is_closed() && view.reporting == Reporting::Watching {
+        // Three different silences, and saying the wrong one is worse than
+        // saying nothing: a panel emptied by a filter has plenty to show, and a
+        // panel whose stream is closed has stopped waiting and become an answer.
+        let note = if view.denials.is_filtering() && view.denials.has_arrivals() {
+            "nothing matches the filter"
+        } else if view.denials.is_closed() && view.reporting == Reporting::Watching {
             "nothing was blocked"
         } else {
             view.reporting.note()
@@ -522,14 +574,16 @@ fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
                 .saturating_sub(3);
             let label = truncate(&target.label, room);
             let padding = " ".repeat(room.saturating_sub(label.chars().count()));
-            // A path that was missing outside the sandbox too is shown hollow
-            // and dimmed: it is something the command wanted and did not get,
-            // but the sandbox is not the reason, and widening the profile would
-            // not help.
-            let (mark, mark_colour, label_colour, count_colour) = if target.denial {
-                (REFUSED_MARK, theme.warn, theme.text, theme.warn)
+            // The glyph says which half of the sandbox this came from; its tint,
+            // and the rest of the row with it, says whether the sandbox is the
+            // reason. A path that was missing outside too is dimmed throughout:
+            // the command wanted it and did not get it, but widening the profile
+            // would not help.
+            let (mark, mark_colour) = theme.marks.of(target.kind, target.denial);
+            let (label_colour, count_colour) = if target.denial {
+                (theme.text, theme.warn)
             } else {
-                (MISSING_MARK, theme.dim, theme.dim, theme.dim)
+                (theme.dim, theme.dim)
             };
             ListItem::new(Line::from(vec![
                 Span::raw(" "),
@@ -556,14 +610,13 @@ fn draw_history(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
     // How far back from the newest line the view has been moved, said in the
     // heading because it is the only place it can be said: the list itself looks
     // the same wherever it is.
-    let right = if view.history_scroll > 0usize {
-        vec![Span::styled(
+    let mut right: Vec<Span<'static>> = filter_chip(view).into_iter().collect();
+    if view.history_scroll > 0usize {
+        right.push(Span::styled(
             format!("\u{2191}{} ", view.history_scroll),
             Style::new().fg(theme.accent),
-        )]
-    } else {
-        Vec::new()
-    };
+        ));
+    }
     draw_heading(
         frame,
         section,
@@ -584,22 +637,26 @@ fn draw_history(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
     // These read as sentences and end with the reason, which is the same words
     // on every line: cutting the front would take the path and keep the part
     // that never varies.
-    let window: Vec<(String, String, bool)> = view
+    let window: Vec<(String, String, bool, Kind)> = view
         .denials
         .recent()
         .rev()
         .skip(view.history_scroll)
         .take(room)
-        .map(|(age, line, denial)| (ago(age), line.to_owned(), denial))
+        .map(|(age, line, denial, kind)| (ago(age), line.to_owned(), denial, kind))
         .collect();
     let items: Vec<ListItem<'static>> = window
         .into_iter()
         .rev()
-        .map(|(age, line, denial)| {
+        .map(|(age, line, denial, kind)| {
+            // The same mark the tally above carries, so a line found in one list
+            // is recognisable in the other without reading it.
+            let (mark, mark_colour) = theme.marks.of(kind, denial);
             let colour = if denial { theme.text } else { theme.dim };
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {age} "), Style::new().fg(theme.dim)),
-                Span::styled(line, Style::new().fg(colour)),
+                Span::styled(mark, Style::new().fg(mark_colour)),
+                Span::styled(format!(" {line}"), Style::new().fg(colour)),
             ]))
         })
         .collect();
@@ -747,6 +804,37 @@ fn status(view: &View<'_>, frame_width: u16) -> Status {
                 right: None,
             }
         }
+        Mode::Filter => {
+            let filter = view.denials.filter();
+            // Red while the pattern does not build, which is most of the time it
+            // is being written: the lists are not being narrowed by it yet, and
+            // the bar is the one place to say so that costs the panel nothing.
+            let (bar, chip, aside) = loud(
+                theme,
+                if filter.error().is_some() {
+                    theme.danger
+                } else {
+                    theme.accent
+                },
+            );
+            let sense = if filter.exclude() {
+                "exclude"
+            } else {
+                "include"
+            };
+            let hint = match filter.error() {
+                Some(reason) => reason.to_owned(),
+                None => "Tab inverts, Enter keeps it, Esc puts it back".to_owned(),
+            };
+            Status {
+                badge: "FILTER".to_owned(),
+                bar,
+                chip,
+                aside,
+                message: format!("{sense}: {}{CURSOR} \u{2014} {hint}", filter.pattern()),
+                right: None,
+            }
+        }
         Mode::Scroll => {
             let (bar, chip, aside) = loud(theme, theme.warn);
             Status {
@@ -879,6 +967,19 @@ fn draw_help(frame: &mut Frame<'_>, view: &View<'_>) {
                 format!("{prefix} m"),
                 "show or hide paths missing outside the sandbox too",
             ),
+            (
+                format!("{prefix} /"),
+                "keep only the lines matching a pattern",
+            ),
+            (format!("{prefix} \\"), "the same, keeping out what matches"),
+            (
+                format!("{prefix} n"),
+                "the network only, or everything again",
+            ),
+            (
+                format!("{prefix} f"),
+                "the filesystem only, or everything again",
+            ),
             ("?".to_owned(), "this list"),
         ]
     } else {
@@ -902,6 +1003,19 @@ fn draw_help(frame: &mut Frame<'_>, view: &View<'_>) {
             (
                 format!("{prefix} m"),
                 "show or hide paths missing outside the sandbox too",
+            ),
+            (
+                format!("{prefix} /"),
+                "keep only the lines matching a pattern",
+            ),
+            (format!("{prefix} \\"), "the same, keeping out what matches"),
+            (
+                format!("{prefix} n"),
+                "the network only, or everything again",
+            ),
+            (
+                format!("{prefix} f"),
+                "the filesystem only, or everything again",
             ),
             (format!("{prefix} ?"), "this list"),
         ]
@@ -1006,6 +1120,7 @@ fn ago(age: std::time::Duration) -> String {
 )]
 mod tests {
     use super::*;
+    use crate::bpfd::protocol::Notification;
 
     fn area(width: u16, height: u16) -> Rect {
         Rect {
@@ -1159,6 +1274,173 @@ mod tests {
         assert_eq!(targets_lines(&denials), 1);
         denials.push(&refused("/home/me/.profile"), "bash");
         assert_eq!(targets_lines(&denials), 2);
+    }
+
+    fn span(text: &str) -> Span<'static> {
+        Span::raw(text.to_owned())
+    }
+
+    /// Draw one frame on a terminal of our own and read back what it says, row
+    /// by row. The colours are left out: what is asserted below is what a person
+    /// would read off the screen.
+    fn drawn(denials: &Denials, mode: Mode) -> Vec<String> {
+        let parser = vt100::Parser::new(20, 80, 0);
+        let theme = Theme::detect();
+        let view = View {
+            screen: parser.screen(),
+            denials,
+            command: "curl",
+            focus: Focus::Terminal,
+            mode,
+            prefix_label: "^A",
+            context: &[],
+            show_context: false,
+            show_panel: true,
+            panel_width: Some(MIN_PANEL_WIDTH),
+            panel_scroll: 0,
+            history_scroll: 0,
+            scrollback: 0,
+            reporting: Reporting::Watching,
+            finished: None,
+            theme: &theme,
+        };
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("a terminal to draw on");
+        let _frame = terminal.draw(|frame| draw(frame, &view)).expect("a frame");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .filter_map(|col| buffer.cell((col, row)).map(|cell| cell.symbol().to_owned()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn refusals() -> Denials {
+        use crate::bpfd::protocol::{FileError, FileOp, Outside, Stage, Transport};
+
+        let mut denials = Denials::default();
+        denials.push(
+            &Notification::Blocked {
+                stage: Stage::Connect,
+                transport: Transport::Tcp,
+                addr: "1.1.1.1".parse().expect("a valid test address"),
+                port: 443,
+            },
+            "curl",
+        );
+        denials.push(
+            &Notification::FileBlocked {
+                op: FileOp::Open,
+                path: "/home/me/.netrc".to_owned(),
+                error: FileError::Permission,
+                outside: Outside::Present,
+            },
+            "curl",
+        );
+        denials
+    }
+
+    /// The mark is the whole distinction, so it has to reach the screen: a round
+    /// one against the address, a square one against the path, in both lists.
+    #[test]
+    fn the_network_and_the_filesystem_are_marked_apart_on_the_screen() {
+        let theme = Theme::detect();
+        let screen = drawn(&refusals(), Mode::Normal).join("\n");
+        let net = theme.marks.network;
+        let file = theme.marks.file;
+
+        assert!(
+            screen.contains(&format!("{net} 1.1.1.1:443")),
+            "the address should carry the network mark:\n{screen}"
+        );
+        assert!(
+            screen.contains(&format!("{file} /home/me/.netrc")),
+            "the path should carry the filesystem mark:\n{screen}"
+        );
+        // And the running list says it the same way, so a line found in one is
+        // recognisable in the other.
+        // Cut at the panel's edge like every line of the log, so this is as
+        // much of the sentence as there is to look for.
+        assert!(
+            screen.contains(&format!("{net} blocked connect")),
+            "the log should carry it too:\n{screen}"
+        );
+    }
+
+    /// A panel narrowed to nothing must not read as a run with nothing in it,
+    /// and the heading is where the difference is said.
+    #[test]
+    fn a_filter_is_named_in_the_heading_and_owned_up_to_when_it_empties_the_panel() {
+        let mut denials = refusals();
+        let mut filter = crate::tui::denials::Filter::default();
+        for c in "nothing".chars() {
+            filter.push_char(c);
+        }
+        denials.set_filter(filter);
+
+        let screen = drawn(&denials, Mode::Normal).join("\n");
+        assert!(screen.contains("/nothing"), "{screen}");
+        assert!(screen.contains("nothing matches the filter"), "{screen}");
+
+        // And the half-keys say which half, in the same place.
+        denials.filter_mut().clear_pattern();
+        denials
+            .filter_mut()
+            .toggle_kind(crate::tui::denials::Kind::Network);
+        let screen = drawn(&denials, Mode::Normal).join("\n");
+        assert!(screen.contains("[net]"), "{screen}");
+        assert!(screen.contains("1.1.1.1:443"), "{screen}");
+        assert!(!screen.contains(".netrc"), "{screen}");
+    }
+
+    /// While the pattern is being typed it is the status bar that carries it,
+    /// and an unfinished one has to say so rather than look like a pattern that
+    /// matched everything.
+    #[test]
+    fn the_field_shows_the_pattern_and_admits_when_it_does_not_build() {
+        let mut denials = refusals();
+        let mut filter = crate::tui::denials::Filter::default();
+        for c in "[h".chars() {
+            filter.push_char(c);
+        }
+        denials.set_filter(filter);
+
+        let screen = drawn(&denials, Mode::Filter).join("\n");
+        assert!(screen.contains("FILTER"), "{screen}");
+        assert!(screen.contains("include: [h"), "{screen}");
+        assert!(screen.contains("unclosed character class"), "{screen}");
+        // Nothing was narrowed by a pattern that does not build.
+        assert!(screen.contains("1.1.1.1:443"), "{screen}");
+        assert!(screen.contains(".netrc"), "{screen}");
+    }
+
+    /// A heading on 34 columns cannot carry everything it might have to say, and
+    /// what it drops matters: the count is what the heading is for.
+    #[test]
+    fn a_heading_too_narrow_for_everything_keeps_the_count() {
+        let hidden = span("+12 hidden  ");
+        let filter = span("[net] /lib  ");
+        let count = span("3 ");
+
+        // Room for all three, so all three stay.
+        let mut right = vec![hidden.clone(), filter.clone(), count.clone()];
+        fit_right(&mut right, 30);
+        assert_eq!(right.len(), 3);
+
+        // Room for two: the toggle's tally is the first to go, and the filter
+        // the lists are being narrowed by outlives it.
+        let mut right = vec![hidden.clone(), filter.clone(), count.clone()];
+        fit_right(&mut right, 16);
+        assert_eq!(columns(&right), columns(&[filter, count.clone()]));
+
+        // Room for one, and it is the count.
+        let mut right = vec![hidden, span("[net] /lib  "), count];
+        fit_right(&mut right, 3);
+        assert_eq!(columns(&right), 2);
     }
 
     #[test]

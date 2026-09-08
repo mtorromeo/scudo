@@ -64,7 +64,7 @@ mod run {
 
     use super::{
         config::TuiConfig,
-        denials::Denials,
+        denials::{Denials, Filter, Kind},
         keys::{self, KeySpec},
         mouse, pty, query,
         theme::Theme,
@@ -288,6 +288,10 @@ mod run {
         history_scroll: usize,
         scrollback: usize,
         max_scrollback: usize,
+        /// The filter as it was before the field was opened, kept so that Esc
+        /// can put it back. `None` whenever the field is not open, which is what
+        /// makes leaving it by any other route keep what was typed.
+        filter_saved: Option<Filter>,
         /// Set once the command has exited. The UI stays up, and stays usable:
         /// only the keys that were bytes for the command change meaning.
         finished: Option<i32>,
@@ -332,6 +336,7 @@ mod run {
                 history_scroll: 0,
                 scrollback: 0,
                 max_scrollback: options.config.scrollback(),
+                filter_saved: None,
                 finished: None,
                 code: 0,
                 leaving: false,
@@ -453,6 +458,7 @@ mod run {
                 Mode::Help => self.mode = Mode::Normal,
                 Mode::Prefix => self.command_key(key, parser, writer),
                 Mode::Resize => self.resize_key(key),
+                Mode::Filter => self.filter_key(key),
                 Mode::Scroll => self.scroll_key(key, parser),
                 Mode::Normal => {
                     if self.prefix.matches(&key) {
@@ -567,7 +573,86 @@ mod run {
                 // What the sandbox hid is the point of the panel; what was
                 // never there outside it is context, and only on request.
                 KeyCode::Char('m') => self.denials.toggle_missing(),
+                // A slash for what to keep and a backslash for what to throw
+                // away, so which one was pressed is the answer to a question the
+                // field would otherwise have to ask.
+                KeyCode::Char('/') => self.open_filter(false),
+                KeyCode::Char('\\') => self.open_filter(true),
+                KeyCode::Char('n') => self.toggle_kind(Kind::Network),
+                KeyCode::Char('f') => self.toggle_kind(Kind::File),
                 KeyCode::Char('?') => self.mode = Mode::Help,
+                _ => {}
+            }
+        }
+
+        /// Open the pattern field, keeping what it can be put back to.
+        ///
+        /// The pattern already in force is left alone rather than cleared: the
+        /// usual reason to press the key twice is to add to what is there, and a
+        /// field that emptied itself would make the second press cost the first.
+        fn open_filter(&mut self, exclude: bool) {
+            self.filter_saved = Some(self.denials.filter().clone());
+            self.denials.filter_mut().set_exclude(exclude);
+            self.mode = Mode::Filter;
+            self.filter_changed();
+        }
+
+        fn toggle_kind(&mut self, kind: Kind) {
+            self.denials.filter_mut().toggle_kind(kind);
+            self.filter_changed();
+        }
+
+        /// Put both lists back to where they read from.
+        ///
+        /// Their offsets are clamped against how much there is to show, and a
+        /// filter changes that under them: without this, narrowing a long list
+        /// leaves the view somewhere past the end of the short one it became.
+        fn filter_changed(&mut self) {
+            self.panel_scroll = 0;
+            self.history_scroll = 0;
+        }
+
+        /// A key in the pattern field.
+        ///
+        /// Everything typed is the pattern's, which is the one place in the UI
+        /// where an ordinary character does not reach the command — the field is
+        /// on screen and says so, and Enter or Esc is one key away.
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "a key with nothing to type on it leaves the pattern alone"
+        )]
+        fn filter_key(&mut self, key: KeyEvent) {
+            match key.code {
+                // Kept: leaving the field is not the same as undoing it.
+                KeyCode::Enter => {
+                    self.filter_saved = None;
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Esc => {
+                    if let Some(filter) = self.filter_saved.take() {
+                        self.denials.set_filter(filter);
+                    }
+                    self.mode = Mode::Normal;
+                    self.filter_changed();
+                }
+                KeyCode::Tab => {
+                    self.denials.filter_mut().toggle_exclude();
+                    self.filter_changed();
+                }
+                KeyCode::Backspace => {
+                    self.denials.filter_mut().pop_char();
+                    self.filter_changed();
+                }
+                // The line-editing key every terminal has, for a pattern that
+                // went wrong early enough not to be worth backspacing over.
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.denials.filter_mut().clear_pattern();
+                    self.filter_changed();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.denials.filter_mut().push_char(c);
+                    self.filter_changed();
+                }
                 _ => {}
             }
         }
@@ -1068,6 +1153,118 @@ mod run {
             narrow.focus = Focus::Blocked;
             assert_eq!(narrow.panel_heights(), None);
             assert!(!narrow.panel_key(press(KeyCode::Down)));
+        }
+
+        fn ctrl(code: KeyCode) -> KeyEvent {
+            KeyEvent {
+                code,
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }
+        }
+
+        /// Type a run of keys at the UI, whatever mode each one lands in.
+        fn type_keys(app: &mut App, keys: &[KeyEvent]) {
+            let mut parser = vt100::Parser::new(39, 86, 100);
+            let mut typed: Vec<u8> = Vec::new();
+            for key in keys {
+                app.key(*key, &mut parser, &mut typed, 0);
+            }
+            assert!(
+                typed.is_empty(),
+                "nothing typed at the filter belongs to the command: {typed:?}"
+            );
+        }
+
+        fn chars(text: &str) -> Vec<KeyEvent> {
+            text.chars().map(|c| press(KeyCode::Char(c))).collect()
+        }
+
+        /// The one place an ordinary character is not the command's. It is worth
+        /// the exception only if it is complete: what is typed has to reach the
+        /// pattern and nothing else.
+        #[test]
+        fn the_pattern_takes_what_is_typed_rather_than_the_command() {
+            let mut app = app(120, 40);
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('/'))]);
+            assert_eq!(app.mode, Mode::Filter);
+            assert!(!app.denials.filter().exclude());
+
+            type_keys(&mut app, &chars("lib/"));
+            assert_eq!(app.denials.filter().pattern(), "lib/");
+
+            type_keys(&mut app, &[press(KeyCode::Backspace)]);
+            assert_eq!(app.denials.filter().pattern(), "lib");
+
+            // Which way round it reads is one key, not a second field.
+            type_keys(&mut app, &[press(KeyCode::Tab)]);
+            assert!(app.denials.filter().exclude());
+
+            type_keys(&mut app, &[ctrl(KeyCode::Char('u'))]);
+            assert_eq!(app.denials.filter().pattern(), "");
+
+            // Enter keeps what was typed and gives the keyboard back.
+            type_keys(&mut app, &chars("etc"));
+            type_keys(&mut app, &[press(KeyCode::Enter)]);
+            assert_eq!(app.mode, Mode::Normal);
+            assert_eq!(app.denials.filter().pattern(), "etc");
+        }
+
+        /// Esc is the way out of every other mode without leaving a mark, and
+        /// this one is no different: what was in force before comes back whole.
+        #[test]
+        fn leaving_the_field_by_escape_puts_the_previous_filter_back() {
+            let mut app = app(120, 40);
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('/'))]);
+            type_keys(&mut app, &chars("etc"));
+            type_keys(&mut app, &[press(KeyCode::Enter)]);
+
+            // Opened again, added to, then abandoned.
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('\\'))]);
+            type_keys(&mut app, &chars("/hosts"));
+            assert_eq!(app.denials.filter().pattern(), "etc/hosts");
+            assert!(app.denials.filter().exclude());
+
+            type_keys(&mut app, &[press(KeyCode::Esc)]);
+            assert_eq!(app.mode, Mode::Normal);
+            assert_eq!(app.denials.filter().pattern(), "etc");
+            assert!(
+                !app.denials.filter().exclude(),
+                "the sense the key set has to be put back with the rest"
+            );
+        }
+
+        #[test]
+        fn the_two_half_keys_show_one_half_and_then_everything_again() {
+            let mut app = app(120, 40);
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('n'))]);
+            assert_eq!(app.denials.filter().label(), "[net]");
+
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('f'))]);
+            assert_eq!(app.denials.filter().label(), "[fs]");
+
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('f'))]);
+            assert!(!app.denials.is_filtering());
+        }
+
+        /// The bug this pins: both offsets are clamped against how much there is
+        /// to show, and a filter changes that under them. Without the reset,
+        /// narrowing a long list leaves the view somewhere past the end of the
+        /// short one it just became.
+        #[test]
+        fn narrowing_the_lists_brings_both_views_back_to_where_they_read_from() {
+            let mut app = app(120, 40);
+            with_refusals(&mut app, 60);
+            let (blocked, recent) = app.panel_heights().expect("a panel fits at this width");
+            app.blocked_key(press(KeyCode::End), blocked);
+            app.recent_key(press(KeyCode::Home), recent);
+            assert!(app.panel_scroll > 0);
+            assert!(app.history_scroll > 0);
+
+            type_keys(&mut app, &[prefix(), press(KeyCode::Char('n'))]);
+            assert_eq!(app.panel_scroll, 0);
+            assert_eq!(app.history_scroll, 0);
         }
 
         /// The whole point of the change: a command that is over does not take
