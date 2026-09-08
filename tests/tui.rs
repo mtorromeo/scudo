@@ -217,7 +217,9 @@ fn the_panel_says_why_it_has_nothing_in_it() {
     let mut cmd = scudo();
     cmd.args(["--tui", "--", "/bin/echo", "marker-panel"]);
     let (screen, _) = drive(&mut cmd, &[("marker-panel", b"q")]);
-    assert!(screen.contains("blocked (0)"), "{screen}");
+    // The heading is a filled bar with the count right-aligned against the
+    // panel's edge, so the two are not next to each other on the screen.
+    assert!(screen.contains("BLOCKED"), "{screen}");
     // Nothing restricts this command, so there is nothing that could have been
     // taken from it — not on the network and not on disk.
     assert!(screen.contains("no policy applies"), "{screen}");

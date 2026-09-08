@@ -595,17 +595,23 @@ $ scudo --tui -- bash
 ```
 
 ```
-┌ bash ─────────────────────────────┬─ blocked (3) ──────┐
-│ $ curl https://ads.example/        │ ads.example    2x  │
-│ curl: (6) Could not resolve host   │ 1.1.1.1:443    1x  │
-│ $                                  │                    │
-│                                    ├────────────────────┤
-│                                    │  1s blocked DNS …  │
-│                                    │  4s blocked conn…  │
-├────────────────────────────────────┴────────────────────┤
-│ ^A ? help │ terminal │ blocked 3                        │
-└─────────────────────────────────────────────────────────┘
+                                     │▌ BLOCKED               3 │
+ $ curl https://ads.example/         │ ● ads.example      2x    │
+ curl: (6) Could not resolve host    │ ● 1.1.1.1:443      1x    │
+ $                                   │ ○ /usr/lib/libz.so 9x    │
+                                     │                          │
+                                     │  RECENT                  │
+                                     │   1s blocked DNS for ads…│
+                                     │   4s blocked connect to …│
+ ^A  ? for help                        terminal │ blocked 3
 ```
+
+The command's terminal is the only part of the screen left unpainted, so what shows through
+it is the host terminal's own background; everything else — the panel, its two headings, the
+status bar — carries scudo's own dark theme. A filled `●` is something the sandbox refused,
+a hollow `○` a path that was not there outside it either (`^A m`). The headings sit above
+their lists rather than in them, so they stay put while the lists scroll, and each list has
+a scrollbar down its right edge once there is more of it than there is room.
 
 The left panel is a terminal in full: colours, resizing, scrollback, the mouse, and job
 control. A shell runs in it as it would anywhere, `Ctrl-C` and `Ctrl-Z` included — in this

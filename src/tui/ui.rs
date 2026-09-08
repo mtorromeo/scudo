@@ -3,18 +3,32 @@
 //! [`regions`] is deliberately a plain function of the area rather than
 //! something the drawing code works out as it goes: the pty has to be opened at
 //! the terminal panel's size *before* the first frame is ever drawn, so the
-//! split has to be answerable without a frame in hand.
+//! split has to be answerable without a frame in hand. [`panel_split`] and
+//! [`section_body`] are public for the same reason turned the other way round —
+//! the keys that scroll the panel's lists have to measure themselves against the
+//! very rectangles the drawing uses, and a second copy of the arithmetic is a
+//! second copy to keep in step.
+//!
+//! **Everything but the command's terminal is painted.** The panel, the context
+//! area, the status bar and the help all carry [`Theme::panel`] or one of its
+//! neighbours; the terminal carries nothing, so what shows through it is the host
+//! terminal's own background. That contrast is the point, and it is the reason
+//! the theme is written down rather than derived from the host — see
+//! [`theme`](super::theme).
 
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-use crate::tui::denials::Denials;
+use crate::tui::{denials::Denials, theme::Theme};
 
 /// The narrowest the terminal may become before the panel is dropped
 /// altogether. Below this a shell's own output starts wrapping in ways that
@@ -33,6 +47,19 @@ pub const MAX_AUTO_PANEL_WIDTH: u16 = 60;
 /// How much of the screen the panel takes when nobody has chosen: one part in
 /// this many.
 const AUTO_PANEL_SHARE: u16 = 4;
+
+/// The row a section's heading takes. It sits above the list rather than in it,
+/// which is the whole difference: a heading drawn as the list's first line
+/// scrolls away with the list, and then the panel has two columns of numbers and
+/// nothing to say what either of them counts.
+const HEADER_ROWS: u16 = 1;
+
+/// The column kept down the right of every section for its scrollbar.
+///
+/// Kept whether or not there is anything to scroll. A gutter that appeared with
+/// the twentieth line would shift every line above it sideways at the moment
+/// someone was reading them, which costs more than the column does.
+const GUTTER_WIDTH: u16 = 1;
 
 /// Which part of the screen the keyboard is talking to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +88,7 @@ impl Focus {
         !matches!(self, Focus::Terminal)
     }
 
-    /// What the footer calls it.
+    /// What the status bar calls it.
     fn label(self) -> &'static str {
         match self {
             Focus::Terminal => "terminal",
@@ -137,6 +164,7 @@ pub struct View<'a> {
     pub reporting: Reporting,
     /// Set once the command is over; the UI stays up until a key is pressed.
     pub finished: Option<i32>,
+    pub theme: &'a Theme,
 }
 
 /// The pieces of the screen.
@@ -151,6 +179,13 @@ pub struct Regions {
 /// Stands in for what was cut. One cell, where three dots would cost two more
 /// of the width that was already too tight.
 const ELLIPSIS: char = '\u{2026}';
+
+/// The mark down the left of the heading of whichever section has the focus.
+const FOCUS_MARK: &str = "\u{258c}";
+
+/// A refusal, and a path that was simply never there.
+const REFUSED_MARK: &str = "\u{25cf}";
+const MISSING_MARK: &str = "\u{25cb}";
 
 /// The most context lines shown at once. Past this the panel would be pushing
 /// the terminal off the screen to say what it already said.
@@ -182,11 +217,10 @@ pub fn panel_width(screen: u16, chosen: Option<u16>) -> u16 {
     }
 }
 
-/// The panel's two lists: the tally above, the running log below.
+/// The panel's two sections: the tally above, the running log below.
 ///
-/// Taken out of the drawing because the keys that scroll them have to know how
-/// tall they are, and a second copy of the split would be a second copy to keep
-/// in step.
+/// A section is its heading *and* its list; [`section_body`] is what takes the
+/// heading off again.
 #[must_use]
 pub fn panel_split(panel: Rect) -> (Rect, Rect) {
     let inner = Block::default().borders(Borders::LEFT).inner(panel);
@@ -200,16 +234,44 @@ pub fn panel_split(panel: Rect) -> (Rect, Rect) {
     )
 }
 
-/// How many lines the tally draws, its heading included. What the keys that
-/// scroll it measure against, so the list stops at its last line rather than
-/// carrying on into the space past it.
+/// The part of a section its list is drawn in: below the heading, and left of
+/// the scrollbar's gutter.
+///
+/// This is what the keys that scroll a list measure against, so it has to be the
+/// one the drawing uses.
+#[must_use]
+pub fn section_body(section: Rect) -> Rect {
+    Rect {
+        x: section.x,
+        y: section.y.saturating_add(HEADER_ROWS),
+        width: section.width.saturating_sub(GUTTER_WIDTH),
+        height: section.height.saturating_sub(HEADER_ROWS),
+    }
+}
+
+/// The column the section's scrollbar goes in, beside its body.
+fn section_gutter(section: Rect) -> Rect {
+    let body = section_body(section);
+    Rect {
+        x: section.x.saturating_add(body.width),
+        y: body.y,
+        width: section.width.min(GUTTER_WIDTH),
+        height: body.height,
+    }
+}
+
+/// How many lines the tally has to draw.
+///
+/// The heading is not among them: it is drawn above the list and stays put, so
+/// counting it here would let the view scroll one line into the space past the
+/// last address.
 #[must_use]
 pub fn targets_lines(denials: &Denials) -> usize {
     if denials.is_empty() {
-        // The heading, and the note saying why there is nothing under it.
-        2usize
+        // The note saying why there is nothing here.
+        1usize
     } else {
-        denials.shown().saturating_add(1usize)
+        denials.shown()
     }
 }
 
@@ -220,7 +282,8 @@ pub fn regions(area: Rect, panel: Option<u16>, show_panel: bool, context_lines: 
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            // Plus one for the rule that separates it from the terminal.
+            // Plus one for the rule that separates it from the terminal, which
+            // is also where its heading goes.
             Constraint::Length(if context_height > 0 {
                 context_height.saturating_add(1)
             } else {
@@ -309,6 +372,9 @@ pub fn draw(frame: &mut Frame<'_>, view: &View<'_>) {
 }
 
 fn draw_terminal(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
+    // Left unpainted on purpose: the host terminal's own background is what
+    // shows through here, and it is what the panel beside it is contrasted with.
+    //
     // The block cursor is drawn by the host terminal instead, so it blinks and
     // takes the shape the person configured — which is what makes the panel
     // read as a terminal rather than as a picture of one.
@@ -330,14 +396,18 @@ fn draw_terminal(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
 }
 
 fn draw_panel(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
-    let border_style = if view.focus.in_panel() {
-        Style::default().fg(Color::Cyan)
+    let theme = view.theme;
+    let edge = if view.focus.in_panel() {
+        theme.accent
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme.border
     };
-    let block = Block::default()
+    // One block for the whole panel: it is what lays the ground down, and the
+    // sections are drawn over it.
+    let block = Block::new()
         .borders(Borders::LEFT)
-        .border_style(border_style);
+        .border_style(Style::new().fg(edge))
+        .style(theme.panel);
     frame.render_widget(block, area);
 
     let (top, bottom) = panel_split(area);
@@ -345,18 +415,80 @@ fn draw_panel(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
     draw_history(frame, view, bottom);
 }
 
-fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
+/// One section's heading: a filled bar with a label on the left and a figure on
+/// the right, in its own row so that nothing scrolls it away.
+fn draw_heading(
+    frame: &mut Frame<'_>,
+    section: Rect,
+    theme: &Theme,
+    focused: bool,
+    label: &str,
+    right: Vec<Span<'static>>,
+) {
+    if section.height == 0 || section.width == 0 {
+        return;
+    }
+    let style = if focused {
+        theme.header_focused
+    } else {
+        theme.header
+    };
+    let mark = if focused { FOCUS_MARK } else { " " };
+
+    let mut left = vec![
+        Span::raw(mark),
+        Span::styled(
+            format!(" {label}"),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let used: usize = left
+        .iter()
+        .chain(right.iter())
+        .map(|span| span.content.chars().count())
+        .sum();
+    left.push(Span::raw(
+        " ".repeat(usize::from(section.width).saturating_sub(used)),
+    ));
+    left.extend(right);
+
+    let area = Rect {
+        height: HEADER_ROWS,
+        ..section
+    };
+    frame.render_widget(Paragraph::new(Line::from(left)).style(style), area);
+}
+
+fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
+    let theme = view.theme;
     let focused = view.focus == Focus::Blocked;
-    // The held-back count is part of the heading rather than a line of its own:
-    // an empty panel that is empty only because of a toggle has to say so where
+
+    // The held-back count belongs in the heading rather than on a line of its
+    // own: a panel that is empty only because of a toggle has to say so where
     // the eye already is.
     let hidden = view.denials.hidden();
-    let title = if hidden > 0 {
-        format!("blocked ({})  +{hidden} hidden", view.denials.shown())
-    } else {
-        format!("blocked ({})", view.denials.shown())
-    };
-    let mut lines = vec![heading(&title, focused)];
+    let mut right = Vec::new();
+    if hidden > 0usize {
+        right.push(Span::styled(
+            format!("+{hidden} hidden  "),
+            Style::new().fg(theme.dim),
+        ));
+    }
+    let shown = view.denials.shown();
+    right.push(Span::styled(
+        format!("{shown} "),
+        Style::new().fg(if shown > 0usize {
+            theme.warn
+        } else {
+            theme.dim
+        }),
+    ));
+    draw_heading(frame, section, theme, focused, "BLOCKED", right);
+
+    let body = section_body(section);
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
 
     if view.denials.is_empty() {
         // Once the stream is closed nothing more can arrive, so an empty panel
@@ -366,102 +498,236 @@ fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
         } else {
             view.reporting.note()
         };
-        lines.push(Line::from(Span::styled(
-            note,
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        // The count is right-aligned against the panel edge, so the numbers line
-        // up and a long address is what gets cut instead of the figure.
-        let width = usize::from(area.width);
-        for target in view.denials.targets() {
-            let count = format!(" {}x", target.count);
-            let room = width.saturating_sub(count.len()).saturating_sub(1);
-            let label = truncate(&target.label, room);
-            let padding = " ".repeat(room.saturating_sub(label.chars().count()));
-            // A path that was missing outside the sandbox too is shown greyed:
-            // it is something the command wanted and did not get, but the
-            // sandbox is not the reason, and widening the profile would not
-            // help.
-            let (label_style, count_style) = if target.denial {
-                (Style::default(), Style::default().fg(Color::Yellow))
-            } else {
-                (
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::DarkGray),
-                )
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {label}{padding}"), label_style),
-                Span::styled(count, count_style),
-            ]));
-        }
+        let paragraph = Paragraph::new(note)
+            .style(Style::new().fg(theme.dim))
+            .block(Block::new().padding(Padding::horizontal(1)))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, body);
+        return;
     }
 
-    let paragraph = Paragraph::new(lines).scroll((view.panel_scroll, 0));
-    frame.render_widget(paragraph, area);
+    // The count is right-aligned against the gutter, so the numbers line up and
+    // a long address is what gets cut instead of the figure.
+    let width = usize::from(body.width);
+    let items: Vec<ListItem<'static>> = view
+        .denials
+        .targets()
+        .map(|target| {
+            // A space at each end: the leading one sets the count off from the
+            // address, the trailing one keeps it off the scrollbar's gutter.
+            let count = format!(" {}x ", target.count);
+            // The mark, and a space either side of it.
+            let room = width
+                .saturating_sub(count.chars().count())
+                .saturating_sub(3);
+            let label = truncate(&target.label, room);
+            let padding = " ".repeat(room.saturating_sub(label.chars().count()));
+            // A path that was missing outside the sandbox too is shown hollow
+            // and dimmed: it is something the command wanted and did not get,
+            // but the sandbox is not the reason, and widening the profile would
+            // not help.
+            let (mark, mark_colour, label_colour, count_colour) = if target.denial {
+                (REFUSED_MARK, theme.warn, theme.text, theme.warn)
+            } else {
+                (MISSING_MARK, theme.dim, theme.dim, theme.dim)
+            };
+            ListItem::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(mark, Style::new().fg(mark_colour)),
+                Span::styled(format!(" {label}{padding}"), Style::new().fg(label_colour)),
+                Span::styled(count, Style::new().fg(count_colour)),
+            ]))
+        })
+        .collect();
+
+    let total = items.len();
+    let offset = usize::from(view.panel_scroll);
+    let mut state = ListState::default().with_offset(offset);
+    frame.render_stateful_widget(List::new(items), body, &mut state);
+    draw_scrollbar(frame, section, theme, total, offset);
 }
 
-fn draw_history(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
-    let mut lines = vec![heading("most recent", view.focus == Focus::Recent)];
-    let room = usize::from(area.height).saturating_sub(1);
+fn draw_history(frame: &mut Frame<'_>, view: &View<'_>, section: Rect) {
+    let theme = view.theme;
+    let total = view.denials.recent().count();
+    let body = section_body(section);
+    let room = usize::from(body.height);
+
+    // How far back from the newest line the view has been moved, said in the
+    // heading because it is the only place it can be said: the list itself looks
+    // the same wherever it is.
+    let right = if view.history_scroll > 0usize {
+        vec![Span::styled(
+            format!("\u{2191}{} ", view.history_scroll),
+            Style::new().fg(theme.accent),
+        )]
+    } else {
+        Vec::new()
+    };
+    draw_heading(
+        frame,
+        section,
+        theme,
+        view.focus == Focus::Recent,
+        "RECENT",
+        right,
+    );
+
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+
     // Newest at the bottom, like any log: the eye goes to the last line. The
     // offset counts back from there rather than forward from the oldest, so a
     // list nobody has scrolled stays pinned to its newest line as they arrive.
-    let recent: Vec<(String, bool)> = view
+    // Left to run off the right edge rather than cut like the addresses above.
+    // These read as sentences and end with the reason, which is the same words
+    // on every line: cutting the front would take the path and keep the part
+    // that never varies.
+    let window: Vec<(String, String, bool)> = view
         .denials
         .recent()
         .rev()
         .skip(view.history_scroll)
         .take(room)
-        .map(|(age, line, denial)| (format!(" {} {line}", ago(age)), denial))
+        .map(|(age, line, denial)| (ago(age), line.to_owned(), denial))
         .collect();
-    lines.extend(recent.into_iter().rev().map(|(line, denial)| {
-        let colour = if denial { Color::Gray } else { Color::DarkGray };
-        Line::from(Span::styled(line, Style::default().fg(colour)))
-    }));
+    let items: Vec<ListItem<'static>> = window
+        .into_iter()
+        .rev()
+        .map(|(age, line, denial)| {
+            let colour = if denial { theme.text } else { theme.dim };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {age} "), Style::new().fg(theme.dim)),
+                Span::styled(line, Style::new().fg(colour)),
+            ]))
+        })
+        .collect();
+    frame.render_widget(List::new(items), body);
 
-    frame.render_widget(Paragraph::new(lines), area);
+    // The offset counts back from the newest line and the scrollbar counts
+    // forward from the oldest, hence the subtraction: they are the same place
+    // said from the two ends.
+    let from_top = total
+        .saturating_sub(room)
+        .saturating_sub(view.history_scroll);
+    draw_scrollbar(frame, section, theme, total, from_top);
+}
+
+/// The bar down a section's gutter, drawn only when there is more list than
+/// there is room. `offset` is how many lines are above the top of the view.
+fn draw_scrollbar(
+    frame: &mut Frame<'_>,
+    section: Rect,
+    theme: &Theme,
+    total: usize,
+    offset: usize,
+) {
+    let gutter = section_gutter(section);
+    let room = usize::from(gutter.height);
+    if gutter.width == 0 || room == 0 || total <= room {
+        return;
+    }
+    let mut state = ScrollbarState::new(total.saturating_sub(room))
+        .viewport_content_length(room)
+        .position(offset);
+    let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("\u{2502}"))
+        .thumb_symbol("\u{2503}")
+        .track_style(Style::new().fg(theme.border))
+        .thumb_style(Style::new().fg(theme.accent));
+    frame.render_stateful_widget(bar, gutter, &mut state);
 }
 
 fn draw_context(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
-    let block = Block::default()
+    let theme = view.theme;
+    // The heading rides in the top rule, so it costs no row of its own and
+    // `regions` can go on budgeting one line per context line plus the rule.
+    let block = Block::new()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::new().fg(theme.border))
+        .title_top(Span::styled(
+            " what scudo decided ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::horizontal(1))
+        .style(theme.panel);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let lines: Vec<Line<'_>> = view
         .context
         .iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                line.clone(),
-                Style::default().fg(Color::DarkGray),
-            ))
-        })
+        .map(|line| Line::from(Span::styled(line.clone(), Style::new().fg(theme.dim))))
         .collect();
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
-    // The panel's own width, not the footer's: the footer spans the screen.
-    let frame_width = frame.area().width;
+/// What the status bar says, and what it looks like saying it.
+struct Status {
+    /// The word in the chip on the left: the mode, or the prefix key while
+    /// there is no mode to name.
+    badge: String,
+    /// The ground the whole row is drawn on. Every state has its own, and that
+    /// is not decoration: a mode the keyboard is in has to be visible from
+    /// across the room, and the colour is what carries it — the words in the bar
+    /// are what it means, not that it happened.
+    bar: Style,
+    /// The chip, which is the bar's own colours the other way round.
+    chip: Style,
+    /// The figures on the right, which are context rather than the message.
+    aside: Style,
+    message: String,
+    /// Right-aligned, and only where there is a short message to leave room for
+    /// it.
+    right: Option<String>,
+}
+
+/// A bar that is a colour, with its chip inverted out of it. Every mode but the
+/// ordinary one, plus the command being over — the states worth interrupting a
+/// reader over.
+fn loud(theme: &Theme, colour: ratatui::style::Color) -> (Style, Style, Style) {
+    let bar = Style::new().bg(colour).fg(theme.on_accent);
+    let chip = Style::new()
+        .bg(theme.on_accent)
+        .fg(colour)
+        .add_modifier(Modifier::BOLD);
+    (bar, chip, bar)
+}
+
+fn status(view: &View<'_>, frame_width: u16) -> Status {
+    let theme = view.theme;
     // On the mode first, and on the finished command only where the two could
     // disagree: a command that is over does not stop the person resizing the
-    // panel, and the footer that says so has to survive it ending.
-    let (message, style) = match view.mode {
-        Mode::Confirm => (
-            format!(
-                "{} is still running. Stop it and leave? [y/N]",
-                view.command
-            ),
-            Style::default().bg(Color::Red).fg(Color::White),
-        ),
-        Mode::Prefix => (
-            format!("{}: press a command key, ? for the list", view.prefix_label),
-            Style::default().bg(Color::Cyan).fg(Color::Black),
-        ),
+    // panel, and the bar that says so has to survive it ending.
+    match view.mode {
+        Mode::Confirm => {
+            let (bar, chip, aside) = loud(theme, theme.danger);
+            Status {
+                badge: "STOP?".to_owned(),
+                bar,
+                chip,
+                aside,
+                message: format!(
+                    "{} is still running. Stop it and leave? [y/N]",
+                    view.command
+                ),
+                right: None,
+            }
+        }
+        Mode::Prefix => {
+            let (bar, chip, aside) = loud(theme, theme.accent);
+            Status {
+                badge: "PREFIX".to_owned(),
+                bar,
+                chip,
+                aside,
+                message: format!("{}: press a command key, ? for the list", view.prefix_label),
+                right: None,
+            }
+        }
         Mode::Resize => {
             let width = panel_width(frame_width, view.panel_width);
             let how = if view.panel_width.is_some() {
@@ -469,111 +735,222 @@ fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
             } else {
                 " (automatic)".to_owned()
             };
-            (
-                format!("panel {width} columns{how} — arrows, h/l, = for automatic, Esc to return"),
-                Style::default().bg(Color::Magenta).fg(Color::Black),
-            )
+            let (bar, chip, aside) = loud(theme, theme.alt);
+            Status {
+                badge: "RESIZE".to_owned(),
+                bar,
+                chip,
+                aside,
+                message: format!(
+                    "panel {width} columns{how} — arrows, h/l, = for automatic, Esc to return"
+                ),
+                right: None,
+            }
         }
-        Mode::Scroll => (
-            format!(
-                "scroll: {} lines back — arrows, PgUp/PgDn, Esc to return",
-                view.scrollback
-            ),
-            Style::default().bg(Color::Yellow).fg(Color::Black),
-        ),
+        Mode::Scroll => {
+            let (bar, chip, aside) = loud(theme, theme.warn);
+            Status {
+                badge: "SCROLL".to_owned(),
+                bar,
+                chip,
+                aside,
+                message: format!(
+                    "scroll: {} lines back — arrows, PgUp/PgDn, Esc to return",
+                    view.scrollback
+                ),
+                right: None,
+            }
+        }
         Mode::Help | Mode::Normal => match view.finished {
-            // The keys that were the command's are the UI's now, and this is
-            // where that is said — with where the view is, once it has been
-            // moved, since the scroll footer is not the one on screen.
-            Some(code) if view.scrollback > 0usize => (
-                format!(
-                    "{} exited with {code} — {} lines back │ press q, Esc or ^d to leave",
-                    view.command, view.scrollback
-                ),
-                Style::default().bg(Color::Blue).fg(Color::White),
-            ),
-            Some(code) => (
-                // Which list the arrows move, since the focus is the one thing
-                // this footer says that the drawing does not say louder.
-                format!(
-                    "{} exited with {code} — press q, Esc or ^d to leave │ arrows scroll {} │ {} ? help",
-                    view.command,
-                    match view.focus {
-                        Focus::Terminal => "the scrollback",
-                        Focus::Blocked => "the blocked list",
-                        Focus::Recent => "the recent list",
-                    },
-                    view.prefix_label
-                ),
-                Style::default().bg(Color::Blue).fg(Color::White),
-            ),
-            None => (
-                format!(
-                    "{} ? help │ {} │ blocked {}",
-                    view.prefix_label,
-                    view.focus.label(),
-                    view.denials.blocked()
-                ),
-                Style::default().bg(Color::DarkGray).fg(Color::White),
-            ),
+            Some(code) => {
+                // Green for a command that did what it was asked, amber for one
+                // that did not: the code is in the message either way, and this
+                // is what is read before the message is.
+                let colour = if code == 0i32 { theme.ok } else { theme.warn };
+                let (bar, chip, aside) = loud(theme, colour);
+                // The keys that were the command's are the UI's now, and this is
+                // where that is said — with where the view is, once it has been
+                // moved, since the scroll bar is not the one on screen.
+                let (message, right) = if view.scrollback > 0usize {
+                    (
+                        format!(
+                            "{} exited with {code} — {} lines back │ press q, Esc or ^d to leave",
+                            view.command, view.scrollback
+                        ),
+                        None,
+                    )
+                } else {
+                    (
+                        format!(
+                            "{} exited with {code} — press q, Esc or ^d to leave",
+                            view.command
+                        ),
+                        Some(right_status(view)),
+                    )
+                };
+                Status {
+                    badge: "DONE".to_owned(),
+                    bar,
+                    chip,
+                    aside,
+                    message,
+                    right,
+                }
+            }
+            // The one quiet state, because it is the one that is on screen for
+            // the whole run: a status bar that shouts while nothing is happening
+            // is a status bar people stop reading.
+            None => Status {
+                badge: view.prefix_label.to_owned(),
+                bar: theme.footer,
+                chip: Style::new()
+                    .bg(theme.accent)
+                    .fg(theme.on_accent)
+                    .add_modifier(Modifier::BOLD),
+                aside: theme.footer.fg(theme.dim),
+                message: "? for help".to_owned(),
+                right: Some(right_status(view)),
+            },
         },
-    };
+    }
+}
 
-    let padded = format!(" {message}");
-    frame.render_widget(Paragraph::new(padded).style(style), area);
+/// Which list the arrows move, and how much has been taken away so far. The one
+/// thing the bar says that the drawing does not say louder.
+fn right_status(view: &View<'_>) -> String {
+    format!(
+        "{} │ blocked {}",
+        view.focus.label(),
+        view.denials.blocked()
+    )
+}
+
+fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
+    // The panel's own width, not the bar's: the bar spans the screen.
+    let status = status(view, frame.area().width);
+
+    let badge = Span::styled(format!(" {} ", status.badge), status.chip);
+    let message = Span::raw(format!(" {}", status.message));
+    let right = status
+        .right
+        .map(|text| format!("{text} "))
+        .unwrap_or_default();
+
+    let used = badge
+        .content
+        .chars()
+        .count()
+        .saturating_add(message.content.chars().count())
+        .saturating_add(right.chars().count());
+    let gap = usize::from(area.width).saturating_sub(used);
+
+    let mut spans = vec![badge, message, Span::raw(" ".repeat(gap))];
+    if !right.is_empty() && gap > 0usize {
+        // Dropped rather than crushed when the message already fills the bar:
+        // half of "blocked 3" says nothing at all.
+        spans.push(Span::styled(right, status.aside));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(status.bar), area);
 }
 
 fn draw_help(frame: &mut Frame<'_>, view: &View<'_>) {
+    let theme = view.theme;
     let prefix = view.prefix_label;
     // Two lists, because after the command is over the keys are not the same
     // ones: nothing is left to type at, so the plain keys are the UI's own and
     // saying otherwise would send people looking for a prefix they do not need.
-    let entries: Vec<String> = if view.finished.is_some() {
+    let entries: Vec<(String, &str)> = if view.finished.is_some() {
         vec![
-            "q  Esc  ^d  leave".to_owned(),
-            "arrows      read the scrollback, or whichever list has the focus".to_owned(),
-            "PgUp PgDn   a screenful of it at a time".to_owned(),
-            "Home  End   the far ends of it".to_owned(),
-            "Tab         the terminal, the blocked list, the recent list".to_owned(),
-            format!("{prefix} r        set how wide the panel is"),
-            format!("{prefix} w        show or hide the panel"),
-            format!("{prefix} s        show or hide what scudo decided"),
-            format!("{prefix} m        show or hide paths missing outside the sandbox too"),
-            "?           this list".to_owned(),
+            ("q  Esc  ^d".to_owned(), "leave"),
+            (
+                "arrows".to_owned(),
+                "read the scrollback, or whichever list has the focus",
+            ),
+            ("PgUp  PgDn".to_owned(), "a screenful of it at a time"),
+            ("Home  End".to_owned(), "the far ends of it"),
+            (
+                "Tab".to_owned(),
+                "the terminal, the blocked list, the recent list",
+            ),
+            (format!("{prefix} r"), "set how wide the panel is"),
+            (format!("{prefix} w"), "show or hide the panel"),
+            (format!("{prefix} s"), "show or hide what scudo decided"),
+            (
+                format!("{prefix} m"),
+                "show or hide paths missing outside the sandbox too",
+            ),
+            ("?".to_owned(), "this list"),
         ]
     } else {
         vec![
-            format!("{prefix} q     leave, stopping the command if it still runs"),
-            format!("{prefix} {prefix}    send {prefix} to the command"),
-            format!("{prefix} Tab   move between the terminal and the panel's two lists"),
-            format!("{prefix} PgUp  read the scrollback"),
-            format!("{prefix} r     set how wide the panel is"),
-            format!("{prefix} w     show or hide the panel"),
-            format!("{prefix} s     show or hide what scudo decided"),
-            format!("{prefix} m     show or hide paths missing outside the sandbox too"),
-            format!("{prefix} ?     this list"),
+            (
+                format!("{prefix} q"),
+                "leave, stopping the command if it still runs",
+            ),
+            (
+                format!("{prefix} {prefix}"),
+                "send the prefix to the command",
+            ),
+            (
+                format!("{prefix} Tab"),
+                "move between the terminal and the panel's two lists",
+            ),
+            (format!("{prefix} PgUp"), "read the scrollback"),
+            (format!("{prefix} r"), "set how wide the panel is"),
+            (format!("{prefix} w"), "show or hide the panel"),
+            (format!("{prefix} s"), "show or hide what scudo decided"),
+            (
+                format!("{prefix} m"),
+                "show or hide paths missing outside the sandbox too",
+            ),
+            (format!("{prefix} ?"), "this list"),
         ]
     };
 
-    let width = entries
+    let keys_width = entries
         .iter()
-        .map(|line| u16::try_from(line.chars().count()).unwrap_or(u16::MAX))
+        .map(|(keys, _)| keys.chars().count())
         .max()
-        .unwrap_or(40u16)
-        .saturating_add(4u16);
-    let height = u16::try_from(entries.len())
-        .unwrap_or(8u16)
-        .saturating_add(2u16);
+        .unwrap_or(6usize);
+    let widest = entries
+        .iter()
+        .map(|(_, what)| keys_width.saturating_add(2usize).saturating_add(what.len()))
+        .max()
+        .unwrap_or(40usize);
+
+    // The border takes two columns and two rows, the padding two more columns.
+    let width = u16::try_from(widest.saturating_add(4usize)).unwrap_or(u16::MAX);
+    let height = u16::try_from(entries.len().saturating_add(2usize)).unwrap_or(u16::MAX);
     let area = centred(frame.area(), width, height);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" scudo ");
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title_top(Span::styled(
+            " scudo ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(" any key closes ", Style::new().fg(theme.dim)))
+        .padding(Padding::horizontal(1))
+        .style(theme.panel);
     let inner = block.inner(area);
-    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    let lines: Vec<Line<'_>> = entries.into_iter().map(Line::from).collect();
+
+    let lines: Vec<Line<'_>> = entries
+        .into_iter()
+        .map(|(keys, what)| {
+            let padding = " ".repeat(keys_width.saturating_sub(keys.chars().count()));
+            Line::from(vec![
+                Span::styled(
+                    keys,
+                    Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(padding),
+                Span::styled(format!("  {what}"), Style::new().fg(theme.text)),
+            ])
+        })
+        .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -593,19 +970,6 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
-}
-
-fn heading(text: &str, focused: bool) -> Line<'static> {
-    let style = if focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    };
-    Line::from(Span::styled(format!(" {text}"), style))
 }
 
 /// Cut from the left: the end of an address is the part that distinguishes it.
@@ -699,7 +1063,7 @@ mod tests {
         let panel = regions.panel.expect("a panel fits at this width");
         assert_eq!(panel.width, 34);
         assert_eq!(regions.terminal.width, 86);
-        // One row goes to the footer, whatever else is on screen.
+        // One row goes to the status bar, whatever else is on screen.
         assert_eq!(regions.terminal.height, 39);
         assert_eq!(regions.footer.height, 1);
     }
@@ -747,10 +1111,38 @@ mod tests {
         assert_eq!(blocked.y.saturating_add(blocked.height), recent.y);
     }
 
-    /// One line out and the tally scrolls into the space under its last line,
-    /// which is the bug the count exists to prevent.
+    /// The heading is above the list and the gutter is beside it; a body that
+    /// counted either would let the view scroll past what there is to read.
     #[test]
-    fn the_tally_counts_the_heading_that_is_drawn_above_it() {
+    fn a_sections_body_is_what_is_left_after_its_heading_and_its_gutter() {
+        let panel = regions(area(120, 40), Some(34), true, 0)
+            .panel
+            .expect("a panel fits at this width");
+        let (blocked, _) = panel_split(panel);
+        let body = section_body(blocked);
+        assert_eq!(body.height, blocked.height - HEADER_ROWS);
+        assert_eq!(body.width, blocked.width - GUTTER_WIDTH);
+        assert_eq!(body.y, blocked.y + HEADER_ROWS);
+        // And the gutter is the column beside it, over the same rows.
+        let gutter = section_gutter(blocked);
+        assert_eq!(gutter.x, body.x + body.width);
+        assert_eq!((gutter.width, gutter.height), (GUTTER_WIDTH, body.height));
+    }
+
+    /// A section with nothing but a heading in it, which is what a very short
+    /// window leaves: nothing may be drawn off the end of it.
+    #[test]
+    fn a_section_too_short_for_a_list_has_a_body_of_no_height() {
+        let body = section_body(area(20, 1));
+        assert_eq!(body.height, 0);
+        assert_eq!(section_gutter(area(20, 1)).height, 0);
+        assert_eq!(section_body(area(0, 0)).width, 0);
+    }
+
+    /// The heading used to be the tally's first line and scrolled away with it.
+    /// Now it is drawn above, so what scrolls is the addresses and nothing else.
+    #[test]
+    fn the_tally_counts_only_the_lines_that_scroll() {
         use crate::bpfd::protocol::{FileError, FileOp, Notification, Outside};
 
         let refused = |path: &str| Notification::FileBlocked {
@@ -761,13 +1153,12 @@ mod tests {
         };
 
         let mut denials = Denials::default();
-        // Nothing yet: the heading, and the note saying why there is nothing
-        // under it.
-        assert_eq!(targets_lines(&denials), 2);
+        // Nothing yet: the note saying why there is nothing here.
+        assert_eq!(targets_lines(&denials), 1);
         denials.push(&refused("/home/me/.bashrc"), "bash");
-        assert_eq!(targets_lines(&denials), 2);
+        assert_eq!(targets_lines(&denials), 1);
         denials.push(&refused("/home/me/.profile"), "bash");
-        assert_eq!(targets_lines(&denials), 3);
+        assert_eq!(targets_lines(&denials), 2);
     }
 
     #[test]

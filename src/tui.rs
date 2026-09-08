@@ -32,6 +32,8 @@ mod query;
 #[cfg(feature = "tui")]
 pub mod state;
 #[cfg(feature = "tui")]
+mod theme;
+#[cfg(feature = "tui")]
 mod ui;
 
 #[cfg(feature = "tui")]
@@ -65,6 +67,7 @@ mod run {
         denials::Denials,
         keys::{self, KeySpec},
         mouse, pty, query,
+        theme::Theme,
         ui::{self, Focus, Mode, Reporting, View},
     };
     use crate::bpfd::{client, protocol::Notification};
@@ -305,6 +308,8 @@ mod run {
         host: query::Host,
         /// Scans the command's output for questions and answers them.
         answerer: query::Answerer,
+        /// The colours everything but the command's terminal is drawn in.
+        theme: Theme,
     }
 
     impl App {
@@ -336,6 +341,7 @@ mod run {
                 screen_height: 0,
                 host,
                 answerer: query::Answerer::default(),
+                theme: Theme::detect(),
             }
         }
 
@@ -364,6 +370,7 @@ mod run {
                 scrollback: self.scrollback,
                 reporting: self.reporting,
                 finished: self.finished,
+                theme: &self.theme,
             };
             ui::draw(frame, &view);
         }
@@ -693,9 +700,14 @@ mod run {
                 self.show_panel,
                 self.context_lines(),
             );
+            // The bodies, not the sections: a heading is drawn above its list
+            // and does not move with it, so it is not room the keys may use.
             regions.panel.map(|panel| {
                 let (blocked, recent) = ui::panel_split(panel);
-                (blocked.height, recent.height)
+                (
+                    ui::section_body(blocked).height,
+                    ui::section_body(recent).height,
+                )
             })
         }
 
@@ -748,8 +760,7 @@ mod run {
             reason = "anything that does not move the list is for the command"
         )]
         fn recent_key(&mut self, key: KeyEvent, height: u16) -> bool {
-            // Less the heading, which is drawn above the lines and stays put.
-            let room = usize::from(height.saturating_sub(1u16));
+            let room = usize::from(height);
             let furthest = self.denials.recent().count().saturating_sub(room);
             let page = room.max(1usize);
             let at = self.history_scroll;
@@ -1026,7 +1037,7 @@ mod run {
             let mut app = app(120, 40);
             with_refusals(&mut app, 60);
             let (_, height) = app.panel_heights().expect("a panel fits at this width");
-            let room = usize::from(height) - 1;
+            let room = usize::from(height);
 
             assert_eq!(app.history_scroll, 0);
             for _ in 0..500 {
