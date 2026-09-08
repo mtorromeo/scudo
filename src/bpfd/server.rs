@@ -439,14 +439,21 @@ fn attach(token: &str, stream: &UnixStream, state: &Mutex<State>) -> Result<Resp
     for policy in &pending.policies {
         match policy {
             Policy::Network(network) => {
-                attached.push(
-                    loader::attach(network, &cgroup_dir, &pending.bus).with_context(|| {
-                        format!(
+                let result = loader::attach(network, &cgroup_dir, &pending.bus).with_context(|| {
+                    format!(
                         "attaching the network policy; if this is a permission error, check: {}",
                         caps::SETCAP_HINT
                     )
-                    })?,
-                );
+                });
+                match result {
+                    Ok(links) => attached.push(links),
+                    // An observer enforces nothing: the sandbox it watches was
+                    // already closed by `PrivateNetwork=yes`. Refusing to start
+                    // the command over it would trade what the user asked for
+                    // against what they only asked to be told about.
+                    Err(err) if network.observe_only => eprintln!("scudo-bpfd: {err:#}"),
+                    Err(err) => return Err(err),
+                }
             }
             Policy::Filesystem(fs) if fs.reports_denials() => {
                 // Watching is a courtesy, not a restriction: a daemon without

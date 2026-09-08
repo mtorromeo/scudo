@@ -219,7 +219,8 @@ default = "deny"            # "deny" (default) or "allow"
 inbound = "deny"            # "deny" (default) or "allow"
 service_manager = "deny"    # "deny" (default) or "allow"
 on_unavailable = "fail"     # "fail" (default), "no-network", or "warn"
-log = "off"                 # "off" (default) or "denied"
+log = "off"                 # "off" (default) or "denied"; "denied" is watchable
+                            # even when the policy denies everything
 
 dest = { allow = ["10.0.0.0/8", "*.crates.io"], deny = ["10.1.2.0/24"] }
 ports = { allow = [443, "53/udp"], deny = [22] }
@@ -290,7 +291,8 @@ other profile value, and `"..."` splices in the list inherited from an extended 
 each of the four lists inheriting on its own.
 
 Denying everything (`network = {}`) is realised with `PrivateNetwork=yes` and needs nothing
-else. Anything finer needs the `scudo-bpfd` helper, which attaches eBPF programs to the
+else — unless it also asks to be told what it turned away, which attaches an observer beside it;
+see [Seeing what was blocked](#seeing-what-was-blocked). Anything finer needs the `scudo-bpfd` helper, which attaches eBPF programs to the
 command's cgroup; systemd's own `IPAddressAllow=` and `SocketBindAllow=` are silently ignored
 in user units, since `systemd --user` may not load BPF programs.
 
@@ -442,8 +444,19 @@ read it, and with it off the emit sites are folded out of the eBPF programs enti
 sandbox nobody is watching pays nothing. Repeats of the same refusal within a few seconds are
 collapsed into one line — a denied connection is retried, and one `curl` would otherwise fill
 the screen — and the closing summary counts every attempt, including the ones that were never
-printed. A policy realised as `PrivateNetwork=yes` has no programs attached and therefore
-nothing to report; `--verbose` says so rather than leaving the silence to be misread.
+printed.
+
+A policy that denies everything is realised by taking the network away rather than by attaching
+anything, so on its own it has nothing to report from. Asking to be told is what changes that:
+an *observer* is attached beside the empty namespace, allowing `localhost` and denying the rest
+— which is exactly what that namespace already permits, so nothing is enforced that was not
+enforced before and loopback keeps working without reporting itself. The cgroup hooks are not
+scoped to a network namespace, which is what lets them see refusals inside one.
+
+The observer is reporting and nothing else, so losing it costs only the reporting: if
+`scudo-bpfd` cannot be reached, `on_unavailable` does **not** apply — the command runs, with the
+network still taken away, and a warning says the refusals will not be named. `scudo-bpfd` is
+needed to *watch* a deny-all policy; it is never needed to *enforce* one.
 
 ### Seeing what the filesystem restrictions hid
 

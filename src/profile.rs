@@ -2013,10 +2013,11 @@ mod tests {
         assert!(!policy.reports_denials());
     }
 
-    /// A policy realised by taking the network away has no programs attached,
-    /// so there is nothing for them to report even when asked.
+    /// A policy realised by taking the network away is still watchable: an
+    /// observer is attached beside the empty netns, so asking to be told what
+    /// was unreachable is answered rather than silently dropped.
     #[test]
-    fn a_networkless_policy_reports_nothing() {
+    fn a_networkless_policy_is_still_reported() {
         let policy = resolved_policy(
             r#"
             [curl]
@@ -2027,7 +2028,26 @@ mod tests {
             &[],
         );
         assert!(policy.is_deny_all());
+        assert!(policy.reports_denials());
+        assert!(policy.observer().is_some());
+    }
+
+    /// Nobody asked, so nothing is attached: the observer costs a ring buffer
+    /// and a process, and the deny-all path is the one that needs neither.
+    #[test]
+    fn a_networkless_policy_nobody_watches_attaches_nothing() {
+        let policy = resolved_policy(
+            r#"
+            [curl]
+            match = "curl"
+            network = {}
+            "#,
+            "curl",
+            &[],
+        );
+        assert!(policy.is_deny_all());
         assert!(!policy.reports_denials());
+        assert!(policy.observer().is_none());
     }
 
     /// Resolving a profile only collects the policy; the properties it needs

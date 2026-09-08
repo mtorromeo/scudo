@@ -78,9 +78,13 @@ fn config_with(network: &str) -> tempdir::TempDir {
 /// reading to EOF also waits for the watcher to finish — which is exactly what
 /// makes the closing summary observable here.
 fn run_probe(network: &str, port: u16, verbose: bool) -> (i32, String) {
+    run_probe_url(network, &format!("http://127.0.0.1:{port}/"), verbose)
+}
+
+/// As [`run_probe`], against whatever `url` names.
+fn run_probe_url(network: &str, url: &str, verbose: bool) -> (i32, String) {
     require_daemon();
     let dir = config_with(network);
-    let url = format!("http://127.0.0.1:{port}/");
     let mut command = Command::new(env!("CARGO_BIN_EXE_scudo"));
     command
         .env("XDG_CONFIG_HOME", dir.path())
@@ -101,7 +105,7 @@ fn run_probe(network: &str, port: u16, verbose: bool) -> (i32, String) {
             "3",
             "-o",
             "/dev/null",
-            &url,
+            url,
         ])
         .output()
         .expect("running scudo");
@@ -430,6 +434,40 @@ fn nothing_is_reported_unless_it_was_asked_for() {
     let blocked = Sink::spawn();
     let network = "network.dest.allow = [\"10.0.0.0/8\"]\n";
     let (code, stderr) = run_probe(network, blocked.port, false);
+    assert_eq!(code, CURL_COULD_NOT_CONNECT);
+    assert!(
+        !stderr.contains("blocked"),
+        "expected a quiet run, got:\n{stderr}"
+    );
+}
+
+/// Denying everything is realised by taking the network away rather than by
+/// attaching anything, but asking to be told still puts an observer beside the
+/// empty namespace — otherwise the strictest policy of all would be the only one
+/// that could not say what it turned away.
+#[test]
+#[ignore = "needs scudo-bpfd with CAP_BPF"]
+fn a_deny_all_policy_still_reports_what_it_turned_away() {
+    // No listener: a deny-all policy refuses the connection before a packet can
+    // move, so nothing has to be reachable for this to be observed.
+    let (code, stderr) = run_probe_url("network = {}\n", "http://10.255.255.1:80/", true);
+    assert_eq!(code, CURL_COULD_NOT_CONNECT);
+    assert!(
+        stderr.contains("blocked connect to 10.255.255.1:80/tcp"),
+        "expected the refusal to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("curl: blocked 10.255.255.1:80"),
+        "expected a closing summary, got:\n{stderr}"
+    );
+}
+
+/// And costs nothing when nobody is watching: the observer is attached for the
+/// reporting alone, so without it the deny-all path stays what it was.
+#[test]
+#[ignore = "needs scudo-bpfd with CAP_BPF"]
+fn a_deny_all_policy_nobody_watches_stays_quiet() {
+    let (code, stderr) = run_probe_url("network = {}\n", "http://10.255.255.1:80/", false);
     assert_eq!(code, CURL_COULD_NOT_CONNECT);
     assert!(
         !stderr.contains("blocked"),

@@ -34,6 +34,19 @@ impl Policy {
         }
     }
 
+    /// `true` when this policy restricts nothing and is only there to report.
+    ///
+    /// A filesystem policy is always one — systemd applies the restrictions and
+    /// this only watches — and so is a network observer, which sits beside a
+    /// sandbox `PrivateNetwork=yes` already closed.
+    #[must_use]
+    pub fn observes_only(&self) -> bool {
+        match self {
+            Policy::Network(policy) => policy.observe_only,
+            Policy::Filesystem(_) => true,
+        }
+    }
+
     /// Turn reporting on, whatever the profile asked for. This is what
     /// `--verbose` does: the flag can only ever make scudo louder.
     pub fn report_denials(&mut self) {
@@ -153,6 +166,12 @@ where
                     // `systemd --user` to start a sibling unit that has one.
                     push_property(&mut applied, "PrivateNetwork", "yes");
                     push_properties(&mut applied, &policy.service_manager_properties());
+                    // The netns enforces, but it cannot say what it turned away.
+                    // An observer attached beside it can, and enforces nothing
+                    // the netns was not enforcing already.
+                    if let Some(observer) = net.observer() {
+                        to_enforce.push(Policy::Network(observer));
+                    }
                     continue;
                 }
                 to_enforce.push(policy.clone());
@@ -268,9 +287,19 @@ fn degrade_to(
             ));
         }
         OnUnavailable::Warn => {
-            applied.warnings.push(format!(
-                "network policy NOT enforced ({reason}); running unfiltered"
-            ));
+            // An observer takes nothing away, so losing it costs the reporting
+            // and nothing else; saying the command runs unfiltered would be
+            // plainly false when the network was taken away by systemd.
+            if policies.iter().all(Policy::observes_only) {
+                applied.warnings.push(format!(
+                    "cannot report blocked accesses ({reason}); the policy is \
+                     still enforced"
+                ));
+            } else {
+                applied.warnings.push(format!(
+                    "network policy NOT enforced ({reason}); running unfiltered"
+                ));
+            }
         }
     }
     Ok(())
@@ -279,7 +308,7 @@ fn degrade_to(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::network::NetworkConfig;
+    use crate::policy::network::{NetworkConfig, symbolic_net};
 
     fn policy(src: &str) -> Policy {
         let config: NetworkConfig = toml::from_str(src).unwrap();
@@ -309,6 +338,87 @@ mod tests {
         let applied = apply_with(&[policy("")], unavailable).unwrap();
         assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
         assert!(applied.warnings.is_empty());
+        // Nobody asked to be told, so nothing was registered.
+        assert!(applied.token.is_none());
+    }
+
+    /// A deny-all policy that asked to be told keeps the network namespace and
+    /// gains an observer beside it: enforcement is unchanged, and the refusals
+    /// now have something to report them.
+    #[test]
+    fn a_watched_deny_all_keeps_the_namespace_and_gains_an_observer() {
+        let mut seen: Vec<Policy> = Vec::new();
+        let applied = apply_with(&[policy(r#"log = "denied""#)], |policies| {
+            seen = policies.to_vec();
+            Ok("token".to_owned())
+        })
+        .unwrap();
+
+        assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
+        assert_eq!(applied.token.as_deref(), Some("token"));
+        assert!(applied.warnings.is_empty());
+
+        assert_eq!(seen.len(), 1);
+        let observer = seen
+            .iter()
+            .find_map(|policy| match policy {
+                Policy::Network(net) => Some(net),
+                Policy::Filesystem(_) => None,
+            })
+            .unwrap();
+        assert!(observer.observe_only);
+        assert!(observer.reports_denials());
+        // What the empty netns already permits, and nothing more.
+        assert_eq!(observer.dest.allow, symbolic_net("localhost").unwrap());
+    }
+
+    /// Losing the observer costs the reporting and nothing else, so even a
+    /// policy that asked to fail closed still runs: the network was taken away
+    /// by systemd, and it is still gone.
+    #[test]
+    fn a_watched_deny_all_still_runs_without_the_daemon() {
+        let applied = apply_with(
+            &[policy(
+                r#"log = "denied"
+on_unavailable = "fail""#,
+            )],
+            unavailable,
+        )
+        .unwrap();
+
+        assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
+        assert!(applied.token.is_none());
+        assert_eq!(applied.warnings.len(), 1);
+        assert!(
+            applied
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("cannot report blocked accesses")),
+            "unexpected warnings: {:?}",
+            applied.warnings
+        );
+    }
+
+    /// An observer must not talk a real policy out of failing closed: the
+    /// strictest `on_unavailable` still wins.
+    #[test]
+    fn an_observer_does_not_soften_a_policy_that_asked_to_fail() {
+        let err = apply_with(
+            &[
+                policy(r#"log = "denied""#),
+                policy(
+                    r#"on_unavailable = "fail"
+dest.allow = ["1.1.1.1"]"#,
+                ),
+            ],
+            unavailable,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot enforce the network policy"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Every way the network gets taken away without the enforcer.

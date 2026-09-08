@@ -270,9 +270,11 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         .iter()
         .any(scudo::policy::Policy::reports_denials);
 
-    // Only when nothing else is being reported: with a second policy still
-    // watched, saying there is nothing to report would be plainly wrong.
-    if !reporting && deny_all(&resolved.policies) {
+    // Independent of what else is watched: a filesystem policy being reported
+    // says nothing about the network half, and a `[net]` panel that can only
+    // ever be empty is exactly the silence this explains.
+    let network_unwatched = unwatched_network(&resolved.policies);
+    if network_unwatched {
         debug!(
             "the network is taken away entirely, so there is nothing to report \
              blocked accesses from"
@@ -282,11 +284,15 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     let applied = scudo::policy::apply(&resolved.policies)?;
     #[cfg(feature = "tui")]
     let shim_token_present = applied.token.is_some();
-    for warning in &applied.warnings {
-        warn!("{warning}");
-    }
     resolved.systemd_args.extend(applied.systemd_args);
     let shim_token = applied.token;
+    // Kept, not just printed: with `--tui` this goes to a stderr the panel is
+    // about to draw over, and a policy that quietly lost its enforcement or its
+    // reporting is exactly what the panel has to be able to say.
+    let warnings = applied.warnings;
+    for warning in &warnings {
+        warn!("{warning}");
+    }
 
     resolved
         .systemd_args
@@ -325,12 +331,9 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
             &loaded.settings.tui,
             UiContext {
                 match_log: &resolved.match_log,
+                warnings: &warnings,
                 token: shim_token,
-                reporting: reporting_state(
-                    reporting,
-                    shim_token_present,
-                    deny_all(&resolved.policies),
-                ),
+                reporting: reporting_state(reporting, shim_token_present, network_unwatched),
                 confirm: resolved.confirm,
             },
         );
@@ -350,6 +353,9 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
 #[cfg(feature = "tui")]
 struct UiContext<'a> {
     match_log: &'a [String],
+    /// What `apply` had to weaken, which stderr can no longer carry: the panel
+    /// is about to own the screen it would have been written to.
+    warnings: &'a [String],
     token: Option<String>,
     reporting: scudo::tui::Reporting,
     confirm: bool,
@@ -357,18 +363,26 @@ struct UiContext<'a> {
 
 /// Why the panel would be empty, so it can say so rather than look broken.
 #[cfg(feature = "tui")]
-fn reporting_state(reporting: bool, enforced: bool, deny_all: bool) -> scudo::tui::Reporting {
+fn reporting_state(
+    reporting: bool,
+    attached: bool,
+    unwatched_network: bool,
+) -> scudo::tui::Reporting {
     use scudo::tui::Reporting;
-    if reporting {
-        Reporting::Watching
-    } else if deny_all {
+    match (reporting, unwatched_network) {
+        // Watching was asked for and nothing came back to watch with: the
+        // daemon could not be reached, and an observer that cannot attach is
+        // dropped rather than allowed to hold the command up.
+        (true, _) if !attached => Reporting::Unavailable,
+        // Files are watched and the network is not: saying the sandbox is being
+        // watched would leave the empty `[net]` half looking like a fault.
+        (true, true) => Reporting::FilesOnly,
+        (true, false) => Reporting::Watching,
         // Nothing is attached, so nothing observes what the command then fails
         // to reach; an empty panel here is the truth and not a fault.
-        Reporting::DenyAll
-    } else if enforced {
-        Reporting::Unavailable
-    } else {
-        Reporting::NoPolicy
+        (false, true) => Reporting::DenyAll,
+        (false, false) if attached => Reporting::Unavailable,
+        (false, false) => Reporting::NoPolicy,
     }
 }
 
@@ -398,6 +412,12 @@ fn start_ui(
     // instead: printing it would put it underneath the drawing, where it would
     // be both invisible and in the way.
     let mut lines: Vec<String> = context.match_log.to_vec();
+    lines.extend(
+        context
+            .warnings
+            .iter()
+            .map(|warning| format!("warning: {warning}")),
+    );
     lines.push(format!("running: {cmdline}"));
 
     let config = match args.tui_prefix.clone() {
@@ -460,12 +480,17 @@ fn start_ui(
     exit(outcome.code);
 }
 
-/// `true` when a policy leaves the command with no network at all, which
-/// systemd realises on its own — no programs are attached, so nothing observes
-/// what the command then fails to reach.
-fn deny_all(policies: &[scudo::policy::Policy]) -> bool {
+/// `true` when a policy leaves the command with no network at all and nobody
+/// asked to watch it: systemd realises that on its own, so no programs are
+/// attached and nothing observes what the command then fails to reach.
+///
+/// A deny-all policy that *did* ask gets an observer attached beside the empty
+/// netns instead, and is watched like any other.
+fn unwatched_network(policies: &[scudo::policy::Policy]) -> bool {
     policies.iter().any(|policy| match policy {
-        scudo::policy::Policy::Network(network) => network.is_deny_all(),
+        scudo::policy::Policy::Network(network) => {
+            network.is_deny_all() && !network.reports_denials()
+        }
         // It says nothing about the network either way.
         scudo::policy::Policy::Filesystem(_) => false,
     })
@@ -521,4 +546,67 @@ fn shim(token: &str, args: &Args) -> Result<()> {
         .args(&args.command_args)
         .exec();
     Err(anyhow::Error::from(err).context("exec failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use scudo::policy::{FilesystemPolicy, LogLevel, Policy, network::NetworkConfig};
+
+    use super::{reporting_state, unwatched_network};
+
+    fn network(src: &str) -> Policy {
+        let config: NetworkConfig = toml::from_str(src).unwrap();
+        Policy::Network(config.try_into().unwrap())
+    }
+
+    /// Nobody asked, so nothing is attached: the empty panel is the truth.
+    #[test]
+    fn an_unwatched_deny_all_is_owned_up_to() {
+        assert!(unwatched_network(&[network("")]));
+    }
+
+    /// Asking is what attaches the observer, and an observed deny-all is
+    /// watched like any other policy.
+    #[test]
+    fn a_watched_deny_all_is_not_silent() {
+        assert!(!unwatched_network(&[network(r#"log = "denied""#)]));
+    }
+
+    /// The filesystem half says nothing about the network half. This is the
+    /// case that used to announce "watching" over a `[net]` panel that could
+    /// only ever be empty.
+    #[test]
+    fn watched_files_do_not_speak_for_an_unwatched_network() {
+        let policies = [
+            network(""),
+            Policy::Filesystem(FilesystemPolicy {
+                log: LogLevel::Denied,
+            }),
+        ];
+        assert!(unwatched_network(&policies));
+        assert_eq!(
+            reporting_state(true, true, true),
+            scudo::tui::Reporting::FilesOnly
+        );
+    }
+
+    /// Reporting was asked for and nothing attached to answer with: an observer
+    /// that cannot reach the daemon is dropped rather than allowed to hold the
+    /// command up, so the panel must not claim to be watching.
+    #[test]
+    fn asking_to_watch_is_not_being_able_to() {
+        assert_eq!(
+            reporting_state(true, false, false),
+            scudo::tui::Reporting::Unavailable
+        );
+    }
+
+    #[test]
+    fn the_panel_says_why_it_is_empty() {
+        use scudo::tui::Reporting;
+        assert_eq!(reporting_state(true, true, false), Reporting::Watching);
+        assert_eq!(reporting_state(false, true, true), Reporting::DenyAll);
+        assert_eq!(reporting_state(false, true, false), Reporting::Unavailable);
+        assert_eq!(reporting_state(false, false, false), Reporting::NoPolicy);
+    }
 }

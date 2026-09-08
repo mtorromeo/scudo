@@ -164,6 +164,13 @@ pub struct NetworkPolicy {
     /// events when the loader has told them to.
     #[serde(default)]
     pub log: LogLevel,
+    /// Whether this policy only watches. An observer is attached beside a
+    /// sandbox that systemd already closed, purely so that what it turns away
+    /// has something to report it: the programs enforce nothing the netns was
+    /// not enforcing already, and failing to attach them costs the command
+    /// nothing but the reporting it asked for. See [`NetworkPolicy::observer`].
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub observe_only: bool,
     pub dest: RuleSet<Destination>,
     pub ports: RuleSet<PortRule>,
 }
@@ -209,11 +216,44 @@ impl NetworkPolicy {
 
     /// `true` when the sandbox should report the accesses it turns away.
     ///
-    /// Only an enforced policy can: a `PrivateNetwork=yes` sandbox has no
-    /// programs attached and nothing to report from.
+    /// A deny-all policy counts: it is realised by taking the network away, but
+    /// an [observer](NetworkPolicy::observer) can still be attached beside the
+    /// empty netns to say what was reached for. Only a policy that restricts
+    /// nothing has nothing to report, since nothing is ever turned away.
     #[must_use]
     pub fn reports_denials(&self) -> bool {
-        self.log == LogLevel::Denied && self.requires_enforcer()
+        self.log == LogLevel::Denied && !self.is_unrestricted()
+    }
+
+    /// The policy to attach beside a deny-all sandbox so that its refusals can
+    /// be reported, or `None` when there is nothing to observe.
+    ///
+    /// Denying everything is realised with `PrivateNetwork=yes`, which attaches
+    /// no programs, so a command that asked to be told what it could not reach
+    /// hears nothing. The cgroup hooks are not scoped to a network namespace,
+    /// though, so they can be attached inside the empty one — and a policy that
+    /// allows `localhost` and denies the rest is exactly what that namespace
+    /// already permits. Enforcement and behaviour are therefore unchanged: the
+    /// loopback the netns leaves working stays working and reports nothing,
+    /// everything else was unreachable before and is now unreachable *and*
+    /// named.
+    #[must_use]
+    pub fn observer(&self) -> Option<NetworkPolicy> {
+        if !self.is_deny_all() || self.log != LogLevel::Denied {
+            return None;
+        }
+        Some(NetworkPolicy {
+            observe_only: true,
+            // The netns is doing the enforcing, so not being able to attach is
+            // never a reason to refuse the command: it costs the reporting and
+            // nothing else.
+            on_unavailable: OnUnavailable::Warn,
+            dest: RuleSet {
+                allow: symbolic_net("localhost").unwrap_or_default(),
+                deny: self.dest.deny.clone(),
+            },
+            ..self.clone()
+        })
     }
 
     /// `true` when the policy needs its own DNS resolver.
@@ -386,6 +426,7 @@ impl TryFrom<NetworkConfig> for NetworkPolicy {
             service_manager: config.service_manager.unwrap_or_default(),
             on_unavailable: config.on_unavailable.unwrap_or_default(),
             log: config.log.unwrap_or_default(),
+            observe_only: false,
             dest: RuleSet {
                 allow: destinations(config.dest.allow)?,
                 deny: destinations(config.dest.deny)?,
@@ -492,7 +533,7 @@ fn max_prefix_len(addr: IpAddr) -> u8 {
 
 /// The symbolic network names systemd's `IPAddressAllow=` accepts, so a rule
 /// can be written the same way here.
-fn symbolic_net(name: &str) -> Option<Vec<Destination>> {
+pub(crate) fn symbolic_net(name: &str) -> Option<Vec<Destination>> {
     let nets: &[(&str, u8)] = match name {
         "any" => &[("0.0.0.0", 0u8), ("::", 0u8)],
         "localhost" => &[("127.0.0.0", 8u8), ("::1", 128u8)],
@@ -979,5 +1020,62 @@ mod tests {
 
         let config: NetworkConfig = toml::from_str(r#"ports = { allow = ["$PORT"] }"#).unwrap();
         config.validate().unwrap();
+    }
+
+    /// The observer exists for the reporting, so without it there is nothing to
+    /// attach and nothing to pay for.
+    #[test]
+    fn an_unwatched_deny_all_has_no_observer() {
+        assert!(policy("").unwrap().observer().is_none());
+    }
+
+    /// A policy already enforced by the programs needs no observer beside it:
+    /// it is the one attaching them.
+    #[test]
+    fn an_enforced_policy_has_no_observer() {
+        let p = policy(
+            r#"log = "denied"
+dest = { allow = ["1.1.1.1"] }"#,
+        )
+        .unwrap();
+        assert!(p.observer().is_none());
+    }
+
+    /// The observer models the empty network namespace: loopback goes through,
+    /// nothing else does, and it enforces nothing that was not already gone.
+    #[test]
+    fn the_observer_mirrors_the_empty_namespace() {
+        let observer = policy(r#"log = "denied""#).unwrap().observer().unwrap();
+
+        assert!(observer.observe_only);
+        assert_eq!(observer.default, Action::Deny);
+        assert_eq!(observer.inbound, Action::Deny);
+        assert_eq!(observer.dest.allow, symbolic_net("localhost").unwrap());
+        assert!(observer.ports.allow.is_empty());
+        // Only the enforcer can report, so the observer has to need one.
+        assert!(observer.requires_enforcer());
+        assert!(observer.reports_denials());
+        // Not being able to watch is never a reason to refuse the command: the
+        // namespace is doing the enforcing either way.
+        assert_eq!(observer.on_unavailable, OnUnavailable::Warn);
+        // Naming no host means no DNS proxy to start.
+        assert!(!observer.needs_resolver());
+    }
+
+    /// Whatever the profile said to keep out stays kept out: the observer is a
+    /// copy of the policy, not a replacement for it.
+    #[test]
+    fn the_observer_keeps_the_policys_own_settings() {
+        let observer = policy(
+            r#"log = "denied"
+service_manager = "allow"
+dest = { deny = ["10.0.0.0/8"] }"#,
+        )
+        .unwrap()
+        .observer()
+        .unwrap();
+
+        assert_eq!(observer.service_manager, Action::Allow);
+        assert_eq!(observer.dest.deny, parse_dest("10.0.0.0/8").unwrap());
     }
 }

@@ -128,6 +128,9 @@ pub enum Reporting {
     Watching,
     /// The whole network was taken away, so nothing observes what is missed.
     DenyAll,
+    /// Files are watched, but the network was taken away entirely, so the
+    /// network half of the panel can only ever be empty.
+    FilesOnly,
     /// Nothing to enforce on this command.
     NoPolicy,
     /// The policy is enforced, but the daemon could not be asked to report.
@@ -140,6 +143,9 @@ impl Reporting {
             Reporting::Watching => "watching for blocked accesses",
             Reporting::DenyAll => {
                 "the network is taken away entirely, so there is nothing to report"
+            }
+            Reporting::FilesOnly => {
+                "the network is taken away entirely; only file accesses are reported"
             }
             Reporting::NoPolicy => "no policy applies to this command",
             Reporting::Unavailable => "the sandbox could not be watched",
