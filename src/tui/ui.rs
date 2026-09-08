@@ -34,11 +34,41 @@ pub const MAX_AUTO_PANEL_WIDTH: u16 = 60;
 /// this many.
 const AUTO_PANEL_SHARE: u16 = 4;
 
-/// Which half the keyboard is talking to.
+/// Which part of the screen the keyboard is talking to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Terminal,
-    Panel,
+    /// The tally at the top of the panel.
+    Blocked,
+    /// The running list underneath it.
+    Recent,
+}
+
+impl Focus {
+    /// The next one round, which is what `Tab` moves to.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Focus::Terminal => Focus::Blocked,
+            Focus::Blocked => Focus::Recent,
+            Focus::Recent => Focus::Terminal,
+        }
+    }
+
+    /// Whether it is one of the panel's two lists.
+    #[must_use]
+    pub fn in_panel(self) -> bool {
+        !matches!(self, Focus::Terminal)
+    }
+
+    /// What the footer calls it.
+    fn label(self) -> &'static str {
+        match self {
+            Focus::Terminal => "terminal",
+            Focus::Blocked => "blocked list",
+            Focus::Recent => "recent list",
+        }
+    }
 }
 
 /// What the UI is in the middle of.
@@ -101,6 +131,8 @@ pub struct View<'a> {
     /// `None` while the width follows the screen; `Some` once it was chosen.
     pub panel_width: Option<u16>,
     pub panel_scroll: u16,
+    /// How far back from its newest line the running list has been moved.
+    pub history_scroll: usize,
     pub scrollback: usize,
     pub reporting: Reporting,
     /// Set once the command is over; the UI stays up until a key is pressed.
@@ -147,6 +179,37 @@ pub fn panel_width(screen: u16, chosen: Option<u16>) -> u16 {
         None => (screen / AUTO_PANEL_SHARE)
             .clamp(MIN_PANEL_WIDTH, MAX_AUTO_PANEL_WIDTH)
             .min(widest),
+    }
+}
+
+/// The panel's two lists: the tally above, the running log below.
+///
+/// Taken out of the drawing because the keys that scroll them have to know how
+/// tall they are, and a second copy of the split would be a second copy to keep
+/// in step.
+#[must_use]
+pub fn panel_split(panel: Rect) -> (Rect, Rect) {
+    let inner = Block::default().borders(Borders::LEFT).inner(panel);
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(inner);
+    (
+        split.first().copied().unwrap_or(inner),
+        split.get(1).copied().unwrap_or(inner),
+    )
+}
+
+/// How many lines the tally draws, its heading included. What the keys that
+/// scroll it measure against, so the list stops at its last line rather than
+/// carrying on into the space past it.
+#[must_use]
+pub fn targets_lines(denials: &Denials) -> usize {
+    if denials.is_empty() {
+        // The heading, and the note saying why there is nothing under it.
+        2usize
+    } else {
+        denials.shown().saturating_add(1usize)
     }
 }
 
@@ -267,8 +330,7 @@ fn draw_terminal(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
 }
 
 fn draw_panel(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
-    let focused = view.focus == Focus::Panel;
-    let border_style = if focused {
+    let border_style = if view.focus.in_panel() {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
@@ -276,21 +338,15 @@ fn draw_panel(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(border_style);
-    let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(inner);
-    let top = split.first().copied().unwrap_or(inner);
-    let bottom = split.get(1).copied().unwrap_or(inner);
-
-    draw_targets(frame, view, top, focused);
+    let (top, bottom) = panel_split(area);
+    draw_targets(frame, view, top);
     draw_history(frame, view, bottom);
 }
 
-fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect, focused: bool) {
+fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
+    let focused = view.focus == Focus::Blocked;
     // The held-back count is part of the heading rather than a line of its own:
     // an empty panel that is empty only because of a toggle has to say so where
     // the eye already is.
@@ -347,13 +403,16 @@ fn draw_targets(frame: &mut Frame<'_>, view: &View<'_>, area: Rect, focused: boo
 }
 
 fn draw_history(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
-    let mut lines = vec![heading("most recent", false)];
+    let mut lines = vec![heading("most recent", view.focus == Focus::Recent)];
     let room = usize::from(area.height).saturating_sub(1);
-    // Newest at the bottom, like any log: the eye goes to the last line.
+    // Newest at the bottom, like any log: the eye goes to the last line. The
+    // offset counts back from there rather than forward from the oldest, so a
+    // list nobody has scrolled stays pinned to its newest line as they arrive.
     let recent: Vec<(String, bool)> = view
         .denials
         .recent()
         .rev()
+        .skip(view.history_scroll)
         .take(room)
         .map(|(age, line, denial)| (format!(" {} {line}", ago(age)), denial))
         .collect();
@@ -388,26 +447,22 @@ fn draw_context(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
 fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
     // The panel's own width, not the footer's: the footer spans the screen.
     let frame_width = frame.area().width;
-    let (message, style) = match (view.finished, view.mode) {
-        (Some(code), _) => (
-            format!(
-                "{} exited with {code} — press q, Esc or ^d to leave",
-                view.command
-            ),
-            Style::default().bg(Color::Blue).fg(Color::White),
-        ),
-        (None, Mode::Confirm) => (
+    // On the mode first, and on the finished command only where the two could
+    // disagree: a command that is over does not stop the person resizing the
+    // panel, and the footer that says so has to survive it ending.
+    let (message, style) = match view.mode {
+        Mode::Confirm => (
             format!(
                 "{} is still running. Stop it and leave? [y/N]",
                 view.command
             ),
             Style::default().bg(Color::Red).fg(Color::White),
         ),
-        (None, Mode::Prefix) => (
+        Mode::Prefix => (
             format!("{}: press a command key, ? for the list", view.prefix_label),
             Style::default().bg(Color::Cyan).fg(Color::Black),
         ),
-        (None, Mode::Resize) => {
+        Mode::Resize => {
             let width = panel_width(frame_width, view.panel_width);
             let how = if view.panel_width.is_some() {
                 String::new()
@@ -419,25 +474,49 @@ fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
                 Style::default().bg(Color::Magenta).fg(Color::Black),
             )
         }
-        (None, Mode::Scroll) => (
+        Mode::Scroll => (
             format!(
                 "scroll: {} lines back — arrows, PgUp/PgDn, Esc to return",
                 view.scrollback
             ),
             Style::default().bg(Color::Yellow).fg(Color::Black),
         ),
-        (None, Mode::Help | Mode::Normal) => (
-            format!(
-                "{} ? help │ {} │ blocked {}",
-                view.prefix_label,
-                match view.focus {
-                    Focus::Terminal => "terminal",
-                    Focus::Panel => "panel",
-                },
-                view.denials.blocked()
+        Mode::Help | Mode::Normal => match view.finished {
+            // The keys that were the command's are the UI's now, and this is
+            // where that is said — with where the view is, once it has been
+            // moved, since the scroll footer is not the one on screen.
+            Some(code) if view.scrollback > 0usize => (
+                format!(
+                    "{} exited with {code} — {} lines back │ press q, Esc or ^d to leave",
+                    view.command, view.scrollback
+                ),
+                Style::default().bg(Color::Blue).fg(Color::White),
             ),
-            Style::default().bg(Color::DarkGray).fg(Color::White),
-        ),
+            Some(code) => (
+                // Which list the arrows move, since the focus is the one thing
+                // this footer says that the drawing does not say louder.
+                format!(
+                    "{} exited with {code} — press q, Esc or ^d to leave │ arrows scroll {} │ {} ? help",
+                    view.command,
+                    match view.focus {
+                        Focus::Terminal => "the scrollback",
+                        Focus::Blocked => "the blocked list",
+                        Focus::Recent => "the recent list",
+                    },
+                    view.prefix_label
+                ),
+                Style::default().bg(Color::Blue).fg(Color::White),
+            ),
+            None => (
+                format!(
+                    "{} ? help │ {} │ blocked {}",
+                    view.prefix_label,
+                    view.focus.label(),
+                    view.denials.blocked()
+                ),
+                Style::default().bg(Color::DarkGray).fg(Color::White),
+            ),
+        },
     };
 
     let padded = format!(" {message}");
@@ -446,17 +525,35 @@ fn draw_footer(frame: &mut Frame<'_>, view: &View<'_>, area: Rect) {
 
 fn draw_help(frame: &mut Frame<'_>, view: &View<'_>) {
     let prefix = view.prefix_label;
-    let entries = [
-        format!("{prefix} q     leave, stopping the command if it still runs"),
-        format!("{prefix} {prefix}    send {prefix} to the command"),
-        format!("{prefix} Tab   move between the terminal and the panel"),
-        format!("{prefix} PgUp  read the scrollback"),
-        format!("{prefix} r     set how wide the panel is"),
-        format!("{prefix} w     show or hide the panel"),
-        format!("{prefix} s     show or hide what scudo decided"),
-        format!("{prefix} m     show or hide paths missing outside the sandbox too"),
-        format!("{prefix} ?     this list"),
-    ];
+    // Two lists, because after the command is over the keys are not the same
+    // ones: nothing is left to type at, so the plain keys are the UI's own and
+    // saying otherwise would send people looking for a prefix they do not need.
+    let entries: Vec<String> = if view.finished.is_some() {
+        vec![
+            "q  Esc  ^d  leave".to_owned(),
+            "arrows      read the scrollback, or whichever list has the focus".to_owned(),
+            "PgUp PgDn   a screenful of it at a time".to_owned(),
+            "Home  End   the far ends of it".to_owned(),
+            "Tab         the terminal, the blocked list, the recent list".to_owned(),
+            format!("{prefix} r        set how wide the panel is"),
+            format!("{prefix} w        show or hide the panel"),
+            format!("{prefix} s        show or hide what scudo decided"),
+            format!("{prefix} m        show or hide paths missing outside the sandbox too"),
+            "?           this list".to_owned(),
+        ]
+    } else {
+        vec![
+            format!("{prefix} q     leave, stopping the command if it still runs"),
+            format!("{prefix} {prefix}    send {prefix} to the command"),
+            format!("{prefix} Tab   move between the terminal and the panel's two lists"),
+            format!("{prefix} PgUp  read the scrollback"),
+            format!("{prefix} r     set how wide the panel is"),
+            format!("{prefix} w     show or hide the panel"),
+            format!("{prefix} s     show or hide what scudo decided"),
+            format!("{prefix} m     show or hide paths missing outside the sandbox too"),
+            format!("{prefix} ?     this list"),
+        ]
+    };
 
     let width = entries
         .iter()
@@ -632,6 +729,45 @@ mod tests {
     fn the_command_is_never_told_it_has_no_room_at_all() {
         let (rows, cols) = terminal_size(area(0, 0), Some(34), true, 0);
         assert_eq!((rows, cols), (1, 1));
+    }
+
+    /// The keys that scroll the panel's lists measure themselves against this
+    /// split, so it has to be the one the drawing uses.
+    #[test]
+    fn the_panel_is_split_between_the_tally_and_the_log() {
+        let panel = regions(area(120, 40), Some(34), true, 0)
+            .panel
+            .expect("a panel fits at this width");
+        let (blocked, recent) = panel_split(panel);
+        // The border takes a column of the panel's width.
+        assert_eq!(blocked.width, 33);
+        assert_eq!(recent.width, 33);
+        // And the two share its height, one under the other.
+        assert_eq!(blocked.height.saturating_add(recent.height), panel.height);
+        assert_eq!(blocked.y.saturating_add(blocked.height), recent.y);
+    }
+
+    /// One line out and the tally scrolls into the space under its last line,
+    /// which is the bug the count exists to prevent.
+    #[test]
+    fn the_tally_counts_the_heading_that_is_drawn_above_it() {
+        use crate::bpfd::protocol::{FileError, FileOp, Notification, Outside};
+
+        let refused = |path: &str| Notification::FileBlocked {
+            op: FileOp::Open,
+            path: path.to_owned(),
+            error: FileError::Permission,
+            outside: Outside::Present,
+        };
+
+        let mut denials = Denials::default();
+        // Nothing yet: the heading, and the note saying why there is nothing
+        // under it.
+        assert_eq!(targets_lines(&denials), 2);
+        denials.push(&refused("/home/me/.bashrc"), "bash");
+        assert_eq!(targets_lines(&denials), 2);
+        denials.push(&refused("/home/me/.profile"), "bash");
+        assert_eq!(targets_lines(&denials), 3);
     }
 
     #[test]

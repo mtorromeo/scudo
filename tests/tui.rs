@@ -131,6 +131,85 @@ fn a_finished_command_waits_for_a_key_and_says_what_it_exited_with() {
     assert_eq!(code, 3);
 }
 
+/// The whole point of keeping the UI up: everything it can do, it can still
+/// do. The prefix reaches the UI's own keys, and the help they open is the one
+/// written for a command that is over.
+#[test]
+fn a_finished_command_leaves_the_prefix_and_its_help_working() {
+    let mut cmd = scudo();
+    cmd.args(["--tui", "--", "/bin/sh", "-c", "exit 0"]);
+    let (screen, _) = drive(
+        &mut cmd,
+        &[
+            // `^A ?`, after the command is over rather than while it runs.
+            ("press q, Esc", b"\x01?"),
+            // A single word, because the drawing puts cursor moves between
+            // them: what is on screen is not what is in the buffer.
+            ("scrollback", b" "),
+            ("press q, Esc", b"q"),
+        ],
+    );
+    assert!(screen.contains("scrollback"), "{screen}");
+}
+
+/// The panel can still be set up after the fact, which is when the person has
+/// actually seen how much of it they needed.
+#[test]
+fn a_finished_command_can_still_have_its_panel_resized_and_hidden() {
+    let mut cmd = scudo();
+    cmd.args(["--tui", "--", "/bin/echo", "marker-done"]);
+    let (screen, _) = drive(
+        &mut cmd,
+        &[
+            // 120 columns wide, so it starts at the 34-column floor; four leaps
+            // of five widen it to 54.
+            ("press q, Esc", b"\x01rhhhh"),
+            // Out of the resize mode, then hide the panel.
+            ("panel 54 columns", b"q\x01w"),
+            // Bring it back and widen it once more. That the resize mode opens
+            // at all is the proof the panel returned: it is refused while the
+            // panel is hidden.
+            ("press q, Esc", b"\x01w\x01rh"),
+            ("panel 59 columns", b"q"),
+            ("press q, Esc", b"q"),
+        ],
+    );
+    assert!(screen.contains("panel 59 columns"), "{screen}");
+}
+
+/// Reading back what a command printed is the reason to stay, and the plain
+/// keys do it: with nothing left to type at, asking for a mode first would be a
+/// step for nothing.
+#[test]
+fn a_finished_command_can_still_have_its_scrollback_read() {
+    let mut cmd = scudo();
+    // Five times the height, so the first line is long gone off the top by the
+    // time the command is over.
+    cmd.args([
+        "--tui",
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo marker-topmost; seq 1 200",
+    ]);
+    let (screen, _) = drive(
+        &mut cmd,
+        &[
+            // Home, with no prefix and no scroll mode asked for.
+            ("press q, Esc", b"\x1b[H"),
+            ("press q, Esc", b"q"),
+        ],
+    );
+    // Counted rather than looked for: it was printed once on the way past, and
+    // drawn a second time when the view went back up to it. The footer would
+    // have said so too, but the drawing rewrites only the cells that changed
+    // and puts cursor moves through the middle of its words.
+    assert!(
+        screen.matches("marker-topmost").count() >= 2,
+        "the top of the scrollback should have been drawn again: {screen}"
+    );
+}
+
 /// The panel is drawn even with no policy to report on, and says why it is
 /// empty rather than looking like reporting that failed to start.
 #[test]

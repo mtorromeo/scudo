@@ -204,6 +204,7 @@ mod run {
             height: area.height,
         };
         app.screen_width = area.width;
+        app.screen_height = area.height;
         let (rows, cols) =
             ui::terminal_size(area, app.panel_width, app.show_panel, app.context_lines());
 
@@ -280,9 +281,12 @@ mod run {
         /// `None` while the width follows the screen; `Some` once it was set.
         panel_width: Option<u16>,
         panel_scroll: u16,
+        /// How far back from its newest line the running list has been moved.
+        history_scroll: usize,
         scrollback: usize,
         max_scrollback: usize,
-        /// Set once the command has exited; the UI stays up until a key is hit.
+        /// Set once the command has exited. The UI stays up, and stays usable:
+        /// only the keys that were bytes for the command change meaning.
         finished: Option<i32>,
         /// What scudo itself will exit with.
         code: i32,
@@ -291,10 +295,11 @@ mod run {
         /// The size the pty was last told about, so a redraw that changed
         /// nothing does not resize it again.
         size: (u16, u16),
-        /// The width of the whole screen, which is what a panel width has to be
-        /// judged against. Kept because the resize keys need it and the terminal
-        /// is not theirs to ask.
+        /// The size of the whole screen, which is what a panel width has to be
+        /// judged against and what the panel's lists are scrolled within. Kept
+        /// because those keys need it and the terminal is not theirs to ask.
         screen_width: u16,
+        screen_height: u16,
         /// What the host terminal said about its colours, ready to be repeated
         /// to a command that asks scudo the same.
         host: query::Host,
@@ -319,6 +324,7 @@ mod run {
                 show_context: false,
                 panel_width: options.panel_width,
                 panel_scroll: 0,
+                history_scroll: 0,
                 scrollback: 0,
                 max_scrollback: options.config.scrollback(),
                 finished: None,
@@ -327,6 +333,7 @@ mod run {
                 mouse_captured: false,
                 size: (0, 0),
                 screen_width: 0,
+                screen_height: 0,
                 host,
                 answerer: query::Answerer::default(),
             }
@@ -353,6 +360,7 @@ mod run {
                 show_panel: self.show_panel,
                 panel_width: self.panel_width,
                 panel_scroll: self.panel_scroll,
+                history_scroll: self.history_scroll,
                 scrollback: self.scrollback,
                 reporting: self.reporting,
                 finished: self.finished,
@@ -394,9 +402,11 @@ mod run {
                 .unwrap_or_else(|| status.signal().unwrap_or(0i32).saturating_add(128i32));
             self.code = code;
             self.finished = Some(code);
-            // Reading the scrollback of a command that has finished is exactly
-            // what someone would want; typing into it is not.
-            if self.mode != Mode::Scroll {
+            // Everything the UI was in the middle of still means what it meant —
+            // reading the scrollback of a command that has finished is exactly
+            // what someone would want. Only the question of whether to stop it
+            // has stopped having an answer.
+            if self.mode == Mode::Confirm {
                 self.mode = Mode::Normal;
             }
         }
@@ -412,8 +422,11 @@ mod run {
                 TermEvent::Key(key) => self.key(key, parser, writer, pid),
                 TermEvent::Mouse(event) => self.mouse(event, parser, writer),
                 TermEvent::Paste(text) => {
-                    let bytes = keys::encode_paste(&text, parser.screen().bracketed_paste());
-                    self.write(writer, &bytes);
+                    // Nothing is reading the other end of it any more.
+                    if self.finished.is_none() {
+                        let bytes = keys::encode_paste(&text, parser.screen().bracketed_paste());
+                        self.write(writer, &bytes);
+                    }
                 }
                 // Handled by comparing sizes each pass, so a resize that arrives
                 // as several events costs one resize rather than several.
@@ -428,17 +441,6 @@ mod run {
             writer: &mut impl Write,
             pid: i32,
         ) {
-            // The command is over: the UI is only still up so its last screen
-            // can be read, and any key says it has been.
-            if self.finished.is_some() {
-                if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d'))
-                    || matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
-                {
-                    self.leaving = true;
-                }
-                return;
-            }
-
             match self.mode {
                 Mode::Confirm => self.confirm(key, pid),
                 Mode::Help => self.mode = Mode::Normal,
@@ -450,7 +452,14 @@ mod run {
                         self.mode = Mode::Prefix;
                         return;
                     }
-                    if self.focus == Focus::Panel && self.panel_key(key) {
+                    if self.focus.in_panel() && self.panel_key(key) {
+                        return;
+                    }
+                    // The command is over, so there is nobody on the other end
+                    // of the keyboard: the keys that were bytes for it become
+                    // the UI's own, and reading what it left is what is left.
+                    if self.finished.is_some() {
+                        self.review_key(key, parser);
                         return;
                     }
                     if let Some(bytes) = keys::encode(&key, parser.screen().application_cursor()) {
@@ -460,6 +469,40 @@ mod run {
                         self.write(writer, &bytes);
                     }
                 }
+            }
+        }
+
+        /// A key with the command finished and no mode in the way.
+        ///
+        /// Deliberately the same keys the scroll mode uses rather than a set of
+        /// its own: what the UI is doing here *is* reading the scrollback, and
+        /// having to ask for a mode first to do the only thing left to do would
+        /// be a step for nothing.
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "a key with nothing on it does nothing, whatever key it is"
+        )]
+        fn review_key(&mut self, key: KeyEvent, parser: &mut vt100::Parser) {
+            if self.scroll_move(key, parser) {
+                return;
+            }
+            match key.code {
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.leaving = true;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => self.leaving = true,
+                KeyCode::Tab => self.cycle_focus(),
+                KeyCode::Char('?') => self.mode = Mode::Help,
+                _ => {}
+            }
+        }
+
+        /// Move the keyboard on to the next of the three places it can be.
+        /// With the panel hidden there is only the one, and Tab is a key that
+        /// does nothing rather than one that focuses what is not on screen.
+        fn cycle_focus(&mut self) {
+            if self.show_panel {
+                self.focus = self.focus.next();
             }
         }
 
@@ -489,16 +532,17 @@ mod run {
 
             match key.code {
                 KeyCode::Char('q') => {
-                    // Nothing is killed without being asked about: the command
-                    // may be a shell with unsaved work in it.
-                    self.mode = Mode::Confirm;
+                    if self.finished.is_some() {
+                        // There is nothing left to stop, so the question would
+                        // have only one honest answer.
+                        self.leaving = true;
+                    } else {
+                        // Nothing is killed without being asked about: the
+                        // command may be a shell with unsaved work in it.
+                        self.mode = Mode::Confirm;
+                    }
                 }
-                KeyCode::Tab => {
-                    self.focus = match self.focus {
-                        Focus::Terminal => Focus::Panel,
-                        Focus::Panel => Focus::Terminal,
-                    };
-                }
+                KeyCode::Tab => self.cycle_focus(),
                 KeyCode::PageUp => self.mode = Mode::Scroll,
                 KeyCode::Char('r') => {
                     // Nothing to set while the panel is not on screen.
@@ -597,17 +641,16 @@ mod run {
             }
         }
 
+        /// The keys that move the view over the scrollback, and whether the key
+        /// was one of them. Shared, so the scroll mode and the state a finished
+        /// command leaves the UI in cannot drift into two sets of keys.
         #[expect(
             clippy::wildcard_enum_match_arm,
             reason = "keys that do not move the view leave it where it is"
         )]
-        fn scroll_key(&mut self, key: KeyEvent, parser: &mut vt100::Parser) {
+        fn scroll_move(&mut self, key: KeyEvent, parser: &mut vt100::Parser) -> bool {
             let page = usize::from(parser.screen().size().0).max(1usize);
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.reset_scrollback(parser);
-                    self.mode = Mode::Normal;
-                }
                 KeyCode::Up => self.set_scrollback(parser, self.scrollback.saturating_add(1)),
                 KeyCode::Down => self.set_scrollback(parser, self.scrollback.saturating_sub(1)),
                 KeyCode::PageUp => {
@@ -618,32 +661,109 @@ mod run {
                 }
                 KeyCode::Home => self.set_scrollback(parser, self.max_scrollback),
                 KeyCode::End => self.set_scrollback(parser, 0usize),
-                _ => {}
+                _ => return false,
+            }
+            true
+        }
+
+        fn scroll_key(&mut self, key: KeyEvent, parser: &mut vt100::Parser) {
+            if self.scroll_move(key, parser) {
+                return;
+            }
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.reset_scrollback(parser);
+                self.mode = Mode::Normal;
             }
         }
 
-        /// Navigation keys move the panel; everything else still reaches the
-        /// command, so focus never silently swallows what was typed.
+        /// How many rows each of the panel's two lists has to draw in, or
+        /// nothing at all when there is no panel — hidden, or dropped because
+        /// the window went too narrow to leave the terminal its floor. The keys
+        /// then go back to the command rather than moving a view nobody can see.
+        fn panel_heights(&self) -> Option<(u16, u16)> {
+            let area = ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: self.screen_width,
+                height: self.screen_height,
+            };
+            let regions = ui::regions(
+                area,
+                self.panel_width,
+                self.show_panel,
+                self.context_lines(),
+            );
+            regions.panel.map(|panel| {
+                let (blocked, recent) = ui::panel_split(panel);
+                (blocked.height, recent.height)
+            })
+        }
+
+        /// Navigation keys move whichever list has the focus; everything else
+        /// still reaches the command, so focus never silently swallows what was
+        /// typed.
+        fn panel_key(&mut self, key: KeyEvent) -> bool {
+            let Some((blocked, recent)) = self.panel_heights() else {
+                return false;
+            };
+            match self.focus {
+                Focus::Terminal => false,
+                Focus::Blocked => self.blocked_key(key, blocked),
+                Focus::Recent => self.recent_key(key, recent),
+            }
+        }
+
+        /// The tally is read from the top down — most recently refused first —
+        /// so its offset is how far down the list the view has moved.
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "anything that does not move the panel is for the command"
+            reason = "anything that does not move the list is for the command"
         )]
-        fn panel_key(&mut self, key: KeyEvent) -> bool {
-            match key.code {
-                KeyCode::Up => {
-                    self.panel_scroll = self.panel_scroll.saturating_sub(PANEL_STEP);
-                    true
-                }
-                KeyCode::Down => {
-                    self.panel_scroll = self.panel_scroll.saturating_add(PANEL_STEP);
-                    true
-                }
-                KeyCode::Home => {
-                    self.panel_scroll = 0;
-                    true
-                }
-                _ => false,
-            }
+        fn blocked_key(&mut self, key: KeyEvent, height: u16) -> bool {
+            let room = usize::from(height);
+            // Past this the view would be showing the space under the last line
+            // rather than the list, which is a place with nothing to read in it.
+            let furthest = ui::targets_lines(&self.denials).saturating_sub(room);
+            let page = room.max(1usize);
+            let at = usize::from(self.panel_scroll);
+            let to = match key.code {
+                KeyCode::Up => at.saturating_sub(usize::from(PANEL_STEP)),
+                KeyCode::Down => at.saturating_add(usize::from(PANEL_STEP)),
+                KeyCode::PageUp => at.saturating_sub(page),
+                KeyCode::PageDown => at.saturating_add(page),
+                KeyCode::Home => 0usize,
+                KeyCode::End => furthest,
+                _ => return false,
+            };
+            self.panel_scroll = u16::try_from(to.min(furthest)).unwrap_or(u16::MAX);
+            true
+        }
+
+        /// The log is pinned to its newest line, so its offset counts backwards
+        /// from there — the same way the terminal's scrollback does. Up moves
+        /// the view up either list; that the numbers run opposite ways is what
+        /// makes the key do the same thing in both.
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "anything that does not move the list is for the command"
+        )]
+        fn recent_key(&mut self, key: KeyEvent, height: u16) -> bool {
+            // Less the heading, which is drawn above the lines and stays put.
+            let room = usize::from(height.saturating_sub(1u16));
+            let furthest = self.denials.recent().count().saturating_sub(room);
+            let page = room.max(1usize);
+            let at = self.history_scroll;
+            let to = match key.code {
+                KeyCode::Up => at.saturating_add(usize::from(PANEL_STEP)),
+                KeyCode::Down => at.saturating_sub(usize::from(PANEL_STEP)),
+                KeyCode::PageUp => at.saturating_add(page),
+                KeyCode::PageDown => at.saturating_sub(page),
+                KeyCode::Home => furthest,
+                KeyCode::End => 0usize,
+                _ => return false,
+            };
+            self.history_scroll = to.min(furthest);
+            true
         }
 
         fn mouse(
@@ -652,6 +772,10 @@ mod run {
             parser: &mut vt100::Parser,
             writer: &mut impl Write,
         ) {
+            // Nothing is reading the other end of it any more.
+            if self.finished.is_some() {
+                return;
+            }
             let screen = parser.screen();
             let mode = screen.mouse_protocol_mode();
             let (rows, cols) = screen.size();
@@ -672,8 +796,13 @@ mod run {
         }
 
         fn set_scrollback(&mut self, parser: &mut vt100::Parser, lines: usize) {
-            self.scrollback = lines.min(self.max_scrollback);
-            parser.screen_mut().set_scrollback(self.scrollback);
+            let screen = parser.screen_mut();
+            screen.set_scrollback(lines.min(self.max_scrollback));
+            // Read back rather than remembered: the emulator clamps to the
+            // scrollback there actually is, and a Home that left us thinking we
+            // were ten thousand lines up a screen with thirty would take a
+            // hundred presses to come back down from.
+            self.scrollback = screen.scrollback();
         }
 
         fn reset_scrollback(&mut self, parser: &mut vt100::Parser) {
@@ -727,6 +856,7 @@ mod run {
                 height: area.height,
             };
             self.screen_width = area.width;
+            self.screen_height = area.height;
             let size = ui::terminal_size(
                 area,
                 self.panel_width,
@@ -802,5 +932,160 @@ mod run {
             }
             drop(tx.send(Event::DenialsClosed));
         });
+    }
+
+    #[cfg(test)]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "counts and sizes, spelled the way the assertions read best"
+    )]
+    mod tests {
+        use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
+
+        use super::*;
+        use crate::bpfd::protocol::{FileError, FileOp, Outside};
+
+        fn app(width: u16, height: u16) -> App {
+            let options = Options {
+                command: "bash",
+                context: Vec::new(),
+                token: None,
+                reporting: Reporting::Watching,
+                config: TuiConfig::default(),
+                panel_width: Some(34),
+            };
+            let prefix = keys::parse_key_spec("C-a").expect("a prefix");
+            let mut app = App::new(&options, prefix, query::Host::default());
+            app.screen_width = width;
+            app.screen_height = height;
+            app
+        }
+
+        fn press(code: KeyCode) -> KeyEvent {
+            KeyEvent {
+                code,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }
+        }
+
+        /// The default prefix, as the terminal would deliver it.
+        fn prefix() -> KeyEvent {
+            KeyEvent {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }
+        }
+
+        fn refused(path: &str) -> Notification {
+            Notification::FileBlocked {
+                op: FileOp::Open,
+                path: path.to_owned(),
+                error: FileError::Permission,
+                outside: Outside::Present,
+            }
+        }
+
+        fn with_refusals(app: &mut App, how_many: usize) {
+            for i in 0..how_many {
+                app.denials.push(&refused(&format!("/nowhere/{i}")), "bash");
+            }
+        }
+
+        /// The bug this pins: the offset simply grew, so a held-down arrow
+        /// scrolled the tally into the empty space under its last line, with no
+        /// way back but Home.
+        #[test]
+        fn the_blocked_list_stops_at_its_last_line() {
+            let mut app = app(120, 40);
+            with_refusals(&mut app, 60);
+            let (height, _) = app.panel_heights().expect("a panel fits at this width");
+            assert!(height > 0);
+
+            for _ in 0..500 {
+                assert!(app.blocked_key(press(KeyCode::Down), height));
+            }
+            let furthest = ui::targets_lines(&app.denials) - usize::from(height);
+            assert_eq!(usize::from(app.panel_scroll), furthest);
+            assert!(furthest > 0, "the list should be taller than the panel");
+
+            app.blocked_key(press(KeyCode::Home), height);
+            assert_eq!(app.panel_scroll, 0);
+            // And Up stops at the top rather than wrapping round it.
+            app.blocked_key(press(KeyCode::Up), height);
+            assert_eq!(app.panel_scroll, 0);
+        }
+
+        /// The log is pinned to its newest line, so its offset counts back from
+        /// there: Up goes into the past, End returns to the present.
+        #[test]
+        fn the_recent_list_scrolls_back_from_its_newest_line() {
+            let mut app = app(120, 40);
+            with_refusals(&mut app, 60);
+            let (_, height) = app.panel_heights().expect("a panel fits at this width");
+            let room = usize::from(height) - 1;
+
+            assert_eq!(app.history_scroll, 0);
+            for _ in 0..500 {
+                assert!(app.recent_key(press(KeyCode::Up), height));
+            }
+            assert_eq!(app.history_scroll, 60 - room);
+
+            app.recent_key(press(KeyCode::End), height);
+            assert_eq!(app.history_scroll, 0);
+            app.recent_key(press(KeyCode::Down), height);
+            assert_eq!(app.history_scroll, 0);
+        }
+
+        /// With no panel on screen there is nothing for those keys to move, and
+        /// Tab has nowhere to take the keyboard. The keys go back to being the
+        /// command's rather than being swallowed by a list nobody can see.
+        #[test]
+        fn a_hidden_panel_takes_no_keys() {
+            let mut hidden = app(120, 40);
+            hidden.show_panel = false;
+            assert_eq!(hidden.panel_heights(), None);
+            hidden.cycle_focus();
+            assert_eq!(hidden.focus, Focus::Terminal);
+
+            // And the same when it is the window that is too narrow for one:
+            // the focus outlives the panel, so the keys have to check.
+            let mut narrow = app(50, 20);
+            narrow.focus = Focus::Blocked;
+            assert_eq!(narrow.panel_heights(), None);
+            assert!(!narrow.panel_key(press(KeyCode::Down)));
+        }
+
+        /// The whole point of the change: a command that is over does not take
+        /// the interface down with it.
+        #[test]
+        fn every_key_still_works_once_the_command_is_over() {
+            let mut app = app(120, 40);
+            let mut parser = vt100::Parser::new(39, 86, 100);
+            let mut typed: Vec<u8> = Vec::new();
+            app.exited(std::process::ExitStatus::default());
+
+            // The prefix still opens the UI's own keys, and they still run.
+            app.key(prefix(), &mut parser, &mut typed, 0);
+            assert_eq!(app.mode, Mode::Prefix);
+            app.key(press(KeyCode::Char('w')), &mut parser, &mut typed, 0);
+            assert!(!app.show_panel);
+
+            // And the plain keys are the UI's own, rather than bytes for a
+            // command that is not there to read them.
+            app.key(press(KeyCode::Char('?')), &mut parser, &mut typed, 0);
+            assert_eq!(app.mode, Mode::Help);
+            app.key(press(KeyCode::Char(' ')), &mut parser, &mut typed, 0);
+            assert_eq!(app.mode, Mode::Normal);
+            assert!(typed.is_empty(), "nothing should have been sent: {typed:?}");
+
+            // q leaves, without asking about stopping what has already stopped.
+            assert!(!app.leaving);
+            app.key(press(KeyCode::Char('q')), &mut parser, &mut typed, 0);
+            assert!(app.leaving);
+        }
     }
 }

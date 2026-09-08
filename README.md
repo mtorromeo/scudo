@@ -629,13 +629,18 @@ scudo's own:
 |-----|--------|
 | `^A q` | leave, stopping the command if it is still running |
 | `^A ^A` | send `Ctrl-A` to the command |
-| `^A Tab` | move between the terminal and the panel |
-| `^A PgUp` | read the scrollback — arrows, `PgUp`/`PgDn`, `Esc` to return |
+| `^A Tab` | move between the terminal and the panel's two lists |
+| `^A PgUp` | read the scrollback — arrows, `PgUp`/`PgDn`, `Home`/`End`, `Esc` to return |
 | `^A r` | set how wide the panel is — arrows by one, `h`/`l` by five, `=` back to automatic, `Esc` to return |
 | `^A w` | show or hide the panel |
 | `^A s` | show or hide what scudo decided: the profiles that matched and the command line it built |
 | `^A m` | show or hide paths that were missing outside the sandbox too — see [file access reporting](#seeing-what-the-filesystem-restrictions-hid) |
 | `^A ?` | the list above |
+
+With one of the panel's lists focused, the arrows, `PgUp`/`PgDn` and `Home`/`End` move that
+list instead of reaching the command; every other key still reaches it, so the focus never
+swallows what was typed. The tally is read from the top down and the running list from its
+newest line back, and each stops at its own last line.
 
 Change the prefix with `tui.prefix` in `[scudo]` or with `--tui-prefix`; it is written as
 `C-a`, `M-x` or `F12`, and must carry a modifier, since a bare character would be taken away
@@ -653,10 +658,14 @@ The mouse is handed to the program in the terminal only while that program asks 
 selecting and copying with the mouse keeps working everywhere else — at the cost of taking
 whole screen rows, panel included, since scudo is drawing one screen.
 
-When the command exits, the UI stays up so the last screen and the full list can be read; `q`,
-`Esc` or `^d` can be used to close. scudo exits with the command's own code, and the closing
-summary of what was blocked is printed to stderr once the terminal has been given back, so it
-lands in the scrollback you keep.
+When the command exits the UI stays up, and stays usable: the scrollback still scrolls, the
+lists still scroll, the panel can still be shown, hidden and resized, and `^A ?` still opens
+the help. Only the keys that were bytes for the command change hands — with nothing left to
+type at, the plain arrows, `PgUp`/`PgDn` and `Home`/`End` read the scrollback without a mode
+being asked for first, `Tab` moves between the terminal and the panel's lists, and `q`, `Esc`
+or `^d` close. scudo exits with the command's own code, and the closing summary of what was
+blocked is printed to stderr once the terminal has been given back, so it lands in the
+scrollback you keep.
 
 #### How wide the panel is
 
