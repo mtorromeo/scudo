@@ -23,7 +23,7 @@ overflow-checks = false
 [features]
 default = ["bpf", "tui"]
 # Build scudo-bpfd and the eBPF programs it loads. Turning this off drops the
-# nightly toolchain and bpf-linker build requirements; scudo itself still talks
+# rust-src and bpf-linker build requirements; scudo itself still talks
 # to the daemon when one is installed.
 bpf = ["dep:aya", "dep:aya-build", "dep:scudo-bpf-common"]
 # Build the terminal UI behind `--tui`. Turning it off drops ratatui and the

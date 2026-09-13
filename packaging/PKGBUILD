@@ -8,10 +8,10 @@ arch=('x86_64')
 url='https://github.com/mtorromeo/scudo'
 license=('MIT' 'Apache-2.0')
 depends=('glibc' 'gcc-libs' 'systemd' 'fuse3')
-# rustup rather than rust: the eBPF programs are built with -Z build-std, which
-# needs a nightly toolchain with rust-src. The two packages conflict, so this
-# has to be the one that provides both.
-makedepends=('rustup' 'cargo-binstall')
+# rust-src because the eBPF crate targets bpfel-unknown-none, a tier 3 target
+# rust ships no core for: the build script builds it from source with
+# -Z build-std, under RUSTC_BOOTSTRAP.
+makedepends=('rust' 'rust-src' 'cargo-binstall')
 # source=("https://github.com/mtorromeo/scudo/archive/refs/tags/v$pkgver/$pkgname-$pkgver.tar.gz")
 source=("$pkgname.tar.gz")
 sha256sums=('SKIP')
@@ -19,15 +19,11 @@ sha256sums=('SKIP')
 prepare() {
     cd $pkgname
 
-    # scudo builds on stable; its build script shells out to nightly to compile
-    # the eBPF crate for bpfel-unknown-none, a tier 3 target whose core has to be
-    # built from source.
-    rustup toolchain install --profile minimal stable
-    rustup toolchain install --profile minimal --component rust-src nightly
-
-    # arch's bpf-linker is linked against a different version of llvm then
-    # the one used by rust nightly, so we need to install from source.
-    cargo binstall --disable-telemetry --no-confirm bpf-linker
+    # arch's bpf-linker is linked against the system llvm, and llvm 22 rejects
+    # the calls to memset rustc emits; llvm 23 accepts them. The prebuilt
+    # binary bundles its own llvm 23, so use that until llvm-libs catches up.
+    cargo binstall --disable-telemetry --no-confirm \
+        --install-path "$srcdir/bin" bpf-linker
 
     cargo fetch --locked
 }
@@ -35,16 +31,15 @@ prepare() {
 build() {
     cd $pkgname
 
-    # `rustup run nightly`, which the build script uses for the eBPF crate, wins
-    # over this, so pinning stable here does not get in its way.
-    export RUSTUP_TOOLCHAIN=stable
+    # Where prepare() put bpf-linker, for rustc to link the eBPF programs with.
+    export PATH="$srcdir/bin:$PATH"
     RUSTFLAGS='-C link-args=-Wl,-z,shstk' cargo build --frozen --release
 }
 
 check() {
     cd $pkgname
 
-    export RUSTUP_TOOLCHAIN=stable
+    export PATH="$srcdir/bin:$PATH"
     # The integration tests are #[ignore]d and stay that way here: they attach
     # real eBPF programs, which needs the daemon running with its capabilities.
     cargo test --frozen --release

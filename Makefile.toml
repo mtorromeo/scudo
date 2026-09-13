@@ -10,8 +10,8 @@
 # on that one with "unwinding panics are not supported without std".
 #
 # Nothing here needs to build it directly: scudo's build.rs drives that through
-# `rustup run nightly cargo build -Z build-std=core`, so a plain `cargo build`
-# on the stable toolchain produces the eBPF object as a side effect.
+# `RUSTC_BOOTSTRAP=1 rustup run stable cargo build -Z build-std=core`, so a plain
+# `cargo build` produces the eBPF object as a side effect.
 default_to_workspace = false
 
 [env]
@@ -37,9 +37,10 @@ alias = "all"
 description = "Build everything"
 dependencies = ["build"]
 
-# The eBPF object is built by scudo's build.rs, which shells out to a nightly
-# toolchain and bpf-linker. Neither is a cargo dependency, so check for them here
-# rather than letting the build fail somewhere deep inside a linker invocation.
+# The eBPF object is built by scudo's build.rs, which shells out to the stable
+# toolchain, building core from its rust-src, and to bpf-linker. Neither is a
+# cargo dependency, so check for them here rather than letting the build fail
+# somewhere deep inside a linker invocation.
 [tasks.check-ebpf-toolchain]
 description = "Check the toolchain the eBPF programs need is installed"
 category = "Build"
@@ -48,13 +49,13 @@ script_runner = "@shell"
 script = '''
 missing=0
 
-if ! rustup toolchain list 2>/dev/null | grep -q '^nightly'; then
-    echo "error: the eBPF programs need a nightly toolchain (for -Z build-std=core)."
-    echo "       install it with: rustup toolchain install nightly --component rust-src"
+if ! rustup toolchain list 2>/dev/null | grep -q '^stable'; then
+    echo "error: the eBPF programs are built with the stable toolchain, which is not installed."
+    echo "       install it with: rustup toolchain install stable --component rust-src"
     missing=1
-elif ! rustup component list --toolchain nightly 2>/dev/null | grep -q '^rust-src.*installed'; then
-    echo "error: the nightly toolchain is missing rust-src, which -Z build-std needs."
-    echo "       install it with: rustup component add rust-src --toolchain nightly"
+elif ! rustup component list --toolchain stable 2>/dev/null | grep -q '^rust-src.*installed'; then
+    echo "error: the stable toolchain is missing rust-src, which -Z build-std needs."
+    echo "       install it with: rustup component add rust-src --toolchain stable"
     missing=1
 fi
 
@@ -80,7 +81,7 @@ command = "cargo"
 args = ["build", "--locked", "--profile", "${CARGO_PROFILE}"]
 
 # Without the `bpf` feature there is no scudo-bpfd and no eBPF object, so neither
-# nightly nor bpf-linker is needed. Network policies that need the enforcer then
+# rust-src nor bpf-linker is needed. Network policies that need the enforcer then
 # fall back to whatever their `on_unavailable` says.
 [tasks.build-no-bpf]
 description = "Build without the eBPF enforcer (stable toolchain only)"
