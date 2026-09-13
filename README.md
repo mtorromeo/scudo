@@ -136,6 +136,8 @@ Each TOML section defines a profile. The section name identifies the profile for
 
 Every key of the `systemd` table is passed directly to `systemd-run` as `-p Key=value`. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (`true`/`false` → `yes`/`no`), integers, or arrays. Write it either as a sub-table header (`[curl.systemd]`) or with dotted keys (`systemd.MemoryMax = "256M"`).
 
+The command starts in the current directory, unless `WorkingDirectory` is set (in the table or with `-P`): then `systemd-run` is not given `-d` and the property decides.
+
 Any other key is a typo and scudo says so instead of ignoring it.
 
 ### Example

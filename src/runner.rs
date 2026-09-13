@@ -37,8 +37,13 @@ pub fn build(
     systemd_args: &[String],
     options: &Options<'_>,
 ) -> Result<std::process::Command> {
+    let flags = if sets_working_directory(systemd_args) {
+        "-Pt"
+    } else {
+        "-Pdt"
+    };
     let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
-    cmd.args(["--user", "--wait", "-Pdt"]).args(systemd_args);
+    cmd.args(["--user", "--wait", flags]).args(systemd_args);
 
     if !options.verbose {
         cmd.arg("-q");
@@ -193,5 +198,70 @@ fn shell_quote(s: &OsStr) -> String {
         s
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Whether the unit properties already choose a working directory.
+///
+/// `-d` would start the command in ours instead, overriding the one that was
+/// asked for, so it is left out when this holds.
+fn sets_working_directory(systemd_args: &[String]) -> bool {
+    let is_working_directory = |property: &str| property.starts_with("WorkingDirectory=");
+    let separate = systemd_args.windows(2).any(|pair| {
+        matches!(pair, [flag, property]
+            if matches!(flag.as_str(), "-p" | "--property") && is_working_directory(property))
+    });
+    separate
+        || systemd_args.iter().any(|arg| {
+            arg.strip_prefix("--property=")
+                .or_else(|| arg.strip_prefix("-p"))
+                .is_some_and(is_working_directory)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_of(systemd_args: &[&str]) -> Vec<String> {
+        let systemd_args: Vec<String> = systemd_args.iter().map(ToString::to_string).collect();
+        let log = LogConfig::default();
+        let options = Options {
+            verbose: false,
+            confirm: false,
+            log: &log,
+            shim_token: None,
+            log_denials: false,
+        };
+        build(Path::new("/bin/true"), &[], &systemd_args, &options)
+            .expect("the command builds")
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn same_dir_by_default() {
+        let args = args_of(&["-p", "MemoryMax=1G"]);
+        assert!(args.contains(&"-Pdt".to_owned()));
+    }
+
+    #[test]
+    fn working_directory_from_a_profile_drops_same_dir() {
+        let args = args_of(&["-p", "WorkingDirectory=/tmp"]);
+        assert!(args.contains(&"-Pt".to_owned()));
+        assert!(!args.contains(&"-Pdt".to_owned()));
+    }
+
+    #[test]
+    fn working_directory_from_the_command_line_drops_same_dir() {
+        let args = args_of(&["--property=WorkingDirectory=/tmp"]);
+        assert!(args.contains(&"-Pt".to_owned()));
+    }
+
+    #[test]
+    fn working_directory_in_another_value_keeps_same_dir() {
+        let args = args_of(&["-p", "Environment=WorkingDirectory=/tmp"]);
+        assert!(args.contains(&"-Pdt".to_owned()));
     }
 }
