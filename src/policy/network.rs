@@ -439,6 +439,179 @@ impl TryFrom<NetworkConfig> for NetworkPolicy {
     }
 }
 
+/// Rules given on the command line, applied on top of whatever the profiles
+/// settled on.
+///
+/// An entry moves between lists rather than only being added: `deny` beats
+/// `allow`, so allowing something a profile denied would otherwise change
+/// nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetworkOverrides {
+    pub dest: RuleSet<Destination>,
+    pub ports: RuleSet<PortRule>,
+}
+
+impl NetworkOverrides {
+    /// Parse the values of `--allow-dest`, `--deny-dest`, `--allow-port` and
+    /// `--deny-port`. They are taken as written: the shell has already expanded
+    /// whatever variables they held.
+    pub fn parse(
+        allow_dest: &[String],
+        deny_dest: &[String],
+        allow_port: &[String],
+        deny_port: &[String],
+    ) -> Result<Self> {
+        let ports = |entries: &[String]| -> Result<Vec<PortRule>> {
+            entries
+                .iter()
+                .map(|entry| {
+                    parse_port_rule(entry).with_context(|| format!("invalid port rule '{entry}'"))
+                })
+                .collect()
+        };
+        let overrides = NetworkOverrides {
+            dest: RuleSet {
+                allow: destinations(allow_dest.to_vec())?,
+                deny: destinations(deny_dest.to_vec())?,
+            },
+            ports: RuleSet {
+                allow: ports(allow_port)?,
+                deny: ports(deny_port)?,
+            },
+        };
+        // Moving an entry into both lists at once has no order to settle it.
+        if let Some(dest) = overrides
+            .dest
+            .allow
+            .iter()
+            .find(|dest| overrides.dest.deny.contains(dest))
+        {
+            bail!(
+                "{} is both allowed and denied on the command line",
+                describe_dest(dest)
+            );
+        }
+        if let Some(rule) = overrides
+            .ports
+            .allow
+            .iter()
+            .find(|rule| overrides.ports.deny.contains(rule))
+        {
+            bail!(
+                "port {} is both allowed and denied on the command line",
+                describe_port(*rule)
+            );
+        }
+        Ok(overrides)
+    }
+
+    /// `true` when no rule was given.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dest.is_empty() && self.ports.is_empty()
+    }
+
+    /// Apply the rules to the policy the profiles produced, if any.
+    ///
+    /// Without one, the rules make a policy of their own: one that denies by
+    /// default when something is allowed, as a `network` table would, and one
+    /// that allows by default when the rules only deny — there is nothing else
+    /// they could have meant.
+    #[must_use]
+    pub fn apply(&self, policy: Option<NetworkPolicy>) -> Option<NetworkPolicy> {
+        if self.is_empty() {
+            return policy;
+        }
+        let mut policy = policy.unwrap_or_else(|| {
+            let open = self.dest.allow.is_empty() && self.ports.allow.is_empty();
+            let default = if open { Action::Allow } else { Action::Deny };
+            NetworkPolicy {
+                default,
+                inbound: default,
+                service_manager: Action::default(),
+                on_unavailable: OnUnavailable::default(),
+                log: LogLevel::default(),
+                observe_only: false,
+                dest: RuleSet::default(),
+                ports: RuleSet::default(),
+            }
+        });
+        move_into(
+            &mut policy.dest.allow,
+            &mut policy.dest.deny,
+            &self.dest.allow,
+        );
+        move_into(
+            &mut policy.dest.deny,
+            &mut policy.dest.allow,
+            &self.dest.deny,
+        );
+        move_into(
+            &mut policy.ports.allow,
+            &mut policy.ports.deny,
+            &self.ports.allow,
+        );
+        move_into(
+            &mut policy.ports.deny,
+            &mut policy.ports.allow,
+            &self.ports.deny,
+        );
+        Some(policy)
+    }
+
+    /// A one-line account of the rules, for the debug log.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        for (label, dests) in [("allow", &self.dest.allow), ("deny", &self.dest.deny)] {
+            if !dests.is_empty() {
+                let list: Vec<_> = dests.iter().map(describe_dest).collect();
+                parts.push(format!("{label} dest {}", list.join(",")));
+            }
+        }
+        for (label, rules) in [("allow", &self.ports.allow), ("deny", &self.ports.deny)] {
+            if !rules.is_empty() {
+                let list: Vec<_> = rules.iter().copied().map(describe_port).collect();
+                parts.push(format!("{label} port {}", list.join(",")));
+            }
+        }
+        parts.join("; ")
+    }
+}
+
+/// Take `items` out of `from` and add them to `to`, once each.
+fn move_into<T: PartialEq + Clone>(to: &mut Vec<T>, from: &mut Vec<T>, items: &[T]) {
+    from.retain(|entry| !items.contains(entry));
+    for item in items {
+        if !to.contains(item) {
+            to.push(item.clone());
+        }
+    }
+}
+
+fn describe_dest(dest: &Destination) -> String {
+    match dest {
+        Destination::Net { addr, prefix_len } if *prefix_len == max_prefix_len(*addr) => {
+            addr.to_string()
+        }
+        Destination::Net { addr, prefix_len } => format!("{addr}/{prefix_len}"),
+        Destination::Host(name) => name.clone(),
+    }
+}
+
+fn describe_port(rule: PortRule) -> String {
+    let ports = if rule.ports.start == rule.ports.end {
+        rule.ports.start.to_string()
+    } else {
+        format!("{}-{}", rule.ports.start, rule.ports.end)
+    };
+    match rule.proto {
+        Protocol::Any => ports,
+        Protocol::Tcp => format!("{ports}/tcp"),
+        Protocol::Udp => format!("{ports}/udp"),
+    }
+}
+
 /// A symbolic name is two networks, so one entry can yield more than one
 /// destination.
 fn destinations(entries: Vec<String>) -> Result<Vec<Destination>> {
@@ -1020,6 +1193,168 @@ mod tests {
 
         let config: NetworkConfig = toml::from_str(r#"ports = { allow = ["$PORT"] }"#).unwrap();
         config.validate().unwrap();
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn overrides(
+        allow_dest: &[&str],
+        deny_dest: &[&str],
+        allow_port: &[&str],
+        deny_port: &[&str],
+    ) -> Result<NetworkOverrides> {
+        NetworkOverrides::parse(
+            &strings(allow_dest),
+            &strings(deny_dest),
+            &strings(allow_port),
+            &strings(deny_port),
+        )
+    }
+
+    fn port(start: u16, end: u16, proto: Protocol) -> PortRule {
+        PortRule {
+            ports: PortRange { start, end },
+            proto,
+        }
+    }
+
+    #[test]
+    fn command_line_rules_parse_like_the_config() {
+        let o = overrides(
+            &["localhost", "API.Example.com"],
+            &[],
+            &["53/udp"],
+            &["8000-8100"],
+        )
+        .unwrap();
+        assert_eq!(
+            o.dest.allow,
+            vec![
+                net(v4(127, 0, 0, 0), 8u8),
+                net("::1".parse().unwrap(), 128u8),
+                Destination::Host("api.example.com".into()),
+            ]
+        );
+        assert_eq!(o.ports.allow, vec![port(53, 53, Protocol::Udp)]);
+        assert_eq!(o.ports.deny, vec![port(8000, 8100, Protocol::Any)]);
+    }
+
+    #[test]
+    fn command_line_rules_reject_bad_values() {
+        drop(overrides(&["not a host"], &[], &[], &[]).unwrap_err());
+        drop(overrides(&["..."], &[], &[], &[]).unwrap_err());
+        drop(overrides(&[], &[], &["0"], &[]).unwrap_err());
+        drop(overrides(&[], &[], &[], &["443/sctp"]).unwrap_err());
+    }
+
+    #[test]
+    fn a_rule_cannot_be_allowed_and_denied_at_once() {
+        let msg = format!(
+            "{:#}",
+            overrides(&["Example.com"], &["example.com"], &[], &[]).unwrap_err()
+        );
+        assert!(msg.contains("example.com"), "{msg}");
+        drop(overrides(&[], &[], &["443"], &["443"]).unwrap_err());
+        // A different protocol is a different rule.
+        overrides(&[], &[], &["443/tcp"], &["443"]).unwrap();
+    }
+
+    #[test]
+    fn no_command_line_rules_leave_the_policy_alone() {
+        let o = NetworkOverrides::default();
+        assert!(o.apply(None).is_none());
+        let p = policy("").unwrap();
+        assert_eq!(o.apply(Some(p.clone())), Some(p));
+    }
+
+    #[test]
+    fn allowing_without_a_policy_denies_the_rest() {
+        let p = overrides(&["1.1.1.1"], &[], &[], &[])
+            .unwrap()
+            .apply(None)
+            .unwrap();
+        assert_eq!(p.default, Action::Deny);
+        assert_eq!(p.inbound, Action::Deny);
+        assert_eq!(p.dest.allow, vec![net(v4(1, 1, 1, 1), 32u8)]);
+        assert!(p.requires_enforcer());
+    }
+
+    #[test]
+    fn denying_without_a_policy_allows_the_rest() {
+        let p = overrides(&[], &[], &[], &["22"])
+            .unwrap()
+            .apply(None)
+            .unwrap();
+        assert_eq!(p.default, Action::Allow);
+        assert_eq!(p.inbound, Action::Allow);
+        assert_eq!(p.service_manager, Action::Deny);
+        assert_eq!(p.on_unavailable, OnUnavailable::Fail);
+        assert!(!p.is_unrestricted());
+    }
+
+    #[test]
+    fn a_command_line_rule_moves_between_lists() {
+        let base = policy(
+            r#"
+            dest = { allow = ["1.1.1.1"], deny = ["localhost", "10.0.0.0/8"] }
+            ports = { allow = [443, "8080/tcp"], deny = [22] }
+            "#,
+        )
+        .unwrap();
+        let p = overrides(&["localhost"], &["1.1.1.1"], &["22"], &["8080"])
+            .unwrap()
+            .apply(Some(base))
+            .unwrap();
+        // Both networks `localhost` stands for leave the deny list.
+        assert_eq!(
+            p.dest.deny,
+            vec![net(v4(10, 0, 0, 0), 8u8), net(v4(1, 1, 1, 1), 32u8)]
+        );
+        assert_eq!(
+            p.dest.allow,
+            vec![
+                net(v4(127, 0, 0, 0), 8u8),
+                net("::1".parse().unwrap(), 128u8)
+            ]
+        );
+        // `8080` is not `8080/tcp`, so the latter stays allowed.
+        assert_eq!(
+            p.ports.allow,
+            vec![
+                port(443, 443, Protocol::Any),
+                port(8080, 8080, Protocol::Tcp),
+                port(22, 22, Protocol::Any),
+            ]
+        );
+        assert_eq!(p.ports.deny, vec![port(8080, 8080, Protocol::Any)]);
+    }
+
+    #[test]
+    fn a_command_line_rule_is_not_duplicated() {
+        let base = policy(r#"dest = { allow = ["1.1.1.1"] }"#).unwrap();
+        let p = overrides(&["1.1.1.1"], &[], &[], &[])
+            .unwrap()
+            .apply(Some(base))
+            .unwrap();
+        assert_eq!(p.dest.allow, vec![net(v4(1, 1, 1, 1), 32u8)]);
+    }
+
+    #[test]
+    fn command_line_rules_describe_themselves() {
+        let o = overrides(
+            &["10.0.0.0/8", "1.1.1.1"],
+            &["example.com"],
+            &["53/udp"],
+            &["8000-8100"],
+        )
+        .unwrap();
+        assert_eq!(
+            o.describe(),
+            "allow dest 10.0.0.0/8,1.1.1.1; deny dest example.com; \
+             allow port 53/udp; deny port 8000-8100"
+        );
     }
 
     /// The observer exists for the reporting, so without it there is nothing to

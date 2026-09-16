@@ -7,7 +7,9 @@ use toml::Value;
 use crate::{
     config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig},
     logging::{Level, LogConfig},
-    policy::{FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkPolicy, Policy},
+    policy::{
+        FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides, NetworkPolicy, Policy,
+    },
 };
 
 #[derive(Debug)]
@@ -52,6 +54,8 @@ pub struct ResolveOptions<'a> {
     pub profiles: &'a [String],
     /// Skip pattern matching entirely; only `profiles` are applied.
     pub no_match: bool,
+    /// Network rules from the command line, applied after every profile.
+    pub network: Option<&'a NetworkOverrides>,
 }
 
 /// Collect all profiles that match `command`, merge them in priority order
@@ -158,8 +162,16 @@ pub fn resolve_with(
         meta.filesystem = m.filesystem.over(meta.filesystem);
     }
 
+    let overrides = opts.network.filter(|overrides| !overrides.is_empty());
+    if let Some(overrides) = overrides {
+        match_log.push(format!(
+            "network rules from the command line: {}",
+            overrides.describe()
+        ));
+    }
+
     let arg_vars = parse_command_args(command_args, &meta.arg_aliases, &meta.arg_flags);
-    build_args(&merged, meta, match_log, &arg_vars)
+    build_args(&merged, meta, match_log, &arg_vars, overrides)
 }
 
 /// Look up explicitly requested profile names, preserving order and dropping duplicates.
@@ -620,6 +632,7 @@ fn build_args(
     meta: ProfileMeta,
     match_log: Vec<String>,
     arg_vars: &ArgVars,
+    overrides: Option<&NetworkOverrides>,
 ) -> Result<ResolvedProfile> {
     let mut args = Vec::new();
 
@@ -634,7 +647,7 @@ fn build_args(
     // The properties a policy needs are added by `policy::apply`, once it knows
     // the policy is actually being enforced: emitting them for a policy that
     // ends up degraded would restrict the command for no benefit.
-    let policies = build_policies(meta.network, meta.filesystem, arg_vars)?;
+    let policies = build_policies(meta.network, meta.filesystem, arg_vars, overrides)?;
 
     let mut log = meta.log;
     // `verbose` predates the log table and asks for the same thing in fewer
@@ -664,9 +677,11 @@ fn build_policies(
     network: Option<Properties>,
     filesystem: FilesystemConfig,
     arg_vars: &ArgVars,
+    overrides: Option<&NetworkOverrides>,
 ) -> Result<Vec<Policy>> {
     let mut policies = Vec::new();
 
+    let mut network_policy = None;
     if let Some(network) = network {
         let mut table = toml::Table::new();
         for (key, val) in network {
@@ -678,10 +693,17 @@ fn build_policies(
         let config: NetworkConfig = toml::Value::Table(table)
             .try_into()
             .context("invalid network policy")?;
-        let policy = NetworkPolicy::try_from(config).context("invalid network policy")?;
-        if !policy.is_unrestricted() {
-            policies.push(Policy::Network(policy));
-        }
+        network_policy = Some(NetworkPolicy::try_from(config).context("invalid network policy")?);
+    }
+    // The command line has the last word, and only what is left once it has
+    // spoken decides whether there is anything to enforce.
+    if let Some(overrides) = overrides {
+        network_policy = overrides.apply(network_policy);
+    }
+    if let Some(policy) = network_policy
+        && !policy.is_unrestricted()
+    {
+        policies.push(Policy::Network(policy));
     }
 
     // A table that said nothing is not a policy that says off: leaving it out
@@ -1643,7 +1665,11 @@ mod tests {
     // ── explicit profile selection tests ──────────────────────────────────────
 
     fn select(profiles: &[String], no_match: bool) -> ResolveOptions<'_> {
-        ResolveOptions { profiles, no_match }
+        ResolveOptions {
+            profiles,
+            no_match,
+            network: None,
+        }
     }
 
     #[test]
@@ -1857,6 +1883,115 @@ mod tests {
         assert_eq!(policy.dest.allow.len(), 1);
         assert_eq!(policy.ports.allow.len(), 1);
         assert!(policy.requires_enforcer());
+    }
+
+    // ── network rules from the command line ───────────────────────────────────
+
+    fn overrides(allow_dest: &[&str], deny_dest: &[&str]) -> NetworkOverrides {
+        NetworkOverrides::parse(&args(allow_dest), &args(deny_dest), &[], &[]).unwrap()
+    }
+
+    fn policies_with(src: &str, command: &str, overrides: &NetworkOverrides) -> Vec<Policy> {
+        let configs = configs_from_toml(src);
+        resolve_with(
+            &configs,
+            command,
+            &[],
+            ResolveOptions {
+                network: Some(overrides),
+                ..ResolveOptions::default()
+            },
+        )
+        .unwrap()
+        .policies
+    }
+
+    fn network_of(policies: Vec<Policy>) -> Option<NetworkPolicy> {
+        policies.into_iter().find_map(|policy| match policy {
+            Policy::Network(network) => Some(network),
+            Policy::Filesystem(_) => None,
+        })
+    }
+
+    #[test]
+    fn command_line_rules_apply_over_the_profile() {
+        let policy = network_of(policies_with(
+            r#"
+            [curl]
+            match = "curl"
+            network.dest.allow = ["1.1.1.1"]
+            network.dest.deny = ["10.0.0.0/8"]
+            "#,
+            "curl",
+            &overrides(&["10.0.0.0/8"], &["1.1.1.1"]),
+        ))
+        .expect("a network policy");
+        assert_eq!(
+            policy.dest.allow,
+            vec![Destination::Net {
+                addr: "10.0.0.0".parse().unwrap(),
+                prefix_len: 8
+            }]
+        );
+        assert_eq!(
+            policy.dest.deny,
+            vec![Destination::Net {
+                addr: "1.1.1.1".parse().unwrap(),
+                prefix_len: 32
+            }]
+        );
+    }
+
+    #[test]
+    fn command_line_denies_make_a_policy_where_there_was_none() {
+        let policy = network_of(policies_with(
+            "[curl]\nmatch = \"curl\"\nsystemd.PrivateTmp = true\n",
+            "curl",
+            &overrides(&[], &["example.com"]),
+        ))
+        .expect("a network policy");
+        assert_eq!(policy.default, Action::Allow);
+        assert!(policy.requires_enforcer());
+    }
+
+    #[test]
+    fn command_line_rules_that_leave_nothing_restricted_drop_the_policy() {
+        let policies = policies_with(
+            r#"
+            [curl]
+            match = "curl"
+            network.default = "allow"
+            network.inbound = "allow"
+            network.dest.deny = ["example.com"]
+            "#,
+            "curl",
+            &overrides(&["example.com"], &[]),
+        );
+        assert!(network_of(policies).is_none());
+    }
+
+    #[test]
+    fn command_line_rules_are_logged() {
+        let configs = configs_from_toml("[curl]\nmatch = \"curl\"\n");
+        let overrides = overrides(&["1.1.1.1"], &[]);
+        let resolved = resolve_with(
+            &configs,
+            "curl",
+            &[],
+            ResolveOptions {
+                network: Some(&overrides),
+                ..ResolveOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            resolved
+                .match_log
+                .iter()
+                .any(|l| l.contains("allow dest 1.1.1.1")),
+            "{:?}",
+            resolved.match_log
+        );
     }
 
     fn filesystem_policy(src: &str, command: &str) -> Option<FilesystemPolicy> {

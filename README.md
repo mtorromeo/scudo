@@ -21,6 +21,10 @@ Options:
   -P, --property <PROPERTY=VALUE>       Set a property for the systemd-run command
   -p, --profile <NAME>                  Apply the named profile, ignoring its match rules (repeatable, comma-separated)
       --no-match                        Skip profile matching; apply only the profiles given with --profile
+      --allow-dest <DEST>               Allow a destination (address, CIDR, host or glob), even one a profile denies (repeatable, comma-separated)
+      --deny-dest <DEST>                Deny a destination, even one a profile allows (repeatable, comma-separated)
+      --allow-port <PORT[/PROTO]>       Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated)
+      --deny-port <PORT[/PROTO]>        Deny a port or range, optionally `/tcp` or `/udp`, even one a profile allows (repeatable, comma-separated)
       --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
       --tui-prefix <KEY>                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
   -h, --help                            Print help
@@ -291,6 +295,30 @@ rules sit. That makes merging two profiles' lists a plain union: commutative, id
 impossible to get wrong by reordering. Entries take `$VAR` and `$arg_*` expansions like any
 other profile value, and `"..."` splices in the list inherited from an extended profile —
 each of the four lists inheriting on its own.
+
+#### From the command line
+
+`--allow-dest`, `--deny-dest`, `--allow-port` and `--deny-port` change the rules for one run,
+without touching the config. They take the same values as `dest` and `ports`, are repeatable
+and accept comma-separated lists:
+
+```
+scudo --allow-dest api.github.com,10.0.0.0/8 --allow-port 53/udp --deny-port 22 cargo build
+```
+
+They are applied after every profile, those selected with `--profile` included, and they
+**move** an entry rather than only adding it: `--allow-dest X` takes `X` out of `dest.deny` and
+puts it in `dest.allow`, and `--deny-dest X` does the opposite. Without that, allowing something a
+profile denied would change nothing, since a deny always wins. Entries are compared once
+normalised — `localhost` stands for both of its networks, host names ignore case — and a port
+is only the same rule with the same range and protocol, so `--deny-port 443` leaves an allowed
+`443/tcp` alone. Allowing and denying the same entry at once is an error.
+
+When no profile has a `network` table, the flags make a policy of their own. If any of them
+allows something, it denies everything else, as `network = { ... }` would; if they only deny,
+everything else stays allowed. Either way the other settings keep their defaults — the service
+manager stays out of reach and `on_unavailable` is `"fail"`. When a profile does have a policy,
+its `default` and `inbound` are left as they are.
 
 Denying everything (`network = {}`) is realised with `PrivateNetwork=yes` and needs nothing
 else — unless it also asks to be told what it turned away, which attaches an observer beside it;

@@ -70,6 +70,22 @@ struct Args {
     #[arg(long)]
     no_match: bool,
 
+    /// Allow a destination (address, CIDR, host or glob), even one a profile denies (repeatable, comma-separated).
+    #[arg(long, value_name = "DEST", value_delimiter = ',')]
+    allow_dest: Vec<String>,
+
+    /// Deny a destination, even one a profile allows (repeatable, comma-separated).
+    #[arg(long, value_name = "DEST", value_delimiter = ',')]
+    deny_dest: Vec<String>,
+
+    /// Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated).
+    #[arg(long, value_name = "PORT[/PROTO]", value_delimiter = ',')]
+    allow_port: Vec<String>,
+
+    /// Deny a port or range, optionally `/tcp` or `/udp`, even one a profile allows (repeatable, comma-separated).
+    #[arg(long, value_name = "PORT[/PROTO]", value_delimiter = ',')]
+    deny_port: Vec<String>,
+
     // Reachable only when scudo is invoked by name, and nothing checks: the
     // argv[0] dispatch rewrites a symlinked call into `scudo -- <command> …`,
     // after which every flag belongs to the command.
@@ -199,6 +215,15 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
 
     let bin = which(&args.command, &self_exe)?;
 
+    // Before the config: a mistyped rule is the command line's fault, and says
+    // so without waiting on anything else.
+    let network = scudo::policy::NetworkOverrides::parse(
+        &args.allow_dest,
+        &args.deny_dest,
+        &args.allow_port,
+        &args.deny_port,
+    )?;
+
     let loaded = scudo::config::load_configs()?;
     let mut resolved = scudo::profile::resolve_with(
         &loaded.profiles,
@@ -207,6 +232,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         scudo::profile::ResolveOptions {
             profiles: &args.profile,
             no_match: args.no_match,
+            network: Some(&network),
         },
     )?;
 

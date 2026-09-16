@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub use filesystem::{FilesystemConfig, FilesystemPolicy};
-pub use network::{LogLevel, NetworkConfig, NetworkPolicy, OnUnavailable};
+pub use network::{LogLevel, NetworkConfig, NetworkOverrides, NetworkPolicy, OnUnavailable};
 
 /// A single enforcement policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
