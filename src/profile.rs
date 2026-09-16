@@ -115,20 +115,14 @@ pub fn resolve_with(
             } else {
                 profile.pattern.clone()
             };
-            if !resolved.iter().all(matches_cmd) {
-                continue;
-            }
-            match resolved
-                .iter()
-                .find(|p| !matches!(p, CommandPattern::Sentinel))
-            {
+            // A profile without `match` has no patterns and matches nothing:
+            // the normal shape of a base profile, reachable only via
+            // `extend`/`--profile`.
+            match matching_pattern(&resolved, matches_cmd) {
                 Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
                 Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
                 Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
-                // A profile without `match` has no patterns, so `all` above was
-                // vacuously true; it is dropped here instead. This is the normal
-                // shape of a base profile, reachable only via `extend`/`--profile`.
-                _ => {}
+                Some(CommandPattern::Sentinel) | None => {}
             }
         }
     }
@@ -139,17 +133,17 @@ pub fn resolve_with(
 
     let chain = glob_matches
         .iter()
-        .chain(regex_matches.iter())
-        .chain(exact_matches.iter())
-        .map(|entry| (entry, false))
-        .chain(selected.iter().map(|entry| (entry, true)));
+        .map(|entry| (entry, Some("glob")))
+        .chain(regex_matches.iter().map(|entry| (entry, Some("regex"))))
+        .chain(exact_matches.iter().map(|entry| (entry, Some("exact"))))
+        .chain(selected.iter().map(|entry| (entry, None)));
 
-    for ((name, profile), explicit) in chain {
-        if explicit {
-            match_log.push(format!("profile '{name}' selected explicitly"));
-        } else {
-            let (kind, pattern) = match_description(&profile.pattern);
+    for ((name, profile), kind) in chain {
+        if let Some(kind) = kind {
+            let pattern = match_description(&profile.pattern);
             match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
+        } else {
+            match_log.push(format!("profile '{name}' selected explicitly"));
         }
 
         let (props, m) = expand_extend(configs, profile, &mut Vec::new(), &mut match_log, 0)?;
@@ -192,17 +186,32 @@ fn select_profiles<'a>(
     Ok(selected)
 }
 
-fn match_description(patterns: &[CommandPattern]) -> (&'static str, String) {
-    let kind = match patterns
-        .iter()
-        .find(|p| !matches!(p, CommandPattern::Sentinel))
-    {
-        Some(CommandPattern::Exact(_, _)) => "exact",
-        Some(CommandPattern::Glob(_, _)) => "glob",
-        Some(CommandPattern::Regex(_, _)) => "regex",
-        _ => "never",
-    };
-    let joined = patterns
+/// Whether a profile's (sentinel-free) patterns match, and if so the pattern
+/// that decides its specificity tier.
+///
+/// Command-name patterns are alternatives: one matching is enough, and it is the
+/// one that sets the tier. Full-command patterns are extra conditions that must
+/// all hold; they set the tier only when there is no command-name pattern. A
+/// profile with no patterns at all never matches.
+fn matching_pattern(
+    patterns: &[CommandPattern],
+    matches: impl Fn(&CommandPattern) -> bool,
+) -> Option<&CommandPattern> {
+    let targeting = |target| patterns.iter().filter(move |p| p.target() == Some(target));
+    let mut full = targeting(MatchTarget::FullCommand);
+    if !full.all(&matches) {
+        return None;
+    }
+    let mut command = targeting(MatchTarget::Command).peekable();
+    if command.peek().is_some() {
+        command.find(|p| matches(p))
+    } else {
+        targeting(MatchTarget::FullCommand).next()
+    }
+}
+
+fn match_description(patterns: &[CommandPattern]) -> String {
+    patterns
         .iter()
         .filter_map(|p| match p {
             CommandPattern::Exact(s, _) => Some(s.as_str()),
@@ -211,8 +220,7 @@ fn match_description(patterns: &[CommandPattern]) -> (&'static str, String) {
             CommandPattern::Sentinel => None,
         })
         .collect::<Vec<_>>()
-        .join("|");
-    (kind, joined)
+        .join("|")
 }
 
 /// Resolve `CommandPattern::Sentinel` entries by splicing in the first parent's
@@ -1528,6 +1536,109 @@ mod tests {
         // Does not match on command name alone (without matching args).
         let r = resolve(&configs, "git", &[]).unwrap();
         assert!(r.systemd_args.is_empty());
+    }
+
+    // ── multi-pattern match semantics ─────────────────────────────────────────
+
+    fn matched(configs: &ValidatedConfigMap, command: &str, command_args: &[&str]) -> bool {
+        !resolve(configs, command, &args(command_args))
+            .unwrap()
+            .systemd_args
+            .is_empty()
+    }
+
+    #[test]
+    fn command_names_in_array_are_alternatives() {
+        let configs = configs_from_toml(
+            r#"
+            [ov]
+            match = ["ov", "openviking", "openviking-server"]
+            systemd.CPUQuota = "10%"
+            "#,
+        );
+        assert!(matched(&configs, "ov", &["health"]));
+        assert!(matched(&configs, "openviking", &[]));
+        assert!(matched(&configs, "openviking-server", &[]));
+        assert!(!matched(&configs, "other", &[]));
+    }
+
+    #[test]
+    fn full_command_patterns_are_extra_conditions() {
+        let configs = configs_from_toml(
+            r#"
+            [git-commit]
+            match = ["git", { pattern = "\\bcommit\\b", type = "regex", target = "full_command" }]
+            systemd.CPUQuota = "10%"
+            "#,
+        );
+        assert!(matched(&configs, "git", &["commit", "-m", "x"]));
+        assert!(!matched(&configs, "git", &["status"]));
+        assert!(!matched(&configs, "hg", &["commit"]));
+    }
+
+    #[test]
+    fn alternatives_combine_with_full_command_conditions() {
+        let configs = configs_from_toml(
+            r#"
+            [vcs-commit]
+            match = ["git", "hg", { pattern = "commit", type = "regex", target = "full_command" }]
+            systemd.CPUQuota = "10%"
+            "#,
+        );
+        assert!(matched(&configs, "hg", &["commit"]));
+        assert!(matched(&configs, "git", &["commit"]));
+        assert!(!matched(&configs, "hg", &["log"]));
+        assert!(!matched(&configs, "svn", &["commit"]));
+    }
+
+    #[test]
+    fn tier_comes_from_the_pattern_that_matched() {
+        let configs = configs_from_toml(
+            r#"
+            [named]
+            match = ["ov", { pattern = "o*", type = "glob" }]
+            systemd.CPUQuota = "10%"
+
+            [wide]
+            match = { pattern = "*", type = "glob" }
+            systemd.CPUQuota = "90%"
+            "#,
+        );
+        // `ov` hits the exact entry, so `named` outranks the glob-only `wide`.
+        let r = resolve(&configs, "ov", &[]).unwrap();
+        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
+        assert!(!has_arg(&r.systemd_args, "CPUQuota=90%"));
+        assert!(
+            r.match_log
+                .iter()
+                .any(|l| l.contains("'named' matched exact"))
+        );
+
+        // `oo` only hits the glob entry, so `named` is a glob match too.
+        let r = resolve(&configs, "oo", &[]).unwrap();
+        assert!(
+            r.match_log
+                .iter()
+                .any(|l| l.contains("'named' matched glob"))
+        );
+    }
+
+    #[test]
+    fn sentinel_adds_parent_names_as_alternatives() {
+        let configs = configs_from_toml(
+            r#"
+            [base]
+            match = ["base"]
+
+            [child]
+            extend = "base"
+            match = ["...", "extra"]
+            systemd.CPUQuota = "10%"
+            "#,
+        );
+        assert!(matched(&configs, "base", &[]));
+        assert!(matched(&configs, "extra", &[]));
+        assert!(!matched(&configs, "other", &[]));
     }
     // ── explicit profile selection tests ──────────────────────────────────────
 

@@ -81,6 +81,10 @@ pub enum MatchTarget {
 
 /// Compiled match pattern stored on a validated profile.
 /// `Sentinel` represents `"..."` — replaced with the parent profile's patterns at resolve time.
+///
+/// Within one profile, patterns targeting the command name are alternatives (any
+/// one of them suffices), while patterns targeting the full command line are
+/// additional conditions that must all hold.
 #[derive(Debug, Clone)]
 pub enum CommandPattern {
     Exact(String, MatchTarget),
@@ -88,6 +92,19 @@ pub enum CommandPattern {
     Glob(Pattern, MatchTarget),
     /// `"..."` — splices the first parent's patterns in at this position during resolve.
     Sentinel,
+}
+
+impl CommandPattern {
+    /// What the pattern is compared against; `None` for an unresolved sentinel.
+    #[must_use]
+    pub fn target(&self) -> Option<MatchTarget> {
+        match self {
+            CommandPattern::Exact(_, t)
+            | CommandPattern::Regex(_, t)
+            | CommandPattern::Glob(_, t) => Some(*t),
+            CommandPattern::Sentinel => None,
+        }
+    }
 }
 
 /// A single raw match entry as written in TOML.

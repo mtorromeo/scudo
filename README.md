@@ -792,9 +792,10 @@ The `match` field controls which commands a profile applies to:
 | `match = { pattern = "curl*", type = "glob" }` | glob match |
 | `match = { pattern = "^curl", type = "regex" }` | regex match |
 | `match = { pattern = "git commit*", type = "glob", target = "full_command" }` | glob match against full command line |
-| `match = [...]` | array of any of the above forms |
+| `match = ["zed", "zeditor"]` | matches either `zed` or `zeditor` |
+| `match = [...]` | array of any of the above forms (see below) |
 
-In the table form `pattern` is required. The `type` field accepts `exact` (default), `glob`, or `regex`. The `target` field accepts `command` (default, matches against the command name only) or `full_command` (matches against the command name and all arguments joined with spaces). `target` is only available in the table form; the simple string form always targets the command name. When the `match` field is an array, `"..."` splices the first parent profile's patterns at that position — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
+In the table form `pattern` is required. The `type` field accepts `exact` (default), `glob`, or `regex`. The `target` field accepts `command` (default, matches against the command name only) or `full_command` (matches against the command name and all arguments joined with spaces). `target` is only available in the table form; the simple string form always targets the command name. When the `match` field is an array, the entries targeting the command name are alternatives — any one of them matching is enough — while the entries with `target = "full_command"` are additional conditions that must all hold. So `["git", "hg", { pattern = "\\bcommit\\b", type = "regex", target = "full_command" }]` means "`git` or `hg`, and `commit` somewhere on the command line". The specificity tier of the profile (see below) is that of the command-name entry that matched, or of the first full-command entry when there are no command-name entries. In an array, `"..."` splices the first parent profile's patterns at that position, so its command names become further alternatives — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
 
 When multiple profiles match the same command, they are merged in order of increasing specificity: glob < regex < exact. Within each tier, the last match wins for scalar values.
 
