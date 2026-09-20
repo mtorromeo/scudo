@@ -127,7 +127,7 @@ Each TOML section defines a profile. The section name identifies the profile for
 | Field | Type | Description |
 |-------|------|-------------|
 | `match` | see [Match patterns](#match-patterns) | Pattern(s) to match against the command name. Absent = the profile never matches a command on its own and is reachable only through `extend` or `--profile`. |
-| `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
+| `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence); see [Extending several profiles](#extending-several-profiles). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
 | `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |
@@ -871,6 +871,35 @@ systemd.ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
 ```
 
 `"..."` may appear at most once per array.
+
+### Extending several profiles
+
+With more than one entry in `extend`, the whole inheritance graph is flattened into a
+single merge order before anything is merged: each profile is applied after every profile
+it extends, and a profile shared by several branches is applied only once. Lists therefore
+accumulate across sibling parents instead of one branch replacing the other's:
+
+```toml
+[base]
+systemd.BindPaths = ["/base"]
+
+[cargo]
+extend = "base"
+systemd.BindPaths = ["...", "$HOME/.cargo"]
+
+[composer]
+extend = "base"
+systemd.BindPaths = ["...", "$HOME/.composer"]
+
+[dev]
+match = "dev"
+extend = ["cargo", "composer"]       # → /base, ~/.cargo, ~/.composer
+systemd.BindPaths = ["...", "$PWD"]  # → /base, ~/.cargo, ~/.composer, $PWD
+```
+
+`/base` is applied once even though both parents extend it. For scalar values the usual
+rule still holds: the rightmost parent wins over the ones before it, and the profile's own
+value wins over all of them.
 
 ### Cross-file profile inheritance
 

@@ -142,6 +142,14 @@ pub fn resolve_with(
         .chain(exact_matches.iter().map(|entry| (entry, Some("exact"))))
         .chain(selected.iter().map(|entry| (entry, None)));
 
+    // The whole chain is flattened into a single merge order first. Merging each
+    // branch on its own and then combining the results would hand the next branch
+    // an array whose `"..."` has already been resolved away, and an array without
+    // the sentinel replaces instead of extending: two parents that both add to the
+    // same list would keep only the last one's additions.
+    let mut order: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+
     for ((name, profile), kind) in chain {
         if let Some(kind) = kind {
             let pattern = match_description(&profile.pattern);
@@ -150,16 +158,36 @@ pub fn resolve_with(
             match_log.push(format!("profile '{name}' selected explicitly"));
         }
 
-        let (props, m) = expand_extend(configs, profile, &mut Vec::new(), &mut match_log, 0)?;
-        merge_into(&mut merged, props)?;
-        meta.exec = m.exec.or(meta.exec);
-        meta.verbose = m.verbose.or(meta.verbose);
-        meta.confirm = m.confirm.or(meta.confirm);
-        meta.arg_aliases.extend(m.arg_aliases);
-        meta.arg_flags.extend(m.arg_flags);
-        merge_network(&mut meta.network, m.network)?;
-        meta.log = m.log.over(meta.log);
-        meta.filesystem = m.filesystem.over(meta.filesystem);
+        // Already applied as somebody else's base, but it belongs where the chain
+        // puts it: the tier it matched in, or the position the command line gave
+        // it, is what decides its precedence.
+        seen.retain(|n| n != *name);
+        order.retain(|(n, _)| n != name);
+
+        linearize(
+            configs,
+            name,
+            &mut Vec::new(),
+            &mut seen,
+            &mut order,
+            &mut match_log,
+            0,
+        )?;
+    }
+
+    for (_, profile) in order {
+        merge_into(&mut merged, profile.properties.clone())?;
+        meta.exec = profile.exec.clone().or(meta.exec);
+        meta.verbose = profile.verbose.or(meta.verbose);
+        meta.confirm = profile.confirm.or(meta.confirm);
+        meta.arg_aliases.extend(profile.arg_aliases.clone());
+        meta.arg_flags.extend(profile.arg_flags.iter().cloned());
+        merge_network(
+            &mut meta.network,
+            profile.network.clone().map(table_to_properties),
+        )?;
+        meta.log = profile.log.clone().over(meta.log);
+        meta.filesystem = profile.filesystem.over(meta.filesystem);
     }
 
     let overrides = opts.network.filter(|overrides| !overrides.is_empty());
@@ -286,76 +314,61 @@ fn resolve_patterns(
     Ok(result)
 }
 
-/// Recursively resolve `extend`, returning the fully-merged property map and
-/// the metadata flags for this profile's chain.
+/// Flatten the `extend` graph rooted at `name` into a merge order, appending to
+/// `out`.
 ///
-/// Multiple parents are resolved left-to-right; later entries take precedence.
-/// `visited` tracks the current resolution path for cycle detection; it is
-/// push/popped per branch so that diamond inheritance (A → [B, C] where B and C
-/// both extend D) works correctly.
-fn expand_extend(
-    configs: &ValidatedConfigMap,
-    profile: &ValidatedProfileConfig,
-    visited: &mut Vec<String>,
+/// Parents are walked left-to-right and a profile is appended only once every
+/// profile it extends has been, so merging in that order lets a child override
+/// what it extends and the rightmost parent win over the ones before it.
+///
+/// A profile already in `out` is not added a second time: a diamond (A → [B, C],
+/// both extending D) applies D once, and B and C then each extend D's lists in
+/// turn instead of replacing one another's additions.
+///
+/// `path` is the branch currently being walked, for cycle detection; `seen`
+/// records what has already been appended, across the whole resolution.
+fn linearize<'a>(
+    configs: &'a ValidatedConfigMap,
+    name: &str,
+    path: &mut Vec<String>,
+    seen: &mut Vec<String>,
+    out: &mut Vec<(&'a str, &'a ValidatedProfileConfig)>,
     log: &mut Vec<String>,
     depth: usize,
-) -> Result<(Properties, ProfileMeta)> {
-    let mut base = Properties::new();
-    let mut base_meta = ProfileMeta::default();
+) -> Result<()> {
+    if seen.iter().any(|n| n == name) {
+        return Ok(());
+    }
+    let (key, profile) = configs
+        .0
+        .get_key_value(name)
+        .with_context(|| format!("extended profile '{name}' not found"))?;
 
     for parent_name in &profile.extend {
-        if visited.contains(parent_name) {
+        if path.contains(parent_name) {
             bail!("circular profile extension: {parent_name}");
         }
-        let parent = configs
-            .0
-            .get(parent_name)
-            .with_context(|| format!("extended profile '{parent_name}' not found"))?;
 
         let indent = " ".repeat(depth.saturating_mul(3).saturating_add(2));
         log.push(format!("{indent}└─ extends '{parent_name}'"));
 
-        visited.push(parent_name.clone());
-        let (parent_props, parent_meta) =
-            expand_extend(configs, parent, visited, log, depth.saturating_add(1))?;
-        visited.pop(); // restore so sibling branches can share the same parents
-
-        merge_into(&mut base, parent_props)?;
-        // Later parent (rightmost) wins for scalar meta fields.
-        base_meta.exec = parent_meta.exec.or(base_meta.exec);
-        base_meta.verbose = parent_meta.verbose.or(base_meta.verbose);
-        base_meta.confirm = parent_meta.confirm.or(base_meta.confirm);
-        base_meta.arg_aliases.extend(parent_meta.arg_aliases);
-        base_meta.arg_flags.extend(parent_meta.arg_flags);
-        merge_network(&mut base_meta.network, parent_meta.network)?;
-        base_meta.log = parent_meta.log.over(base_meta.log);
-        base_meta.filesystem = parent_meta.filesystem.over(base_meta.filesystem);
+        path.push(parent_name.clone());
+        let walked = linearize(
+            configs,
+            parent_name,
+            path,
+            seen,
+            out,
+            log,
+            depth.saturating_add(1),
+        );
+        path.pop(); // restore so sibling branches can share the same parents
+        walked?;
     }
 
-    // Current profile's values override everything inherited from parents.
-    let mut merged_aliases = base_meta.arg_aliases;
-    merged_aliases.extend(profile.arg_aliases.clone());
-    let mut merged_flags = base_meta.arg_flags;
-    merged_flags.extend(profile.arg_flags.iter().cloned());
-
-    let mut network = base_meta.network;
-    merge_network(
-        &mut network,
-        profile.network.clone().map(table_to_properties),
-    )?;
-
-    let meta = ProfileMeta {
-        exec: profile.exec.clone().or(base_meta.exec),
-        verbose: profile.verbose.or(base_meta.verbose),
-        confirm: profile.confirm.or(base_meta.confirm),
-        arg_aliases: merged_aliases,
-        arg_flags: merged_flags,
-        network,
-        log: profile.log.clone().over(base_meta.log),
-        filesystem: profile.filesystem.over(base_meta.filesystem),
-    };
-    merge_into(&mut base, profile.properties.clone())?;
-    Ok((base, meta))
+    seen.push(key.clone());
+    out.push((key.as_str(), profile));
+    Ok(())
 }
 
 fn table_to_properties(table: toml::Table) -> Properties {
@@ -986,6 +999,16 @@ mod tests {
         args.windows(2).any(|w| w[0] == "-p" && w[1] == kv)
     }
 
+    /// Every value emitted for one property, in the order they were emitted.
+    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    fn values(args: &[String], key: &str) -> Vec<String> {
+        let prefix = format!("{key}=");
+        args.windows(2)
+            .filter(|w| w[0] == "-p" && w[1].starts_with(&prefix))
+            .filter_map(|w| w[1].strip_prefix(&prefix).map(ToOwned::to_owned))
+            .collect()
+    }
+
     #[test]
     fn exact_match() {
         let configs = make_configs(vec![(
@@ -1515,6 +1538,124 @@ mod tests {
         assert!(has_arg(&r.systemd_args, "MemoryMax=64M"));
         // C (rightmost) wins over B for CPUQuota
         assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
+    }
+
+    /// Two parents that both add to the same list must both be honoured. Each
+    /// branch used to be resolved on its own, and the sentinel-free array that
+    /// came out replaced the previous parent's list instead of extending it, so
+    /// only the last parent's additions survived.
+    #[test]
+    fn multi_extend_siblings_accumulate_lists() {
+        let configs = configs_from_toml(
+            r#"
+            [base]
+            systemd.BindPaths = ["/base"]
+
+            [a]
+            extend = "base"
+            systemd.BindPaths = ["...", "/a"]
+
+            [b]
+            extend = "base"
+            systemd.BindPaths = ["...", "/b"]
+
+            [app]
+            match = "app"
+            extend = ["base", "a", "b"]
+            systemd.BindPaths = ["...", "/app"]
+            "#,
+        );
+        let r = resolve(&configs, "app", &[]).unwrap();
+        // "/base" appears once: the shared ancestor is applied a single time.
+        assert_eq!(
+            values(&r.systemd_args, "BindPaths"),
+            ["/base", "/a", "/b", "/app"]
+        );
+    }
+
+    /// The same, one level up: two matched profiles sharing a base apply it
+    /// once, and neither one's additions are lost.
+    #[test]
+    fn a_base_shared_by_two_matched_profiles_is_applied_once() {
+        let configs = configs_from_toml(
+            r#"
+            [base]
+            systemd.BindPaths = ["/base"]
+
+            [globbed]
+            match = { pattern = "ap*", type = "glob" }
+            extend = "base"
+            systemd.BindPaths = ["...", "/glob"]
+
+            [app]
+            match = "app"
+            extend = "base"
+            systemd.BindPaths = ["...", "/exact"]
+            "#,
+        );
+        let r = resolve(&configs, "app", &[]).unwrap();
+        assert_eq!(
+            values(&r.systemd_args, "BindPaths"),
+            ["/base", "/glob", "/exact"]
+        );
+    }
+
+    /// The network table splices its lists the same way, so it accumulates the
+    /// same way across sibling parents.
+    #[test]
+    fn multi_extend_siblings_accumulate_network_lists() {
+        let policy = resolved_policy(
+            r#"
+            [base]
+            network.default = "deny"
+            network.dest.allow = ["1.1.1.1"]
+
+            [a]
+            extend = "base"
+            network.dest.allow = ["...", "a.example"]
+
+            [b]
+            extend = "base"
+            network.dest.allow = ["...", "b.example"]
+
+            [app]
+            match = "app"
+            extend = ["a", "b"]
+            "#,
+            "app",
+            &[],
+        );
+        assert_eq!(
+            policy.dest.allow,
+            vec![
+                Destination::Net {
+                    addr: "1.1.1.1".parse().unwrap(),
+                    prefix_len: 32u8,
+                },
+                Destination::Host("a.example".to_owned()),
+                Destination::Host("b.example".to_owned()),
+            ]
+        );
+    }
+
+    /// A profile that a lower-tier profile extends still has the last word at
+    /// its own tier: where the chain puts it decides, not the inheritance edge.
+    #[test]
+    fn an_exact_match_still_wins_over_a_glob_that_extends_it() {
+        let configs = configs_from_toml(
+            r#"
+            [app]
+            match = "app"
+            systemd.CPUQuota = "50%"
+
+            [globbed]
+            match = { pattern = "ap*", type = "glob" }
+            extend = "app"
+            systemd.CPUQuota = "10%"
+            "#,
+        );
+        let r = resolve(&configs, "app", &[]).unwrap();
+        assert_eq!(values(&r.systemd_args, "CPUQuota"), ["50%"]);
     }
 
     #[test]
