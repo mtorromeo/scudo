@@ -1101,6 +1101,34 @@ systemd.BindReadOnlyPaths = ["/prefix/$arg_include"]
 
 Using more than one multi-value argument variable inside the same string template is an error; use separate array entries instead.
 
+### Default values
+
+`${NAME:-DEFAULT}` stands for `DEFAULT` when `NAME` is unset or empty, as in the shell. It works
+with every kind of variable, so a profile can give an optional argument a sensible fallback:
+
+```toml
+[ls]
+match = "ls"
+filesystem.read = ["${arg_1:-$PWD}"]                          # ls → $PWD, ls dir → dir
+
+[build]
+match = "build"
+args.out = "--out"
+filesystem.write = ["${arg_out:-${PROJECT_DIR:-$PWD}/out}"]   # the argument, else the project, else the current directory
+```
+
+`DEFAULT` is itself a template — literal text, `$VAR`, or another `${…:-…}` to chain more
+fallbacks — and is expanded only when it is used: a `$VAR` that is undefined in an unused default
+is not an error. What counts as unset:
+
+| Variable | Unset when |
+|----------|------------|
+| `$arg_*` | the argument was not passed (or only with empty values) |
+| `$VAR` from the environment | it is not defined, or is empty |
+| [lookup variable](#lookup-variables) | nothing is found; its own `fallback` is then not consulted |
+
+`${arg_1:-}` is the same as `$arg_1`.
+
 ### Path canonicalization
 
 Entries of the `filesystem` lists are always made absolute. When a variable (`$arg_*` or `$VAR`) is used inside a systemd property that expects filesystem paths (such as `BindPaths`, `ReadWritePaths`, `WorkingDirectory`, etc.), its expanded value is automatically made absolute relative to `$PWD`. This handles the common case where the user passes a relative path on the command line:
@@ -1119,6 +1147,8 @@ Only the **expanded variable value** is canonicalized — literal text in the te
 systemd.ReadWritePaths = ["-$arg_1"]
 # ./relative  →  -/abs/cwd/relative   ('-' is literal, path is made absolute)
 ```
+
+A [default value](#default-values) taking a variable's place counts as the variable's value, literal text included: `${arg_1:-out}` becomes `/abs/cwd/out` when no argument is given.
 
 Absolute paths are passed through unchanged. Canonicalization is purely lexical (it does not require the path to exist).
 

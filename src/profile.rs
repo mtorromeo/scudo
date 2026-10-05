@@ -1,11 +1,9 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 use anyhow::{Context as _, Result, bail};
-use regex::Regex;
 use toml::Value;
 
 use crate::{
@@ -529,7 +527,7 @@ fn value_to_strings(val: &Value, vars: &Vars, is_path: bool) -> Result<Vec<Strin
     }
 }
 
-/// Expand `$VAR`, `${VAR}`, and `$arg_*` references in `s`.
+/// Expand `$VAR`, `${VAR}`, `${VAR:-DEFAULT}` and `$arg_*` references in `s`.
 ///
 /// - `$arg_name` / `${arg_name}` look up `name` in `arg_vars` (silently empty if absent).
 ///   If the variable holds N > 1 values, the template is replicated N times (one per value).
@@ -538,102 +536,209 @@ fn value_to_strings(val: &Value, vars: &Vars, is_path: bool) -> Result<Vec<Strin
 ///   [`find_up`]. When there is none its fallback decides, and `skip` makes the
 ///   whole of `s` expand to nothing.
 /// - All other `$VAR` references are resolved from the environment; missing vars are an error.
+/// - `${VAR:-DEFAULT}` expands `DEFAULT` instead when `VAR` is unset or empty: an
+///   `$arg_*` with no value, a lookup variable that finds nothing (its own fallback
+///   is not consulted), a missing environment variable. `DEFAULT` is itself a
+///   template, expanded only when it is used, so defaults can chain.
 /// - When `is_path` is `true`, every expanded variable value is made absolute using the
 ///   process's current directory. Only the variable expansion is canonicalized; literal
-///   text in the template is left untouched.
+///   text in the template is left untouched, except in a default taking a variable's place.
 ///
 /// Returns a `Vec<String>` (usually one element; N elements when an array arg causes
 /// explosion; none when a lookup variable is skipped).
 fn expand_vars(s: &str, vars: &Vars, is_path: bool) -> Result<Vec<String>> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)").expect("regex is valid")
-    });
-
     // We maintain a Vec of partially-built strings.
     // Most of the time this has exactly one element; it grows when an array arg is expanded.
     let mut results: Vec<String> = vec![String::new()];
-    let mut last_end = 0;
     let mut array_var_seen = false;
 
-    for cap in re.captures_iter(s) {
-        let m = cap.get(0).expect("match should not fail");
-        let literal = &s[last_end..m.start()];
-        let name = cap.get(1).or(cap.get(2)).map_or("", |m| m.as_str());
-        last_end = m.end();
-
-        if let Some(arg_name) = name.strip_prefix("arg_") {
-            let values = vars.args.get(arg_name).cloned().unwrap_or_default();
-            // Treat missing/empty arg var as a single empty-string expansion.
-            let raw_vals: Vec<String> = if values.is_empty() {
-                vec![String::new()]
-            } else {
-                values
-            };
-            // Canonicalize each non-empty value if this is a path property.
-            let expand_vals: Vec<String> = if is_path {
-                raw_vals
-                    .into_iter()
-                    .map(|v| if v.is_empty() { v } else { make_absolute(&v) })
-                    .collect()
-            } else {
-                raw_vals
-            };
-
-            if expand_vals.len() > 1 {
-                if array_var_seen {
-                    bail!("string template '{s}' contains more than one array argument variable");
+    for piece in parse_template(s)? {
+        let (name, default) = match piece {
+            Piece::Literal(text) => {
+                for r in &mut results {
+                    r.push_str(text);
                 }
-                array_var_seen = true;
-                // Explode: for each existing partial result × each value
-                let mut new_results =
-                    Vec::with_capacity(results.len().saturating_mul(expand_vals.len()));
-                for existing in &results {
-                    for val in &expand_vals {
-                        let mut new = existing.clone();
-                        new.push_str(literal);
-                        new.push_str(val);
-                        new_results.push(new);
+                continue;
+            }
+            Piece::Var { name, default } => (name, default),
+        };
+
+        let values = match resolve_var(name, vars, default.is_some())? {
+            Resolved::Values(values) if is_path => values
+                .into_iter()
+                .map(|v| if v.is_empty() { v } else { make_absolute(&v) })
+                .collect(),
+            Resolved::Values(values) => values,
+            Resolved::Skip => return Ok(Vec::new()),
+            Resolved::Unset => match default {
+                Some(default) => {
+                    let values = expand_vars(default, vars, is_path)?;
+                    if values.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    if is_path {
+                        values
+                            .into_iter()
+                            .map(|v| if v.is_empty() { v } else { make_absolute(&v) })
+                            .collect()
+                    } else {
+                        values
                     }
                 }
-                results = new_results;
-            } else {
-                for r in &mut results {
-                    r.push_str(literal);
-                    r.push_str(expand_vals.first().map_or("", String::as_str));
+                None => vec![String::new()],
+            },
+        };
+
+        if values.len() > 1 {
+            if array_var_seen {
+                bail!("string template '{s}' contains more than one array argument variable");
+            }
+            array_var_seen = true;
+            // Explode: for each existing partial result × each value
+            let mut new_results = Vec::with_capacity(results.len().saturating_mul(values.len()));
+            for existing in &results {
+                for val in &values {
+                    let mut new = existing.clone();
+                    new.push_str(val);
+                    new_results.push(new);
                 }
             }
+            results = new_results;
         } else {
-            let raw = if let Some(decl) = vars.lookups.get(name) {
-                let cwd = std::env::current_dir().context("finding the current directory")?;
-                match (find_up(&cwd, &decl.lookup), decl.fallback) {
-                    (Some(dir), _) => dir.to_string_lossy().into_owned(),
-                    (None, Fallback::Cwd) => cwd.to_string_lossy().into_owned(),
-                    (None, Fallback::Skip) => return Ok(Vec::new()),
-                    (None, Fallback::Error) => bail!(
-                        "variable '${name}': none of {} found in {} or above",
-                        decl.lookup.join(", "),
-                        cwd.display()
-                    ),
-                }
-            } else {
-                std::env::var(name)
-                    .with_context(|| format!("undefined environment variable '${name}'"))?
-            };
-            let val = if is_path { make_absolute(&raw) } else { raw };
             for r in &mut results {
-                r.push_str(literal);
-                r.push_str(&val);
+                r.push_str(values.first().map_or("", String::as_str));
             }
         }
     }
 
-    let suffix = &s[last_end..];
-    for r in &mut results {
-        r.push_str(suffix);
+    Ok(results)
+}
+
+/// What a variable reference resolves to before any default is applied.
+enum Resolved {
+    Values(Vec<String>),
+    /// Nothing to expand: the reference's default applies, or else it is empty.
+    Unset,
+    /// A lookup variable with `fallback = "skip"` found nothing.
+    Skip,
+}
+
+/// Resolve `name` as an argument, lookup or environment variable. With
+/// `has_default`, anything missing is [`Resolved::Unset`] instead of being
+/// settled by the variable's own fallback or turned into an error.
+fn resolve_var(name: &str, vars: &Vars, has_default: bool) -> Result<Resolved> {
+    if let Some(arg_name) = name.strip_prefix("arg_") {
+        return Ok(match vars.args.get(arg_name) {
+            Some(values) if values.iter().any(|v| !v.is_empty()) => {
+                Resolved::Values(values.clone())
+            }
+            _ => Resolved::Unset,
+        });
     }
 
-    Ok(results)
+    if let Some(decl) = vars.lookups.get(name) {
+        let cwd = std::env::current_dir().context("finding the current directory")?;
+        let dir = match (find_up(&cwd, &decl.lookup), decl.fallback) {
+            (Some(dir), _) => dir,
+            (None, _) if has_default => return Ok(Resolved::Unset),
+            (None, Fallback::Cwd) => cwd,
+            (None, Fallback::Skip) => return Ok(Resolved::Skip),
+            (None, Fallback::Error) => bail!(
+                "variable '${name}': none of {} found in {} or above",
+                decl.lookup.join(", "),
+                cwd.display()
+            ),
+        };
+        return Ok(Resolved::Values(vec![dir.to_string_lossy().into_owned()]));
+    }
+
+    match std::env::var(name) {
+        Ok(val) if !val.is_empty() || !has_default => Ok(Resolved::Values(vec![val])),
+        Err(e) if !has_default => {
+            Err(e).with_context(|| format!("undefined environment variable '${name}'"))
+        }
+        _ => Ok(Resolved::Unset),
+    }
+}
+
+/// A piece of a string template.
+#[derive(Debug, PartialEq, Eq)]
+enum Piece<'a> {
+    Literal(&'a str),
+    /// `$NAME`, `${NAME}` or `${NAME:-DEFAULT}`.
+    Var {
+        name: &'a str,
+        default: Option<&'a str>,
+    },
+}
+
+/// Split `s` into literal text and variable references. A `$` that starts no
+/// reference is literal; the default of `${NAME:-…}` may hold further braces,
+/// as long as they are balanced.
+fn parse_template(s: &str) -> Result<Vec<Piece<'_>>> {
+    let mut pieces = Vec::new();
+    let mut rest = s;
+
+    while let Some((literal, after)) = rest.split_once('$') {
+        if !literal.is_empty() {
+            pieces.push(Piece::Literal(literal));
+        }
+        if let Some(inner) = after.strip_prefix('{') {
+            let (body, tail) =
+                split_braced(inner).with_context(|| format!("unterminated '${{' in '{s}'"))?;
+            let (name, default) = match body.split_once(":-") {
+                Some((name, default)) => (name, Some(default)),
+                None => (body, None),
+            };
+            if name.is_empty() {
+                bail!("empty variable name in '{s}'");
+            }
+            pieces.push(Piece::Var { name, default });
+            rest = tail;
+        } else {
+            let end = after
+                .char_indices()
+                .find(|&(i, c)| {
+                    !(c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+                })
+                .map_or(after.len(), |(i, _)| i);
+            let (name, tail) = after.split_at(end);
+            pieces.push(if name.is_empty() {
+                // Not a reference: keep the `$` as text.
+                Piece::Literal("$")
+            } else {
+                Piece::Var {
+                    name,
+                    default: None,
+                }
+            });
+            rest = tail;
+        }
+    }
+    if !rest.is_empty() {
+        pieces.push(Piece::Literal(rest));
+    }
+    Ok(pieces)
+}
+
+/// Split `s` around the `}` closing a `${`, past any balanced braces before it.
+fn split_braced(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth = depth.checked_add(1)?,
+            '}' => {
+                if let Some(d) = depth.checked_sub(1) {
+                    depth = d;
+                } else {
+                    let (body, tail) = s.split_at(i);
+                    return Some((body, tail.strip_prefix('}')?));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1127,6 +1232,58 @@ mod tests {
     }
 
     #[test]
+    fn a_default_replaces_an_unset_or_empty_variable() {
+        // SAFETY: Setting an environment variable is safe here as it is only used for testing.
+        unsafe { std::env::set_var("SCUDO_TEST_DEFAULT_SET", "set") }
+        // SAFETY: as above.
+        unsafe { std::env::set_var("SCUDO_TEST_DEFAULT_EMPTY", "") }
+        assert_eq!(
+            expand_env("${SCUDO_TEST_DEFAULT_SET:-other}").unwrap(),
+            "set"
+        );
+        assert_eq!(
+            expand_env("${SCUDO_TEST_DEFAULT_EMPTY:-other}").unwrap(),
+            "other"
+        );
+        assert_eq!(
+            expand_env("${SCUDO_UNDEFINED_XYZ_VAR:-other}/x").unwrap(),
+            "other/x"
+        );
+        assert_eq!(
+            expand_env(
+                "${SCUDO_UNDEFINED_XYZ_VAR:-${SCUDO_UNDEFINED_ABC_VAR:-$SCUDO_TEST_DEFAULT_SET}}"
+            )
+            .unwrap(),
+            "set"
+        );
+        assert_eq!(expand_env("${arg_1:-}").unwrap(), "");
+        // A default is expanded only when used.
+        assert_eq!(
+            expand_env("${SCUDO_TEST_DEFAULT_SET:-$SCUDO_UNDEFINED_XYZ_VAR}").unwrap(),
+            "set"
+        );
+        // A `$` starting no reference stays as it is.
+        assert_eq!(expand_env("a$ b$1 $").unwrap(), "a$ b$1 $");
+        expand_env("${arg_1:-x").unwrap_err();
+        expand_env("${:-x}").unwrap_err();
+    }
+
+    #[test]
+    fn an_argument_default_applies_only_without_the_argument() {
+        let src = "[app]\nmatch = \"app\"\nargs.dir = { flags = \"--dir\", greedy = true }\nsystemd.Environment = [\"A=${arg_1:-none}\", \"D=${arg_dir:-$arg_1}\"]\n";
+        let args = systemd_args(src, "app", &[]);
+        assert_eq!(values(&args, "Environment"), ["A=none", "D="], "{args:?}");
+        let args = systemd_args(src, "app", &["pos", "--dir", "x", "--dir", "y"]);
+        assert_eq!(
+            values(&args, "Environment"),
+            ["A=pos", "D=x", "D=y"],
+            "{args:?}"
+        );
+        let args = systemd_args(src, "app", &["pos"]);
+        assert_eq!(values(&args, "Environment"), ["A=pos", "D=pos"], "{args:?}");
+    }
+
+    #[test]
     fn find_up_returns_the_closest_directory_holding_a_name() {
         let root = std::env::temp_dir().join(format!("scudo-find-up-{}", std::process::id()));
         let nested = root.join("repo/pkg/src/deep");
@@ -1209,6 +1366,21 @@ mod tests {
     }
 
     #[test]
+    fn a_default_overrides_the_fallback_of_a_lookup_variable() {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_string_lossy();
+        let args = lookup_args(
+            "systemd.ReadWritePaths = [\"${FAILED:-/a}\", \"${SKIPPED:-/b}\", \"${FOUND:-/c}\"]",
+        )
+        .unwrap();
+        assert_eq!(
+            values(&args, "ReadWritePaths"),
+            ["/a", "/b", &*cwd],
+            "{args:?}"
+        );
+    }
+
+    #[test]
     fn profile_lookup_variables_override_global_ones_and_the_environment() {
         // SAFETY: Setting an environment variable is safe here as it is only used for testing.
         unsafe { std::env::set_var("SCUDO_TEST_LOOKUP", "/from/env") }
@@ -1278,6 +1450,16 @@ mod tests {
         assert!(has_arg(
             &path_args("CPUQuota", "$SCUDO_TEST_NONPATH", &[]),
             "CPUQuota=relative/value"
+        ));
+    }
+
+    #[test]
+    fn a_path_default_is_made_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let expected = cwd.join("mydir").to_string_lossy().into_owned();
+        assert!(has_arg(
+            &path_args("BindPaths", "${arg_1:-mydir}", &[]),
+            &format!("BindPaths={expected}")
         ));
     }
 
