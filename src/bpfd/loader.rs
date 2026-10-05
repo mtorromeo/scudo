@@ -126,7 +126,7 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path, bus: &Arc<Bus>) -> Result<A
 
     // The resolver's ports are compiled into the programs, so its sockets have
     // to exist before they are loaded.
-    let sockets = if policy.needs_resolver() {
+    let sockets = if policy.needs_resolver() || policy.names_refused_lookups() {
         Some(Sockets::bind().context("starting the policy's DNS resolver")?)
     } else {
         None
@@ -147,6 +147,11 @@ pub fn attach(policy: &NetworkPolicy, cgroup: &Path, bus: &Arc<Bus>) -> Result<A
         .override_global("DEFAULT_ACTION", &action_value(policy.default), true)
         .override_global("RESOLVER_PORT_V4", &port_v4, true)
         .override_global("RESOLVER_PORT_V6", &port_v6, true)
+        .override_global(
+            "RESOLVER_REFUSED_ONLY",
+            &u8::from(!policy.needs_resolver()),
+            true,
+        )
         .override_global("PORTS_DENY_SET", &deny_set, true)
         .override_global("PORTS_ALLOW_SET", &allow_set, true)
         .override_global("LOG_DENIALS", &u8::from(reporting), true)
@@ -397,7 +402,9 @@ fn start_resolver(
         // so expiring it would delete the rule the config wrote. The sweep skips
         // anything in here.
         statics: statics.into_iter().collect(),
-        resolve_unknown: policy.resolves_unknown_names(),
+        // A resolver that is there only to name refusals is sent nothing the
+        // rules would let through, so it has nothing to forward.
+        resolve_unknown: policy.needs_resolver() && policy.resolves_unknown_names(),
         upstreams: resolver::system_upstreams(),
     };
     Worker::spawn("resolver", move |stop| {

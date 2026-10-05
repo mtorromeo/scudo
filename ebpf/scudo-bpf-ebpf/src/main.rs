@@ -38,14 +38,21 @@ use scudo_bpf_common::{
 static DEFAULT_ACTION: u8 = 0;
 
 /// Set by the loader: the loopback port scudo-bpfd's resolver listens on, or 0
-/// when the policy names no hosts, in which case queries are left alone and
-/// judged like any other traffic.
+/// when the sandbox has none — it names no hosts and nobody is watching its
+/// refusals — in which case queries are left alone and judged like any other
+/// traffic.
 #[unsafe(no_mangle)]
 static RESOLVER_PORT_V4: u16 = 0;
 
 /// The same, for queries sent over IPv6 (redirected to `::1`).
 #[unsafe(no_mangle)]
 static RESOLVER_PORT_V6: u16 = 0;
+
+/// Set by the loader: 1 when the resolver is there only to name the lookups the
+/// rules refuse. Queries the rules allow are then left alone, and only the rest
+/// are redirected, so the resolver can turn them away by name.
+#[unsafe(no_mangle)]
+static RESOLVER_REFUSED_ONLY: u8 = 0;
 
 /// Set by the loader: whether the matching port bitmap holds anything at all.
 /// When it does not, the verifier folds that whole stage away.
@@ -353,7 +360,7 @@ fn sock_addr_verdict(ctx: &SockAddrContext, v4: bool, stage: u8) -> i32 {
     } else {
         global(&RESOLVER_PORT_V6)
     };
-    if resolver != 0 && port == DNS_PORT {
+    if resolver != 0 && port == DNS_PORT && !dns_allowed_as_sent(sock_addr, v4, proto) {
         remember_dns_origin(ctx, sock_addr, v4);
         redirect_to_resolver(sock_addr, v4, resolver);
         return 1;
@@ -365,6 +372,22 @@ fn sock_addr_verdict(ctx: &SockAddrContext, v4: bool, stage: u8) -> i32 {
         judge_v6(sock_addr_v6(sock_addr), port, proto, stage)
     };
     i32::from(allowed)
+}
+
+/// Does a query get to go where it was sent, without the resolver?
+///
+/// Only when the resolver is there just to name refusals, and the rules would
+/// let the query through on their own.
+#[inline(always)]
+fn dns_allowed_as_sent(sock_addr: &bpf_sock_addr, v4: bool, proto: u8) -> bool {
+    if global(&RESOLVER_REFUSED_ONLY) == 0 {
+        return false;
+    }
+    if v4 {
+        verdict_v4(sock_addr.user_ip4, DNS_PORT, proto)
+    } else {
+        verdict_v6(sock_addr_v6(sock_addr), DNS_PORT, proto)
+    }
 }
 
 /// The socket a `sock_addr` hook is running for, as a cookie that survives from

@@ -253,6 +253,24 @@ impl NetworkPolicy {
         self.host_rules().next().is_some()
     }
 
+    /// `true` when the policy has no resolver of its own but should still put
+    /// the names of the lookups it turns away on the denial stream.
+    ///
+    /// Without a resolver a refused query is just a packet to the nameserver,
+    /// and all anyone hears about is that nameserver's address, not the name
+    /// that was asked for. So a sandbox being watched gets a resolver that
+    /// learns nothing and forwards nothing: the programs send it only the
+    /// queries the rules would have refused anyway, and it refuses them by
+    /// name. A query the rules allow still goes where it was sent, so what
+    /// resolves and what does not is unchanged.
+    ///
+    /// An [observer](NetworkPolicy::observer) is left out: its sandbox has a
+    /// network namespace of its own, which our loopback resolver is not in.
+    #[must_use]
+    pub fn names_refused_lookups(&self) -> bool {
+        self.reports_denials() && !self.observe_only && !self.needs_resolver()
+    }
+
     /// Every host rule in the policy, paired with the verdict it carries.
     pub fn host_rules(&self) -> impl Iterator<Item = (&str, Action)> {
         let deny = self.dest.deny.iter().map(|dest| (dest, Action::Deny));
@@ -1055,6 +1073,27 @@ mod tests {
                 .unwrap()
                 .needs_resolver()
         );
+    }
+
+    #[test]
+    fn a_watched_sandbox_without_host_rules_names_its_refused_lookups() {
+        let watched = |src: &str| {
+            policy(&format!("log = \"denied\"\n{src}"))
+                .unwrap()
+                .names_refused_lookups()
+        };
+        assert!(watched(r#"dest = { allow = ["localhost"] }"#));
+        // A resolver of its own already reports refusals by name.
+        assert!(!watched(r#"dest = { allow = ["example.com"] }"#));
+        // Nobody is listening.
+        assert!(
+            !policy(r#"dest = { allow = ["localhost"] }"#)
+                .unwrap()
+                .names_refused_lookups()
+        );
+        // The observer's netns has no way to our loopback resolver.
+        let observer = policy(r#"log = "denied""#).unwrap().observer().unwrap();
+        assert!(!observer.names_refused_lookups());
     }
 
     #[test]
