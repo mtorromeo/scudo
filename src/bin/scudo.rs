@@ -109,6 +109,16 @@ struct Args {
     #[arg(long, value_name = "TOKEN", hide = true, conflicts_with = "bpf_shim")]
     bpf_watch: Option<String>,
 
+    /// Internal: run the command as the filtered session bus proxy ID. Set by
+    /// the `scudo-dbus@.service` template.
+    #[arg(
+        long,
+        value_name = "ID",
+        hide = true,
+        conflicts_with_all = ["bpf_shim", "bpf_watch"]
+    )]
+    dbus_proxy: Option<String>,
+
     #[arg()]
     command: String,
 
@@ -211,6 +221,12 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
 
     if let Some(token) = args.bpf_watch.as_deref() {
         return watch(token, &args);
+    }
+
+    if let Some(id) = args.dbus_proxy.as_deref() {
+        let code = scudo::policy::dbus::serve(id, Path::new(&args.command))?;
+        #[expect(clippy::exit, reason = "the proxy's code has to become the unit's")]
+        std::process::exit(code);
     }
 
     let bin = which(&args.command, &self_exe)?;
@@ -316,14 +332,51 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     // Kept, not just printed: with `--tui` this goes to a stderr the panel is
     // about to draw over, and a policy that quietly lost its enforcement or its
     // reporting is exactly what the panel has to be able to say.
-    let warnings = applied.warnings;
-    for warning in &warnings {
-        warn!("{warning}");
-    }
+    let mut warnings = applied.warnings;
 
     resolved
         .systemd_args
         .extend(args.property.iter().map(|p| format!("--property={p}")));
+
+    // A profile that only spoke about the bus still asked for a sandbox.
+    let unsandboxed = resolved.systemd_args.is_empty()
+        && shim_token.is_none()
+        && resolved.dbus == scudo::policy::DbusConfig::default();
+    if unsandboxed {
+        debug!(
+            "no profile matched or empty systemd-run options for '{}'",
+            args.command
+        );
+    }
+
+    // Only a sandbox needs closing: a command run as it is has nothing to
+    // escape from. Ahead of the command line's properties, which have the last
+    // word.
+    let mut dbus_proxy = None;
+    if !unsandboxed {
+        let bus = scudo::policy::dbus::prepare(&resolved.dbus);
+        let properties: Vec<String> = bus
+            .properties
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .filter(|property| !resolved.systemd_args.contains(property))
+            .flat_map(|property| ["-p".to_owned(), property])
+            .collect();
+        let first_cli = resolved
+            .systemd_args
+            .iter()
+            .position(|arg| arg.starts_with("--property="))
+            .unwrap_or(resolved.systemd_args.len());
+        resolved
+            .systemd_args
+            .splice(first_cli..first_cli, properties);
+        warnings.extend(bus.warning);
+        dbus_proxy = bus.proxy;
+    }
+
+    for warning in &warnings {
+        warn!("{warning}");
+    }
 
     let options = scudo::runner::Options {
         verbose,
@@ -331,15 +384,8 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         log: &log,
         shim_token: shim_token.as_deref(),
         log_denials: reporting,
+        dbus_proxy: dbus_proxy.as_ref(),
     };
-
-    let unsandboxed = resolved.systemd_args.is_empty() && shim_token.is_none();
-    if unsandboxed {
-        debug!(
-            "no profile matched or empty systemd-run options for '{}'",
-            args.command
-        );
-    }
 
     #[cfg(feature = "tui")]
     if tui {
@@ -362,6 +408,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
                 token: shim_token,
                 reporting: reporting_state(reporting, shim_token_present, network_unwatched),
                 confirm: resolved.confirm,
+                dbus_proxy: dbus_proxy.as_ref(),
             },
         );
     }
@@ -386,6 +433,7 @@ struct UiContext<'a> {
     token: Option<String>,
     reporting: scudo::tui::Reporting,
     confirm: bool,
+    dbus_proxy: Option<&'a scudo::policy::dbus::Proxy>,
 }
 
 /// Why the panel would be empty, so it can say so rather than look broken.
@@ -430,6 +478,9 @@ fn start_ui(
     // Before the screen is taken over, so declining leaves the terminal exactly
     // as it was found.
     scudo::runner::confirm(&cmdline, context.confirm)?;
+    if let Some(proxy) = context.dbus_proxy {
+        proxy.write_args()?;
+    }
 
     let command = Path::new(&args.command)
         .file_name()

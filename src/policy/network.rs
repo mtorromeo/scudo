@@ -151,13 +151,6 @@ impl<T> RuleSet<T> {
 pub struct NetworkPolicy {
     pub default: Action,
     pub inbound: Action,
-    /// Whether the command may talk to the user's service manager.
-    ///
-    /// It must not, by default: a process that can reach `systemd --user` can
-    /// ask it to start a command in a sibling cgroup, which no program attached
-    /// to this one can see. That is a complete escape from the policy, and it is
-    /// two lines of shell.
-    pub service_manager: Action,
     pub on_unavailable: OnUnavailable,
     /// Whether the sandbox reports what it turns away. Carried in the policy
     /// because it is the daemon that has to act on it: the programs only emit
@@ -199,13 +192,6 @@ impl NetworkPolicy {
             && self.inbound == Action::Allow
             && self.dest.deny.is_empty()
             && self.ports.deny.is_empty()
-    }
-
-    /// `true` when the command must be kept away from the user's service
-    /// manager, which it could otherwise use to escape the policy entirely.
-    #[must_use]
-    pub fn isolates_service_manager(&self) -> bool {
-        self.service_manager == Action::Deny
     }
 
     /// `true` when the policy needs the eBPF enforcer to be applied.
@@ -306,7 +292,6 @@ impl NetworkPolicy {
 pub struct NetworkConfig {
     pub default: Option<Action>,
     pub inbound: Option<Action>,
-    pub service_manager: Option<Action>,
     pub on_unavailable: Option<OnUnavailable>,
     /// Report the accesses this policy refuses. `--verbose` implies it.
     pub log: Option<LogLevel>,
@@ -415,7 +400,6 @@ impl TryFrom<NetworkConfig> for NetworkPolicy {
         Ok(NetworkPolicy {
             default: config.default.unwrap_or_default(),
             inbound: config.inbound.unwrap_or_default(),
-            service_manager: config.service_manager.unwrap_or_default(),
             on_unavailable: config.on_unavailable.unwrap_or_default(),
             log: config.log.unwrap_or_default(),
             observe_only: false,
@@ -520,7 +504,6 @@ impl NetworkOverrides {
             NetworkPolicy {
                 default,
                 inbound: default,
-                service_manager: Action::default(),
                 on_unavailable: OnUnavailable::default(),
                 log: LogLevel::default(),
                 observe_only: false,
@@ -981,7 +964,6 @@ mod tests {
         let p = policy("").unwrap();
         assert_eq!(p.default, Action::Deny);
         assert_eq!(p.inbound, Action::Deny);
-        assert_eq!(p.service_manager, Action::Deny);
         assert_eq!(p.on_unavailable, OnUnavailable::Fail);
         assert!(p.dest.is_empty());
         assert!(p.ports.is_empty());
@@ -1266,7 +1248,6 @@ mod tests {
             .unwrap();
         assert_eq!(p.default, Action::Allow);
         assert_eq!(p.inbound, Action::Allow);
-        assert_eq!(p.service_manager, Action::Deny);
         assert_eq!(p.on_unavailable, OnUnavailable::Fail);
         assert!(!p.is_unrestricted());
     }
@@ -1380,14 +1361,12 @@ dest = { allow = ["1.1.1.1"] }"#,
     fn the_observer_keeps_the_policys_own_settings() {
         let observer = policy(
             r#"log = "denied"
-service_manager = "allow"
 dest = { deny = ["10.0.0.0/8"] }"#,
         )
         .unwrap()
         .observer()
         .unwrap();
 
-        assert_eq!(observer.service_manager, Action::Allow);
         assert_eq!(observer.dest.deny, parse_dest("10.0.0.0/8").unwrap());
     }
 }

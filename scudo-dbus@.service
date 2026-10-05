@@ -1,0 +1,9 @@
+[Unit]
+Description=scudo filtered session bus for sandbox %i
+# Pulled in by the sandbox it serves, and gone once that sandbox is.
+StopWhenUnneeded=yes
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/scudo --dbus-proxy %i -- /usr/bin/xdg-dbus-proxy
+ExecStopPost=-/usr/bin/rm -f %t/scudo/dbus/%i.sock %t/scudo/dbus/%i.args

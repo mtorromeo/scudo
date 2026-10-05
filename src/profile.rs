@@ -12,8 +12,8 @@ use crate::{
     config::{ArgDecls, Fallback, Profile, ValidatedConfigMap, VarDecls},
     logging::{Level, LogConfig},
     policy::{
-        Access, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides, NetworkPolicy,
-        Policy, mount_properties,
+        Access, DbusConfig, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides,
+        NetworkPolicy, Policy, mount_properties,
     },
 };
 
@@ -28,6 +28,9 @@ pub struct ResolvedProfile {
     pub match_log: Vec<String>,
     /// Policies to hand to `scudo-bpfd` before the command starts.
     pub policies: Vec<Policy>,
+    /// What the command gets of the session bus. Realised only once it is
+    /// known the command runs sandboxed at all.
+    pub dbus: DbusConfig,
 }
 
 /// Maps arg variable names to their accumulated values (always a `Vec`).
@@ -366,6 +369,7 @@ fn build_args(
         confirm: profile.confirm.unwrap_or(false),
         match_log,
         policies,
+        dbus: profile.dbus,
     })
 }
 

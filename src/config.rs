@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, de};
 
 use crate::{
     logging::LogConfig,
-    policy::{FilesystemConfig, NetworkConfig},
+    policy::{DbusConfig, FilesystemConfig, NetworkConfig},
     trust,
     tui::TuiConfig,
 };
@@ -163,6 +163,10 @@ pub struct ProfileConfig {
     /// sandbox says which paths its restrictions turned away.
     #[serde(default)]
     pub filesystem: FilesystemConfig,
+    /// The `[<profile>.dbus]` sub-table: what the command gets of the session
+    /// bus.
+    #[serde(default)]
+    pub dbus: DbusConfig,
     /// The `[<profile>.log]` sub-table: level and destination.
     #[serde(default)]
     pub log: LogConfig,
@@ -236,6 +240,7 @@ pub struct Profile {
     pub vars: VarDecls,
     pub network: Option<toml::Table>,
     pub filesystem: FilesystemConfig,
+    pub dbus: DbusConfig,
     pub log: LogConfig,
     pub systemd: toml::Table,
 }
@@ -264,6 +269,7 @@ impl Profile {
             .filesystem
             .clone()
             .over(core::mem::take(&mut self.filesystem));
+        self.dbus = other.dbus.clone().over(core::mem::take(&mut self.dbus));
         self.log = other.log.clone().over(core::mem::take(&mut self.log));
         merge_table(&mut self.systemd, &other.systemd);
     }
@@ -283,7 +289,12 @@ impl Profile {
             .chain(&config.filesystem.write)
             .chain(&config.filesystem.read)
             .chain(&config.filesystem.hide)
-            .chain(&config.filesystem.deny);
+            .chain(&config.filesystem.deny)
+            .chain(&config.dbus.see)
+            .chain(&config.dbus.talk)
+            .chain(&config.dbus.own)
+            .chain(&config.dbus.call)
+            .chain(&config.dbus.broadcast);
         let in_tables = |table: &toml::Table| table.values().any(holds_sentinel);
         if lists.into_iter().any(|e| e == SENTINEL)
             || in_tables(&config.systemd)
@@ -297,6 +308,10 @@ impl Profile {
         if let Some(table) = &config.network {
             validate_network(name, table)?;
         }
+        config
+            .dbus
+            .validate()
+            .with_context(|| format!("profile '{name}'"))?;
         validate_vars(&config.vars).with_context(|| format!("profile '{name}'"))?;
         let patterns = config
             .r#match
@@ -316,6 +331,7 @@ impl Profile {
             vars: config.vars,
             network: config.network,
             filesystem: config.filesystem,
+            dbus: config.dbus,
             log: config.log,
             systemd: config.systemd,
         })

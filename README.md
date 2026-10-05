@@ -138,6 +138,7 @@ Each TOML section defines a profile. The section name identifies the profile for
 | `vars` | table | Variables naming a directory found by looking up the tree; see [Lookup variables](#lookup-variables) |
 | `filesystem` | table | Which paths the command may write, read, not see or not touch; see [Filesystem access](#filesystem-access) |
 | `network` | table | Network policy; see [Network filtering](#network-filtering) |
+| `dbus` | table | What the command gets of the session bus; see [Session bus](#session-bus) |
 | `log` | table | Level and destination for scudo's own output; see [Logging](#logging) |
 | `systemd` | table | Unit properties passed to `systemd-run`; see below |
 
@@ -194,6 +195,14 @@ filesystem.write = [
   "$HOME/.config/Code - OSS",
   "$PROJECT_DIR",
 ]
+# The launcher leaves the editor running and exits: keep the unit until it is gone.
+systemd.ExitType = "cgroup"
+dbus.talk = [
+  "org.freedesktop.secrets",
+  "org.freedesktop.Notifications",
+  "org.freedesktop.portal.*",
+]
+dbus.own = ["com.visualstudio.code.*"]
 
 # npm: the npm cache and config, and the project
 [npm]
@@ -238,6 +247,78 @@ Every entry is made absolute against the current directory, and an entry that ex
 
 Properties written by hand in the `systemd` table are passed as they are, next to the ones generated here.
 
+### Session bus
+
+A command that can reach `systemd --user` can leave its sandbox: it only has to ask for a
+process to be started in a sibling unit, or for its own to be moved into one. Chromium and
+Electron do the latter on their own, to give themselves an `app-*.scope`. Out of the
+sandbox's cgroup nothing bound to it applies any more — resource limits, IP filters, the
+[network policy](#network-filtering) — and the unit around it ends while the command is still
+running, taking its `PrivateTmp=` with it.
+
+So every sandboxed command, unless its profile says otherwise, gets:
+
+| Property | Why |
+|----------|-----|
+| `InaccessiblePaths=-$XDG_RUNTIME_DIR/systemd` | the service manager's private socket |
+| `InaccessiblePaths=-$XDG_RUNTIME_DIR/bus` | the session bus, which leads there too |
+| `ProtectControlGroups=yes` | moving by hand, through `cgroup.procs` |
+
+Plenty of programs want a session bus, for the keyring, notifications or portals. The `dbus`
+table gives them a filtered one instead:
+
+```toml
+[code.dbus]
+session = "filter"    # "deny" (default), "filter" or "allow"
+talk = ["org.freedesktop.secrets", "org.freedesktop.Notifications", "org.freedesktop.portal.*"]
+see = []              # names that may be seen, but not called
+own = ["com.visualstudio.code.*"]
+call = []             # "NAME=RULE": calls allowed on a name not talked to
+broadcast = []        # "NAME=RULE": broadcasts received from a name not talked to
+log = false           # log every message, to the proxy unit's journal
+```
+
+The lists are an allow-list: whatever they do not name, the command cannot see on the bus, so
+it cannot reach `org.freedesktop.systemd1` unless it is named. Naming anything implies
+`session = "filter"`. Names may end in `.*`, which also matches the name itself; that is the
+only wildcard there is. The options and their rules are
+[`xdg-dbus-proxy`'s](https://man.archlinux.org/man/xdg-dbus-proxy.1), which does the
+filtering. `session = "allow"` takes none of the three properties above away and leaves the
+bus as it is, and with it the way out.
+
+A name let through is let through entirely, whatever it can do on the command's behalf. Some
+services start processes outside the sandbox when asked, `org.freedesktop.portal.*` included
+(opening a link launches the browser, for instance), so name what the command needs and
+nothing more.
+
+#### How the filter works
+
+The proxy runs as a unit of its own, `scudo-dbus@<id>.service`, so that it can reach the real
+bus that the sandbox cannot. The sandbox `Wants=` it and starts `After=` it is listening; its
+socket is bind-mounted over `$XDG_RUNTIME_DIR/bus`, where every client already looks, and the
+directory holding the other sandboxes' proxies is made inaccessible. Nothing needs the proxy
+once the sandbox is gone (`StopWhenUnneeded=yes`), so systemd stops it. A proxy that fails to
+start fails the sandbox as well: the bind mount has nothing to mount.
+
+It needs `xdg-dbus-proxy`, and the `scudo-dbus@.service` template installed as a user unit:
+
+```bash
+sudo install -Dm644 scudo-dbus@.service -t /usr/lib/systemd/user
+systemctl --user daemon-reload
+```
+
+Without either, a profile that asked for a filter gets no bus at all, and a warning.
+
+A bus listening on an abstract socket (`unix:abstract=`) is not a file, and no mount can hide
+it: scudo warns when it finds one, and only `PrivateNetwork=yes` keeps the command from it.
+
+#### Programs that detach
+
+Some launchers, VS Code's included, start the real program in the background and exit. The
+unit ends with its main process, and systemd kills what is left in it. Now that the program
+cannot move itself to a unit of its own, add `systemd.ExitType = "cgroup"`: the unit then
+lasts until the last process in it is gone, and `scudo` waits that long too.
+
 ### Network filtering
 
 `PrivateNetwork = true` is all-or-nothing. The `[profile.network]` table asks for something
@@ -251,7 +332,6 @@ extend = "sandboxed-home"
 [cargo.network]
 default = "deny"            # "deny" (default) or "allow"
 inbound = "deny"            # "deny" (default) or "allow"
-service_manager = "deny"    # "deny" (default) or "allow"
 on_unavailable = "fail"     # "fail" (default), "no-network", or "warn"
 log = "off"                 # "off" (default) or "denied"; "denied" is watchable
                             # even when the policy denies everything
@@ -415,17 +495,9 @@ from migrating out of the cgroup the programs are attached to, and one that need
 loses systemd-resolved's varlink sockets, since a lookup made through `nss-resolve` would
 neither obey the allowlist nor teach the policy the address it resolved to.
 
-Unless `service_manager` says otherwise, a profile with a policy also loses access to
-`systemd --user`, via `InaccessiblePaths` on `$XDG_RUNTIME_DIR/systemd` and
-`$XDG_RUNTIME_DIR/bus`. Without that the policy is trivially bypassed: a sandboxed command can
-ask the service manager to start a process in a sibling cgroup, where no program of ours is
-attached. That holds however the policy is realised — `network = {}` and a policy degraded to
-`no-network` included, since `PrivateNetwork=yes` is worth nothing while the command can ask
-for a unit that has a network.
-
-That does mean the session bus goes away, which some programs need. Set
-`service_manager = "allow"` to keep it — and be aware that anything able to reach the bus can
-step outside the policy.
+None of this holds if the command can leave its cgroup — by asking `systemd --user` for a
+sibling unit, for one, which has a network and no program of ours attached. Every sandbox is
+kept in its cgroup whether it has a network policy or not; see [Session bus](#session-bus).
 
 #### Installing the helper
 
@@ -875,8 +947,8 @@ Both flags belong to scudo itself, so they are only available through the explic
 
 Profiles come together in four ways — `extend`, matching the same command, `--profile`, and sharing a name across config files — and all four combine them the same way:
 
-- **Lists accumulate.** Every array — in `match`, `extend`, `filesystem`, `network` and `systemd` — adds the entries it has to the ones already there, skipping duplicates. No profile can take away what another one added; for paths, see also [Filesystem access](#filesystem-access).
-- **Everything else is taken from the profile applied last**, when it says anything: `exec`, `confirm`, `log.level`, `network.default`, a scalar systemd property such as `MemoryMax`.
+- **Lists accumulate.** Every array — in `match`, `extend`, `filesystem`, `network`, `dbus` and `systemd` — adds the entries it has to the ones already there, skipping duplicates. No profile can take away what another one added; for paths, see also [Filesystem access](#filesystem-access).
+- **Everything else is taken from the profile applied last**, when it says anything: `exec`, `confirm`, `log.level`, `network.default`, `dbus.session`, a scalar systemd property such as `MemoryMax`.
 - **`args` declarations are merged by name**, the last one applied winning.
 
 The order profiles are applied in:

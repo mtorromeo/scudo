@@ -5,12 +5,14 @@
 //! later kinds (file access, exec) be added without touching the wire protocol
 //! or the shim.
 
+pub mod dbus;
 pub mod filesystem;
 pub mod network;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub use dbus::{DbusConfig, Session};
 pub use filesystem::{Access, FilesystemConfig, FilesystemPolicy, mount_properties};
 pub use network::{LogLevel, NetworkConfig, NetworkOverrides, NetworkPolicy, OnUnavailable};
 
@@ -97,29 +99,7 @@ impl Policy {
                 }
             }
         }
-        props.extend(self.service_manager_properties());
         props
-    }
-
-    /// The properties that matter however the policy is realised.
-    ///
-    /// A command that can reach `systemd --user` can ask it to run something in
-    /// a sibling cgroup, where none of our programs are attached and no
-    /// `PrivateNetwork=` applies. That escape is two lines of shell, and it is
-    /// open just as wide when the policy is realised by taking the network away
-    /// as when the enforcer is doing the work — so these are not part of the
-    /// enforcement path, and must not be skipped along with it. Both the private
-    /// socket and the session bus lead there.
-    #[must_use]
-    pub fn service_manager_properties(&self) -> Vec<(String, String)> {
-        match self {
-            Policy::Network(policy) if policy.isolates_service_manager() => service_manager_paths()
-                .into_iter()
-                .map(|path| ("InaccessiblePaths".to_owned(), path))
-                .collect(),
-            // Watching a command is no reason to take anything away from it.
-            Policy::Network(_) | Policy::Filesystem(_) => Vec::new(),
-        }
     }
 }
 
@@ -161,11 +141,7 @@ where
                 }
                 if net.is_deny_all() {
                     // No enforcer needed: systemd can take the network away.
-                    // The policy's own properties still apply — taking the
-                    // network away is worth nothing while the command can ask
-                    // `systemd --user` to start a sibling unit that has one.
                     push_property(&mut applied, "PrivateNetwork", "yes");
-                    push_properties(&mut applied, &policy.service_manager_properties());
                     // The netns enforces, but it cannot say what it turned away.
                     // An observer attached beside it can, and enforces nothing
                     // the netns was not enforcing already.
@@ -228,22 +204,6 @@ const RESOLVED_SOCKETS: &[&str] = &[
     "/run/systemd/resolve/io.systemd.Resolve.Monitor",
 ];
 
-/// The paths through which the user's service manager can be reached.
-///
-/// systemd puts both under `XDG_RUNTIME_DIR`; falling back to the documented
-/// default keeps this working where that variable is not set.
-fn service_manager_paths() -> Vec<String> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-        // SAFETY: getuid always succeeds and touches no memory.
-        let uid = unsafe { libc::getuid() };
-        format!("/run/user/{uid}")
-    });
-    vec![
-        format!("{runtime_dir}/systemd"),
-        format!("{runtime_dir}/bus"),
-    ]
-}
-
 /// Weaken the policies that could not be enforced.
 ///
 /// With several policies in play the strictest `on_unavailable` wins: a profile
@@ -275,13 +235,7 @@ fn degrade_to(
             bail!("cannot enforce the network policy: {reason}")
         }
         OnUnavailable::NoNetwork => {
-            // As in the deny-all case: without the network there is nothing left
-            // to filter, but the way out through the service manager is still
-            // open, and it leads to a cgroup with a network.
             push_property(applied, "PrivateNetwork", "yes");
-            for policy in policies {
-                push_properties(applied, &policy.service_manager_properties());
-            }
             applied.warnings.push(format!(
                 "network policy not enforced ({reason}); running with no network"
             ));
@@ -421,60 +375,6 @@ dest.allow = ["1.1.1.1"]"#,
         );
     }
 
-    /// Every way the network gets taken away without the enforcer.
-    fn without_a_network() -> Vec<Applied> {
-        vec![
-            // Denied outright.
-            apply_with(&[policy("")], unavailable).unwrap(),
-            // Degraded to it because the daemon was not there.
-            apply_with(
-                &[policy(
-                    r#"on_unavailable = "no-network"
-dest.allow = ["1.1.1.1"]"#,
-                )],
-                unavailable,
-            )
-            .unwrap(),
-        ]
-    }
-
-    /// `PrivateNetwork=yes` is worth nothing on its own: the command can ask
-    /// `systemd --user` to start a sibling unit that has a network, and that is
-    /// two lines of shell. The service manager has to go with it.
-    #[test]
-    fn taking_the_network_away_also_shuts_the_service_manager_out() {
-        for applied in without_a_network() {
-            let blocked: Vec<&String> = applied
-                .systemd_args
-                .iter()
-                .filter(|arg| arg.starts_with("InaccessiblePaths="))
-                .collect();
-            assert!(
-                blocked.iter().any(|p| p.ends_with("/systemd")),
-                "no InaccessiblePaths for the private socket in {:?}",
-                applied.systemd_args
-            );
-            assert!(
-                blocked.iter().any(|p| p.ends_with("/bus")),
-                "no InaccessiblePaths for the session bus in {:?}",
-                applied.systemd_args
-            );
-        }
-    }
-
-    /// Opting out still works when there is no network to filter either.
-    #[test]
-    fn a_networkless_policy_can_still_keep_the_bus() {
-        let applied = apply_with(&[policy(r#"service_manager = "allow""#)], unavailable).unwrap();
-        assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
-        assert!(
-            !applied
-                .systemd_args
-                .iter()
-                .any(|arg| arg.starts_with("InaccessiblePaths="))
-        );
-    }
-
     /// Two policies asking for the same property leave one of it on the command
     /// line, not two.
     #[test]
@@ -559,20 +459,6 @@ dest.allow = ["1.1.1.1"]"#,
         ));
     }
 
-    /// Reaching `systemd --user` is a complete escape: it will happily start a
-    /// command in a cgroup none of our programs are attached to.
-    #[test]
-    fn enforced_policy_shuts_the_service_manager_out() {
-        let props = policy(r#"dest.allow = ["1.1.1.1"]"#).required_properties();
-        let blocked: Vec<&String> = props
-            .iter()
-            .filter(|(k, _)| k == "InaccessiblePaths")
-            .map(|(_, v)| v)
-            .collect();
-        assert!(blocked.iter().any(|p| p.ends_with("/systemd")));
-        assert!(blocked.iter().any(|p| p.ends_with("/bus")));
-    }
-
     /// When the daemon takes the policy, the command runs through the shim and
     /// gets the properties the policy depends on.
     #[test]
@@ -597,18 +483,6 @@ dest.allow = ["2.2.2.2"]"#,
         );
         let applied = apply_with(&[lenient, strict], unavailable).unwrap();
         assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
-    }
-
-    /// Opting out is possible, because blocking the session bus breaks plenty of
-    /// legitimate programs.
-    #[test]
-    fn service_manager_access_can_be_granted() {
-        let props = policy(
-            r#"service_manager = "allow"
-dest.allow = ["1.1.1.1"]"#,
-        )
-        .required_properties();
-        assert!(!props.iter().any(|(k, _)| k == "InaccessiblePaths"));
     }
 
     /// Those properties belong to the enforcement path: a degraded policy must

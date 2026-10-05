@@ -9,6 +9,7 @@ arch=('x86_64')
 url='https://github.com/mtorromeo/scudo'
 license=('MIT' 'Apache-2.0')
 depends=('glibc' 'gcc-libs' 'systemd' 'fuse3')
+optdepends=('xdg-dbus-proxy: filtered session bus for sandboxed commands')
 # rust-src because the eBPF crate targets bpfel-unknown-none, a tier 3 target
 # rust ships no core for: the build script builds it from source with
 # -Z build-std, under RUSTC_BOOTSTRAP.
@@ -65,7 +66,7 @@ package() {
   # restrictions turned away.
   setcap cap_bpf,cap_net_admin,cap_perfmon=ep "$pkgdir/usr/bin/scudo-bpfd"
 
-  install -Dm0644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service \
+  install -Dm0644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service scudo-dbus@.service \
       -t "$pkgdir/usr/lib/systemd/user"
 
   install -Dm0644 README.md -t "$pkgdir/usr/share/doc/$pkgname"

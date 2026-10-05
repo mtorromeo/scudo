@@ -24,6 +24,9 @@ pub struct Options<'a> {
     pub shim_token: Option<&'a str>,
     /// Report the network accesses the sandbox refuses.
     pub log_denials: bool,
+    /// The filtered session bus the unit pulls in, still waiting for its
+    /// arguments.
+    pub dbus_proxy: Option<&'a crate::policy::dbus::Proxy>,
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -92,6 +95,7 @@ pub fn exec(
         log,
         shim_token,
         log_denials,
+        dbus_proxy,
     } = *options;
 
     let mut cmd = build(command, args, systemd_args, options)?;
@@ -110,6 +114,9 @@ pub fn exec(
     // exec, which is the last moment this process gets to start anything.
     if log_denials && let Some(token) = shim_token {
         spawn_watcher(token, command, log);
+    }
+    if let Some(proxy) = dbus_proxy {
+        proxy.write_args()?;
     }
 
     let err = cmd.exec();
@@ -232,6 +239,7 @@ mod tests {
             log: &log,
             shim_token: None,
             log_denials: false,
+            dbus_proxy: None,
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")
