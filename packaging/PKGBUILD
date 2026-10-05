@@ -2,7 +2,7 @@
 
 pkgname=scudo-git
 _pkgname=scudo
-pkgver=0.1.0.r59.ge0a023e
+pkgver=0.1.0.r65.ga0f4d1d
 pkgrel=1
 pkgdesc='Run commands sandboxed via systemd-run with per-command resource and permission profiles'
 arch=('x86_64')
