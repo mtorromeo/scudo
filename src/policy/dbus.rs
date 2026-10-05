@@ -131,6 +131,25 @@ impl DbusConfig {
         Ok(())
     }
 
+    /// Whether any rule lets the command reach `systemd --user`, the one name
+    /// that can start a process outside the sandbox on its behalf. Seeing it is
+    /// counted too: erring this way only means a nested scudo tries to start a
+    /// sandbox of its own.
+    fn reaches_manager(&self) -> bool {
+        self.lists().any(|(option, list)| {
+            list.iter().any(|entry| {
+                let name = if matches!(option, "call" | "broadcast") {
+                    entry
+                        .split_once('=')
+                        .map_or(entry.as_str(), |(name, _)| name)
+                } else {
+                    entry.as_str()
+                };
+                name_matches(name, MANAGER)
+            })
+        })
+    }
+
     fn lists(&self) -> impl Iterator<Item = (&'static str, &Vec<String>)> {
         [
             ("see", &self.see),
@@ -140,6 +159,23 @@ impl DbusConfig {
             ("broadcast", &self.broadcast),
         ]
         .into_iter()
+    }
+}
+
+/// The service manager's name on the bus.
+const MANAGER: &str = "org.freedesktop.systemd1";
+
+/// Whether `pattern` lets `name` through: itself, or as a prefix ending in
+/// `.*`, which also matches the prefix alone.
+fn name_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix(".*") {
+        Some(prefix) => {
+            name == prefix
+                || name
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        }
+        None => pattern == name,
     }
 }
 
@@ -184,6 +220,10 @@ pub struct Bus {
     pub proxy: Option<Proxy>,
     /// Set when the bus came out stricter, or looser, than asked.
     pub warning: Option<String>,
+    /// The name to give the sandbox's unit when nothing in it can reach the
+    /// service manager, so that a scudo started inside knows it cannot start
+    /// another sandbox; see [`crate::nested`].
+    pub unit: Option<String>,
 }
 
 /// One proxy, for one sandbox.
@@ -258,6 +298,15 @@ fn prepare_with(
     if session == Session::Allow {
         return bus;
     }
+    // A bus on an abstract socket stays reachable whatever is mounted, and a
+    // filter that lets the manager through leads out all the same. Left
+    // unmarked, a scudo started inside tries to start a sandbox of its own,
+    // which is what it always did.
+    let abstract_bus = upstream.is_some_and(|address| address.contains("abstract="));
+    let sealed = !abstract_bus && (session == Session::Deny || !config.reaches_manager());
+    if sealed {
+        bus.unit = Some(crate::nested::sealed_unit(id));
+    }
 
     let mut push = |key: &str, value: String| bus.properties.push((key.to_owned(), value));
     push("InaccessiblePaths", format!("-{runtime_dir}/systemd"));
@@ -306,7 +355,7 @@ fn prepare_with(
         format!("DBUS_SESSION_BUS_ADDRESS=unix:path={runtime_dir}/bus"),
     );
 
-    if upstream.is_some_and(|address| address.contains("abstract=")) {
+    if abstract_bus {
         bus.warning = Some(
             "the session bus is on an abstract socket, which no mount can hide: \
              the command can still reach it unless the network is taken away"
@@ -671,5 +720,60 @@ talk = ["a.b", "c.d"]"#,
             decoded,
             [OsString::from("a"), OsString::from("--call=x=@/p/*")]
         );
+    }
+
+    fn sealed(bus: &Bus) -> bool {
+        bus.unit.as_deref() == Some("scudo-sealed-7-a.service")
+    }
+
+    #[test]
+    fn a_closed_bus_marks_the_sandbox_sealed() {
+        assert!(sealed(&bus("")));
+        assert!(sealed(&bus(r#"talk = ["org.freedesktop.Notifications"]"#)));
+        // Asked for a filter and got no bus at all.
+        let b = prepare_with(
+            &config(r#"talk = ["org.freedesktop.systemd1"]"#),
+            "/run/user/1",
+            None,
+            Err("missing".to_owned()),
+            "7-a",
+        );
+        assert!(
+            b.unit.is_none(),
+            "a rule naming the manager is never sealed"
+        );
+    }
+
+    #[test]
+    fn a_way_to_the_manager_leaves_the_sandbox_unmarked() {
+        assert!(bus(r#"session = "allow""#).unit.is_none());
+        for src in [
+            r#"talk = ["org.freedesktop.systemd1"]"#,
+            r#"talk = ["org.freedesktop.*"]"#,
+            r#"talk = ["org.*"]"#,
+            r#"see = ["org.freedesktop.systemd1.*"]"#,
+            r#"own = ["org.freedesktop.systemd1"]"#,
+            r#"call = ["org.freedesktop.systemd1=*"]"#,
+            r#"broadcast = ["org.freedesktop.*=*"]"#,
+        ] {
+            assert!(bus(src).unit.is_none(), "{src}");
+        }
+        // A lookalike is not the manager.
+        assert!(sealed(&bus(r#"talk = ["org.freedesktop.systemd10"]"#)));
+        assert!(sealed(&bus(r#"talk = ["org.freedesktop.systemd1x.*"]"#)));
+    }
+
+    #[test]
+    fn an_abstract_bus_is_never_sealed() {
+        for src in ["", r#"talk = ["a.b"]"#] {
+            let b = prepare_with(
+                &config(src),
+                "/run/user/1",
+                Some("unix:abstract=/tmp/dbus-x"),
+                Ok(()),
+                "7-a",
+            );
+            assert!(b.unit.is_none(), "{src}");
+        }
     }
 }

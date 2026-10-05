@@ -27,6 +27,9 @@ pub struct Options<'a> {
     /// The filtered session bus the unit pulls in, still waiting for its
     /// arguments.
     pub dbus_proxy: Option<&'a crate::policy::dbus::Proxy>,
+    /// The name to give the unit, when it has to be told apart from others:
+    /// a sealed sandbox; see [`crate::nested`].
+    pub unit: Option<&'a str>,
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -46,7 +49,11 @@ pub fn build(
         "-Pdt"
     };
     let mut cmd = std::process::Command::new("/usr/bin/systemd-run");
-    cmd.args(["--user", "--wait", flags]).args(systemd_args);
+    cmd.args(["--user", "--wait", flags]);
+    if let Some(unit) = options.unit {
+        cmd.arg(format!("--unit={unit}"));
+    }
+    cmd.args(systemd_args);
 
     if !options.verbose {
         cmd.arg("-q");
@@ -96,6 +103,7 @@ pub fn exec(
         shim_token,
         log_denials,
         dbus_proxy,
+        ..
     } = *options;
 
     let mut cmd = build(command, args, systemd_args, options)?;
@@ -231,6 +239,10 @@ mod tests {
     use super::*;
 
     fn args_of(systemd_args: &[&str]) -> Vec<String> {
+        args_with_unit(systemd_args, None)
+    }
+
+    fn args_with_unit(systemd_args: &[&str], unit: Option<&str>) -> Vec<String> {
         let systemd_args: Vec<String> = systemd_args.iter().map(ToString::to_string).collect();
         let log = LogConfig::default();
         let options = Options {
@@ -240,6 +252,7 @@ mod tests {
             shim_token: None,
             log_denials: false,
             dbus_proxy: None,
+            unit,
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")
@@ -271,5 +284,16 @@ mod tests {
     fn working_directory_in_another_value_keeps_same_dir() {
         let args = args_of(&["-p", "Environment=WorkingDirectory=/tmp"]);
         assert!(args.contains(&"-Pdt".to_owned()));
+    }
+
+    #[test]
+    fn a_unit_name_is_passed_only_when_given() {
+        let args = args_with_unit(&["-p", "MemoryMax=1G"], Some("scudo-sealed-1-a.service"));
+        assert!(args.contains(&"--unit=scudo-sealed-1-a.service".to_owned()));
+        assert!(
+            !args_of(&["-p", "MemoryMax=1G"])
+                .iter()
+                .any(|a| a.starts_with("--unit"))
+        );
     }
 }

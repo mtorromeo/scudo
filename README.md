@@ -319,6 +319,29 @@ unit ends with its main process, and systemd kills what is left in it. Now that 
 cannot move itself to a unit of its own, add `systemd.ExitType = "cgroup"`: the unit then
 lasts until the last process in it is gone, and `scudo` waits that long too.
 
+#### Nested calls
+
+A sandboxed command that runs another one scudo wraps — `make` running `cargo` through a
+shim, say — starts scudo again, inside the sandbox. When that sandbox cannot reach
+`systemd --user` (the bus denied, or filtered without anything that lets
+`org.freedesktop.systemd1` through), no new sandbox can be started from it, so the inner
+scudo runs the command directly instead, without reading any config: it stays in the
+sandbox it was started from, under that sandbox's restrictions and not the inner profile's.
+
+This grants nothing the command did not already have: the outer sandbox could have run the
+binary itself. What matters is that a scudo running *outside* any sandbox can never be made
+to do the same, so the sign it looks for is not something the environment or a config file
+could set, but its cgroup: the units of such sandboxes are named
+`scudo-sealed-<id>.service`, and only a process already free to run `systemd-run` or write
+to `cgroup.procs` could put itself in one.
+
+- In a sandbox that can reach the manager (`session = "allow"`, a filter that names it, or
+  a bus on an abstract socket), scudo starts a sandbox of its own as before, and the inner
+  profile applies.
+- Restrictions asked for on the command line (`--profile`, `-P`, `--allow-dest`,
+  `--deny-dest`, `--allow-port`, `--deny-port`) and `--tui` cannot be had
+  inside, so they fail the command rather than being dropped. `--confirm` still asks.
+
 ### Network filtering
 
 `PrivateNetwork = true` is all-or-nothing. The `[profile.network]` table asks for something

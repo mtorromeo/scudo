@@ -3,6 +3,7 @@
 pub mod bpfd;
 pub mod config;
 pub mod logging;
+pub mod nested;
 pub mod policy;
 pub mod profile;
 pub mod runner;

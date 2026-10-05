@@ -231,6 +231,11 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
 
     let bin = which(&args.command, &self_exe)?;
 
+    // Before the config, so that no file anyone else wrote has a say in it.
+    if scudo::nested::inside_sealed_sandbox() {
+        return run_nested(&bin, &args);
+    }
+
     // Before the config: a mistyped rule is the command line's fault, and says
     // so without waiting on anything else.
     let network = scudo::policy::NetworkOverrides::parse(
@@ -353,6 +358,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     // escape from. Ahead of the command line's properties, which have the last
     // word.
     let mut dbus_proxy = None;
+    let mut unit = None;
     if !unsandboxed {
         let bus = scudo::policy::dbus::prepare(&resolved.dbus);
         let properties: Vec<String> = bus
@@ -372,6 +378,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
             .splice(first_cli..first_cli, properties);
         warnings.extend(bus.warning);
         dbus_proxy = bus.proxy;
+        unit = bus.unit;
     }
 
     for warning in &warnings {
@@ -385,6 +392,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         shim_token: shim_token.as_deref(),
         log_denials: reporting,
         dbus_proxy: dbus_proxy.as_ref(),
+        unit: unit.as_deref(),
     };
 
     #[cfg(feature = "tui")]
@@ -421,6 +429,50 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     }
 
     scudo::runner::exec(&bin, &args.command_args, &resolved.systemd_args, &options)
+}
+
+/// Run the command where we already are: inside a sandbox of scudo's that has
+/// no way to start another one. See [`scudo::nested`] for why this is safe.
+///
+/// The restrictions the command line asks for explicitly cannot be had here,
+/// and are not quietly dropped: they fail instead. `--no-match` only takes
+/// profiles away, which is what happens here anyway.
+fn run_nested(bin: &Path, args: &Args) -> Result<()> {
+    #[cfg(feature = "tui")]
+    let tui = args.tui;
+    #[cfg(not(feature = "tui"))]
+    let tui = false;
+    let asked = [
+        ("--profile", !args.profile.is_empty()),
+        ("--property", !args.property.is_empty()),
+        ("--allow-dest", !args.allow_dest.is_empty()),
+        ("--deny-dest", !args.deny_dest.is_empty()),
+        ("--allow-port", !args.allow_port.is_empty()),
+        ("--deny-port", !args.deny_port.is_empty()),
+        ("--tui", tui),
+    ];
+    let asked: Vec<&str> = asked
+        .into_iter()
+        .filter_map(|(flag, given)| given.then_some(flag))
+        .collect();
+    if !asked.is_empty() {
+        anyhow::bail!(
+            "already inside a scudo sandbox that cannot start another one; \
+             cannot apply {}",
+            asked.join(", ")
+        );
+    }
+
+    debug!(
+        "already inside a scudo sandbox that cannot start another one: \
+         running '{}' in it as it is",
+        args.command
+    );
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(&args.command_args);
+    scudo::runner::confirm(&scudo::runner::render(&cmd), args.confirm)?;
+    let err = cmd.exec();
+    Err(anyhow::Error::from(err).context("exec failed"))
 }
 
 /// What the UI needs that the command line does not carry.
