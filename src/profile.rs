@@ -1,14 +1,19 @@
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use anyhow::{Context as _, Result, bail};
 use regex::Regex;
 use toml::Value;
 
 use crate::{
-    config::{ArgAliases, CommandPattern, MatchTarget, ValidatedConfigMap, ValidatedProfileConfig},
+    config::{ArgDecls, Profile, ValidatedConfigMap},
     logging::{Level, LogConfig},
     policy::{
-        FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides, NetworkPolicy, Policy,
+        Access, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides, NetworkPolicy,
+        Policy, mount_properties,
     },
 };
 
@@ -25,26 +30,13 @@ pub struct ResolvedProfile {
     pub policies: Vec<Policy>,
 }
 
-type Properties = HashMap<String, Value>;
-
 /// Maps arg variable names to their accumulated values (always a `Vec`).
 /// Positionals are stored as `"1"`, `"2"`, `"rest"` — without the `arg_` prefix.
-/// Named flags are stored without the `arg_` prefix (e.g. `"foo_bar"` for `--foo-bar`).
+/// Declared flags are stored under their declared name, also without the prefix.
 type ArgVars = HashMap<String, Vec<String>>;
 
-#[derive(Debug, Default)]
-struct ProfileMeta {
-    exec: Option<String>,
-    verbose: Option<bool>,
-    confirm: Option<bool>,
-    arg_aliases: ArgAliases,
-    arg_flags: Vec<String>,
-    filesystem: FilesystemConfig,
-    /// Raw network policy, still in TOML form so that it merges with the same
-    /// array semantics as every other property.
-    network: Option<Properties>,
-    log: LogConfig,
-}
+/// The variable naming the project the command runs in.
+const PROJECT_DIR_VAR: &str = "SCUDO_PROJECT_DIR";
 
 /// Options controlling which profiles [`resolve_with`] applies.
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,8 +50,8 @@ pub struct ResolveOptions<'a> {
     pub network: Option<&'a NetworkOverrides>,
 }
 
-/// Collect all profiles that match `command`, merge them in priority order
-/// (glob < regex < exact), and build the systemd-run argument list.
+/// Merge every profile that matches `command`, in definition order, and build
+/// the systemd-run argument list.
 pub fn resolve(
     configs: &ValidatedConfigMap,
     command: &str,
@@ -70,9 +62,9 @@ pub fn resolve(
 
 /// Like [`resolve`], but honouring explicit profile selection from the command line.
 ///
-/// Explicitly selected profiles are appended after the matched ones, so they override
-/// them. A profile that both matches and is selected explicitly is applied only once,
-/// in its explicit position.
+/// Explicitly selected profiles are applied after the matched ones, in the order
+/// given, so they win on scalar values. A profile that both matches and is
+/// selected explicitly is applied only once, in its explicit position.
 pub fn resolve_with(
     configs: &ValidatedConfigMap,
     command: &str,
@@ -82,112 +74,52 @@ pub fn resolve_with(
     // Resolved first so an unknown name fails before anything else happens.
     let selected = select_profiles(configs, opts.profiles)?;
 
-    let mut exact_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
-    let mut glob_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
-    let mut regex_matches: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
+    // A command run by path matches by its name, the way it was installed.
+    let name = Path::new(command)
+        .file_name()
+        .map_or(command.into(), |n| n.to_string_lossy());
 
+    let mut requested: Vec<(&str, String)> = Vec::new();
     if !opts.no_match {
-        let full_command: String = core::iter::once(command)
-            .chain(command_args.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let matches_cmd = |p: &CommandPattern| {
-            let subject = |t: &MatchTarget| match t {
-                MatchTarget::Command => command,
-                MatchTarget::FullCommand => full_command.as_str(),
-            };
-            match p {
-                CommandPattern::Exact(s, t) => s == subject(t),
-                CommandPattern::Glob(g, t) => g.matches(subject(t)),
-                CommandPattern::Regex(r, t) => r.is_match(subject(t)),
-                CommandPattern::Sentinel => false,
-            }
-        };
-
-        for (name, profile) in &configs.0 {
-            // Already selected explicitly — applied later, in its explicit position.
-            if selected.iter().any(|(n, _)| *n == name.as_str()) {
+        for (profile_name, profile) in &configs.0 {
+            if selected.contains(&profile_name.as_str()) {
                 continue;
             }
-            let resolved = if profile
-                .pattern
-                .iter()
-                .any(|p| matches!(p, CommandPattern::Sentinel))
-            {
-                resolve_patterns(configs, profile, &mut vec![])?
-            } else {
-                profile.pattern.clone()
-            };
-            // A profile without `match` has no patterns and matches nothing:
-            // the normal shape of a base profile, reachable only via
-            // `extend`/`--profile`.
-            match matching_pattern(&resolved, matches_cmd) {
-                Some(CommandPattern::Exact(_, _)) => exact_matches.push((name, profile)),
-                Some(CommandPattern::Glob(_, _)) => glob_matches.push((name, profile)),
-                Some(CommandPattern::Regex(_, _)) => regex_matches.push((name, profile)),
-                Some(CommandPattern::Sentinel) | None => {}
+            if let Some(pattern) = profile.patterns.iter().find(|p| p.matches(&name)) {
+                requested.push((
+                    profile_name,
+                    format!("profile '{profile_name}' matched '{}'", pattern.as_str()),
+                ));
             }
         }
     }
+    requested.extend(
+        selected
+            .iter()
+            .map(|n| (*n, format!("profile '{n}' selected explicitly"))),
+    );
 
     let mut match_log: Vec<String> = Vec::new();
-    let mut merged = Properties::new();
-    let mut meta = ProfileMeta::default();
-
-    let chain = glob_matches
-        .iter()
-        .map(|entry| (entry, Some("glob")))
-        .chain(regex_matches.iter().map(|entry| (entry, Some("regex"))))
-        .chain(exact_matches.iter().map(|entry| (entry, Some("exact"))))
-        .chain(selected.iter().map(|entry| (entry, None)));
-
-    // The whole chain is flattened into a single merge order first. Merging each
-    // branch on its own and then combining the results would hand the next branch
-    // an array whose `"..."` has already been resolved away, and an array without
-    // the sentinel replaces instead of extending: two parents that both add to the
-    // same list would keep only the last one's additions.
-    let mut order: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-
-    for ((name, profile), kind) in chain {
-        if let Some(kind) = kind {
-            let pattern = match_description(&profile.pattern);
-            match_log.push(format!("profile '{name}' matched {kind} '{pattern}'"));
-        } else {
-            match_log.push(format!("profile '{name}' selected explicitly"));
-        }
-
-        // Already applied as somebody else's base, but it belongs where the chain
-        // puts it: the tier it matched in, or the position the command line gave
-        // it, is what decides its precedence.
-        seen.retain(|n| n != *name);
-        order.retain(|(n, _)| n != name);
-
+    let mut order: Vec<&str> = Vec::new();
+    for (profile_name, reason) in requested {
+        match_log.push(reason);
+        // Already applied as somebody else's base, but a profile asked for in
+        // its own right goes where it was asked for.
+        order.retain(|n| *n != profile_name);
         linearize(
             configs,
-            name,
-            &mut Vec::new(),
-            &mut seen,
+            profile_name,
+            &mut vec![profile_name],
             &mut order,
             &mut match_log,
-            0,
         )?;
     }
 
-    for (_, profile) in order {
-        merge_into(&mut merged, profile.properties.clone())?;
-        meta.exec = profile.exec.clone().or(meta.exec);
-        meta.verbose = profile.verbose.or(meta.verbose);
-        meta.confirm = profile.confirm.or(meta.confirm);
-        meta.arg_aliases.extend(profile.arg_aliases.clone());
-        meta.arg_flags.extend(profile.arg_flags.iter().cloned());
-        merge_network(
-            &mut meta.network,
-            profile.network.clone().map(table_to_properties),
-        )?;
-        meta.log = profile.log.clone().over(meta.log);
-        meta.filesystem = profile.filesystem.over(meta.filesystem);
+    let mut merged = Profile::default();
+    for profile_name in order {
+        if let Some(profile) = configs.0.get(profile_name) {
+            merged.merge(profile);
+        }
     }
 
     let overrides = opts.network.filter(|overrides| !overrides.is_empty());
@@ -198,145 +130,41 @@ pub fn resolve_with(
         ));
     }
 
-    let arg_vars = parse_command_args(command_args, &meta.arg_aliases, &meta.arg_flags);
-    build_args(&merged, meta, match_log, &arg_vars, overrides)
+    let arg_vars = parse_command_args(command_args, &merged.args);
+    build_args(merged, match_log, &arg_vars, overrides)
 }
 
 /// Look up explicitly requested profile names, preserving order and dropping duplicates.
 ///
 /// An unknown name is an error: silently ignoring it would run the command with less
-/// sandboxing than the user asked for. Synthetic keys created by cross-file self-extend
-/// (see `config::load_configs`) contain a NUL and are deliberately not selectable.
-fn select_profiles<'a>(
-    configs: &'a ValidatedConfigMap,
-    names: &[String],
-) -> Result<Vec<(&'a str, &'a ValidatedProfileConfig)>> {
-    let mut selected: Vec<(&str, &ValidatedProfileConfig)> = Vec::new();
+/// sandboxing than the user asked for.
+fn select_profiles<'a>(configs: &'a ValidatedConfigMap, names: &[String]) -> Result<Vec<&'a str>> {
+    let mut selected: Vec<&str> = Vec::new();
     for name in names {
-        if selected.iter().any(|(n, _)| *n == name.as_str()) {
-            continue;
-        }
-        let (key, profile) = configs
+        let (key, _) = configs
             .0
             .get_key_value(name.as_str())
-            .filter(|(key, _)| !key.contains('\0'))
             .with_context(|| format!("profile '{name}' not found"))?;
-        selected.push((key.as_str(), profile));
+        if !selected.contains(&key.as_str()) {
+            selected.push(key);
+        }
     }
     Ok(selected)
 }
 
-/// Whether a profile's (sentinel-free) patterns match, and if so the pattern
-/// that decides its specificity tier.
+/// Append `name` to `out`, after every profile it extends.
 ///
-/// Command-name patterns are alternatives: one matching is enough, and it is the
-/// one that sets the tier. Full-command patterns are extra conditions that must
-/// all hold; they set the tier only when there is no command-name pattern. A
-/// profile with no patterns at all never matches.
-fn matching_pattern(
-    patterns: &[CommandPattern],
-    matches: impl Fn(&CommandPattern) -> bool,
-) -> Option<&CommandPattern> {
-    let targeting = |target| patterns.iter().filter(move |p| p.target() == Some(target));
-    let mut full = targeting(MatchTarget::FullCommand);
-    if !full.all(&matches) {
-        return None;
-    }
-    let mut command = targeting(MatchTarget::Command).peekable();
-    if command.peek().is_some() {
-        command.find(|p| matches(p))
-    } else {
-        targeting(MatchTarget::FullCommand).next()
-    }
-}
-
-fn match_description(patterns: &[CommandPattern]) -> String {
-    patterns
-        .iter()
-        .filter_map(|p| match p {
-            CommandPattern::Exact(s, _) => Some(s.as_str()),
-            CommandPattern::Glob(g, _) => Some(g.as_str()),
-            CommandPattern::Regex(r, _) => Some(r.as_str()),
-            CommandPattern::Sentinel => None,
-        })
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-/// Resolve `CommandPattern::Sentinel` entries by splicing in the first parent's
-/// resolved patterns. Returns a sentinel-free pattern list.
-fn resolve_patterns(
-    configs: &ValidatedConfigMap,
-    profile: &ValidatedProfileConfig,
-    visited: &mut Vec<String>,
-) -> Result<Vec<CommandPattern>> {
-    if !profile
-        .pattern
-        .iter()
-        .any(|p| matches!(p, CommandPattern::Sentinel))
-    {
-        return Ok(profile.pattern.clone());
-    }
-    let parent_patterns = profile
-        .extend
-        .iter()
-        .find_map(|parent_name| {
-            configs
-                .0
-                .get(parent_name.as_str())
-                .map(|parent| (parent_name, parent))
-        })
-        .map(|(parent_name, parent)| {
-            if visited.contains(parent_name) {
-                bail!("circular pattern extension: {parent_name}");
-            }
-            visited.push(parent_name.clone());
-            let result = resolve_patterns(configs, parent, visited);
-            visited.pop();
-            result
-        })
-        .transpose()?
-        .unwrap_or_default();
-
-    let mut result = Vec::new();
-    for p in &profile.pattern {
-        if matches!(p, CommandPattern::Sentinel) {
-            result.extend(
-                parent_patterns
-                    .iter()
-                    .filter(|p| !matches!(p, CommandPattern::Sentinel))
-                    .cloned(),
-            );
-        } else {
-            result.push(p.clone());
-        }
-    }
-    Ok(result)
-}
-
-/// Flatten the `extend` graph rooted at `name` into a merge order, appending to
-/// `out`.
-///
-/// Parents are walked left-to-right and a profile is appended only once every
-/// profile it extends has been, so merging in that order lets a child override
-/// what it extends and the rightmost parent win over the ones before it.
-///
-/// A profile already in `out` is not added a second time: a diamond (A → [B, C],
-/// both extending D) applies D once, and B and C then each extend D's lists in
-/// turn instead of replacing one another's additions.
-///
-/// `path` is the branch currently being walked, for cycle detection; `seen`
-/// records what has already been appended, across the whole resolution.
+/// Parents are walked left to right, and a profile already in `out` is not
+/// added again: a base shared by two profiles is applied once. `path` is the
+/// branch being walked, for cycle detection.
 fn linearize<'a>(
     configs: &'a ValidatedConfigMap,
     name: &str,
-    path: &mut Vec<String>,
-    seen: &mut Vec<String>,
-    out: &mut Vec<(&'a str, &'a ValidatedProfileConfig)>,
+    path: &mut Vec<&'a str>,
+    out: &mut Vec<&'a str>,
     log: &mut Vec<String>,
-    depth: usize,
 ) -> Result<()> {
-    if seen.iter().any(|n| n == name) {
+    if out.contains(&name) {
         return Ok(());
     }
     let (key, profile) = configs
@@ -344,253 +172,103 @@ fn linearize<'a>(
         .get_key_value(name)
         .with_context(|| format!("extended profile '{name}' not found"))?;
 
-    for parent_name in &profile.extend {
-        if path.contains(parent_name) {
-            bail!("circular profile extension: {parent_name}");
+    for parent in &profile.extend {
+        if path.contains(&parent.as_str()) {
+            bail!("circular profile extension: {parent}");
         }
+        let indent = " ".repeat(path.len().saturating_mul(3).saturating_sub(1));
+        log.push(format!("{indent}└─ extends '{parent}'"));
 
-        let indent = " ".repeat(depth.saturating_mul(3).saturating_add(2));
-        log.push(format!("{indent}└─ extends '{parent_name}'"));
-
-        path.push(parent_name.clone());
-        let walked = linearize(
-            configs,
-            parent_name,
-            path,
-            seen,
-            out,
-            log,
-            depth.saturating_add(1),
-        );
-        path.pop(); // restore so sibling branches can share the same parents
+        path.push(parent);
+        let walked = linearize(configs, parent, path, out, log);
+        path.pop();
         walked?;
     }
 
-    seen.push(key.clone());
-    out.push((key.as_str(), profile));
+    out.push(key);
     Ok(())
-}
-
-fn table_to_properties(table: toml::Table) -> Properties {
-    table.into_iter().collect()
-}
-
-/// Merge a network policy table into the inherited one, reusing the same array
-/// semantics as regular properties so that `"..."` splices the inherited list in.
-///
-/// Unlike `merge_into` this descends into nested tables, because the network
-/// table has them: `dest` and `ports` each hold their own `allow` and `deny`
-/// lists. Replacing one of those wholesale would drop the half the child did not
-/// mention, and a `"..."` inside it would find no inherited list to splice.
-fn merge_network(dst: &mut Option<Properties>, src: Option<Properties>) -> Result<()> {
-    let Some(src) = src else {
-        return Ok(());
-    };
-    let mut base: toml::Table = dst.take().unwrap_or_default().into_iter().collect();
-    merge_table_into(&mut base, src.into_iter().collect())?;
-    *dst = Some(base.into_iter().collect());
-    Ok(())
-}
-
-/// `merge_into` for a `toml::Table`, descending into nested tables.
-fn merge_table_into(dst: &mut toml::Table, src: toml::Table) -> Result<()> {
-    for (key, src_val) in src {
-        match src_val {
-            Value::Array(src_arr) => {
-                let merged = splice_array(dst.get(&key), src_arr, &key)?;
-                dst.insert(key, Value::Array(merged));
-            }
-            Value::Table(src_tbl) => {
-                let merged = match dst.remove(&key) {
-                    Some(Value::Table(mut base)) => {
-                        merge_table_into(&mut base, src_tbl)?;
-                        base
-                    }
-                    _ => src_tbl,
-                };
-                dst.insert(key, Value::Table(merged));
-            }
-            other @ (Value::String(_)
-            | Value::Integer(_)
-            | Value::Float(_)
-            | Value::Boolean(_)
-            | Value::Datetime(_)) => {
-                dst.insert(key, other);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Merge `src` into `dst`.
-///
-/// In arrays, `"..."` is replaced by the parent's list at that position.
-/// It may appear at most once; multiple occurrences are an error.
-/// Arrays without `"..."` replace the parent's value entirely.
-fn merge_into(dst: &mut Properties, src: Properties) -> Result<()> {
-    for (key, src_val) in src {
-        let merged = match src_val {
-            Value::Array(src_arr) => Value::Array(splice_array(dst.get(&key), src_arr, &key)?),
-            other @ (Value::String(_)
-            | Value::Integer(_)
-            | Value::Float(_)
-            | Value::Boolean(_)
-            | Value::Datetime(_)
-            | Value::Table(_)) => other,
-        };
-        dst.insert(key, merged);
-    }
-    Ok(())
-}
-
-/// Resolve `"..."` inside a child's array against the list it inherited.
-fn splice_array(base: Option<&Value>, src_arr: Vec<Value>, key: &str) -> Result<Vec<Value>> {
-    let sentinel = Value::String("...".into());
-    match src_arr.iter().filter(|v| *v == &sentinel).count() {
-        0 => Ok(src_arr),
-        1 => {
-            let base_items: &[Value] = match base {
-                Some(Value::Array(arr)) => arr,
-                _ => &[],
-            };
-            let mut merged = Vec::with_capacity(
-                src_arr
-                    .len()
-                    .saturating_sub(1)
-                    .saturating_add(base_items.len()),
-            );
-            for v in src_arr {
-                if v == sentinel {
-                    merged.extend(base_items.iter().cloned());
-                } else {
-                    merged.push(v);
-                }
-            }
-            Ok(merged)
-        }
-        _ => anyhow::bail!("property '{key}': '...' may appear at most once"),
-    }
 }
 
 /// Parse `command_args` into a map of arg variable name → accumulated values.
 ///
-/// - Flags in `aliases` (value flags): consume the next arg (or use `=val` form).
-///   With `nargs = "+"`, consume all following non-flag args.
-///   All occurrences are accumulated into the `Vec`.
-/// - Flags in `bool_flags`: boolean, never consume the next arg.
-/// - Undeclared `--long` flags: heuristic — consume next non-flag arg as value.
-/// - Undeclared `-s` flags: conservative — boolean.
+/// - Declared flags take a value, as `--flag value` or `--flag=value`; every
+///   occurrence adds to the same variable. A greedy one also takes every
+///   argument after it up to the next one starting with `-`.
+/// - Undeclared flags never take a value.
 /// - `--` terminates option parsing; everything after is positional.
-/// - Remaining args (not consumed as flag values) become `arg_1`, `arg_2`, …
-///   and `arg_rest` (space-joined).
-fn parse_command_args(args: &[String], aliases: &ArgAliases, bool_flags: &[String]) -> ArgVars {
-    // Build reverse map: flag_string → (var_name, is_nargs_plus)
-    let mut value_flags: HashMap<&str, (&str, bool)> = HashMap::new();
-    for (var_name, decl) in aliases {
-        let multi = decl.is_multi_value();
+/// - Remaining args become `arg_1`, `arg_2`, … and `arg_rest` (space-joined).
+fn parse_command_args(args: &[String], decls: &ArgDecls) -> ArgVars {
+    let mut flags: HashMap<&str, (&str, bool)> = HashMap::new();
+    for (var_name, decl) in decls {
         for flag in decl.flags() {
-            value_flags.insert(flag.as_str(), (var_name.as_str(), multi));
+            flags.insert(flag.as_str(), (var_name.as_str(), decl.is_greedy()));
         }
     }
-    let bool_flag_set: std::collections::HashSet<&str> =
-        bool_flags.iter().map(String::as_str).collect();
 
     let mut vars: ArgVars = HashMap::new();
-    let mut positional_index: usize = 0;
+    let mut positionals: Vec<String> = Vec::new();
     let mut iter = args.iter().peekable();
-
-    let push_positional = |vars: &mut ArgVars, idx: &mut usize, val: String| {
-        *idx = idx.saturating_add(1);
-        vars.entry(format!("{idx}")).or_default().push(val);
-    };
+    let is_value = |a: &&String| !a.starts_with('-');
 
     while let Some(arg) = iter.next() {
         if !arg.starts_with('-') || arg == "-" {
-            push_positional(&mut vars, &mut positional_index, arg.clone());
+            positionals.push(arg.clone());
             continue;
         }
 
         if arg == "--" {
-            // Everything after `--` is positional.
-            for remaining in iter.by_ref() {
-                push_positional(&mut vars, &mut positional_index, remaining.clone());
-            }
+            positionals.extend(iter.by_ref().cloned());
             break;
         }
 
-        // --opt=value or -s=value
         if let Some((flag, val)) = arg.split_once('=') {
-            let var_name = if let Some((vn, _)) = value_flags.get(flag) {
-                (*vn).to_owned()
-            } else if let Some(derived) = auto_derive_var_name(flag) {
-                derived
-            } else {
-                // short opt with '=' but undeclared — skip
-                continue;
-            };
-            vars.entry(var_name).or_default().push(val.to_owned());
+            if let Some((var_name, _)) = flags.get(flag) {
+                vars.entry((*var_name).to_owned())
+                    .or_default()
+                    .push(val.to_owned());
+            }
             continue;
         }
 
-        // --opt or -s (no '=')
-        if let Some((var_name, is_nargs_plus)) = value_flags.get(arg.as_str()).copied() {
-            let var_name = var_name.to_owned();
-            if is_nargs_plus {
-                // Consume all following non-flag args.
-                while iter
-                    .peek()
-                    .is_some_and(|a| !a.starts_with('-') && a.as_str() != "--")
-                {
-                    if let Some(val) = iter.next() {
-                        vars.entry(var_name.clone()).or_default().push(val.clone());
-                    }
+        if let Some((var_name, greedy)) = flags.get(arg.as_str()).copied() {
+            let values = vars.entry(var_name.to_owned()).or_default();
+            if greedy {
+                while let Some(val) = iter.next_if(is_value) {
+                    values.push(val.clone());
                 }
             } else if let Some(val) = iter.next() {
-                vars.entry(var_name).or_default().push(val.clone());
+                values.push(val.clone());
             } else {
-                // no value follows the flag — skip
+                // no value follows the flag — nothing to record
             }
-            continue;
         }
-
-        if bool_flag_set.contains(arg.as_str()) {
-            continue;
-        }
-
-        if arg.starts_with("--") {
-            // Undeclared long option: heuristic — consume next non-flag arg as value.
-            if let Some(var_name) = auto_derive_var_name(arg)
-                && iter
-                    .peek()
-                    .is_some_and(|a| !a.starts_with('-') && a.as_str() != "--")
-                && let Some(val) = iter.next()
-            {
-                vars.entry(var_name).or_default().push(val.clone());
-            }
-            // No value follows or underiviable flag — boolean, ignore.
-        }
-
-        // Undeclared short option: conservative boolean.
     }
 
-    // Build rest from positionals.
-    if positional_index > 0 {
-        let rest: Vec<String> = (1..=positional_index)
-            .filter_map(|n| vars.get(&format!("{n}")).and_then(|v| v.first()).cloned())
-            .collect();
-        if !rest.is_empty() {
-            vars.insert("rest".to_owned(), vec![rest.join(" ")]);
-        }
+    for (n, val) in positionals.iter().enumerate() {
+        vars.insert(n.saturating_add(1).to_string(), vec![val.clone()]);
+    }
+    if !positionals.is_empty() {
+        vars.insert("rest".to_owned(), vec![positionals.join(" ")]);
     }
 
     vars
 }
 
-/// Derive a variable name from a long option flag.
-/// `--foo-bar` → `Some("foo_bar")`, short opts → `None`.
-fn auto_derive_var_name(flag: &str) -> Option<String> {
-    let stripped = flag.strip_prefix("--")?;
-    Some(stripped.replace('-', "_"))
+/// The project a command run from `start` belongs to: the closest directory,
+/// `start` included, that holds a `.git` — a directory, or the file a worktree
+/// has instead — and `start` itself when there is none.
+#[must_use]
+pub fn find_project_dir(start: &Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(start)
+        .to_path_buf()
+}
+
+fn project_dir() -> Result<String> {
+    let cwd = std::env::current_dir().context("finding the current directory")?;
+    Ok(find_project_dir(&cwd).to_string_lossy().into_owned())
 }
 
 /// Make a path absolute relative to the process's current directory.
@@ -641,15 +319,19 @@ fn is_path_property(key: &str) -> bool {
 }
 
 fn build_args(
-    properties: &Properties,
-    meta: ProfileMeta,
+    profile: Profile,
     match_log: Vec<String>,
     arg_vars: &ArgVars,
     overrides: Option<&NetworkOverrides>,
 ) -> Result<ResolvedProfile> {
     let mut args = Vec::new();
 
-    for (key, val) in properties {
+    for (key, val) in mount_properties(filesystem_entries(&profile.filesystem, arg_vars)?) {
+        args.push("-p".into());
+        args.push(format_property(key, &val));
+    }
+
+    for (key, val) in &profile.systemd {
         let path_prop = is_path_property(key);
         for str_val in value_to_strings(val, arg_vars, path_prop)? {
             args.push("-p".into());
@@ -660,12 +342,12 @@ fn build_args(
     // The properties a policy needs are added by `policy::apply`, once it knows
     // the policy is actually being enforced: emitting them for a policy that
     // ends up degraded would restrict the command for no benefit.
-    let policies = build_policies(meta.network, meta.filesystem, arg_vars, overrides)?;
+    let policies = build_policies(profile.network, &profile.filesystem, arg_vars, overrides)?;
 
-    let mut log = meta.log;
+    let mut log = profile.log;
     // `verbose` predates the log table and asks for the same thing in fewer
     // words. A level written out says more than the boolean can, so it wins.
-    if meta.verbose == Some(true) && log.level.is_none() {
+    if profile.verbose == Some(true) && log.level.is_none() {
         log.level = Some(Level::Debug);
     }
     if let Some(path) = log.path {
@@ -674,12 +356,35 @@ fn build_args(
 
     Ok(ResolvedProfile {
         systemd_args: args,
-        exec: meta.exec,
+        exec: profile.exec,
         log,
-        confirm: meta.confirm.unwrap_or(false),
+        confirm: profile.confirm.unwrap_or(false),
         match_log,
         policies,
     })
+}
+
+/// Expand the paths of the `filesystem` table, made absolute, each with the
+/// access it was listed under. An entry that expands to nothing — an absent
+/// `$arg_*` — is dropped.
+fn filesystem_entries(fs: &FilesystemConfig, arg_vars: &ArgVars) -> Result<Vec<(Access, PathBuf)>> {
+    let lists = [
+        (Access::Write, &fs.write),
+        (Access::Read, &fs.read),
+        (Access::Hide, &fs.hide),
+        (Access::Deny, &fs.deny),
+    ];
+    let mut entries = Vec::new();
+    for (access, list) in lists {
+        for entry in list {
+            for path in expand_vars(entry, arg_vars, false)? {
+                if !path.is_empty() {
+                    entries.push((access, PathBuf::from(make_absolute(&path))));
+                }
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// Turn the merged sub-tables into normalised policies.
@@ -687,8 +392,8 @@ fn build_args(
 /// A profile that asked for neither produces none, and the command is then
 /// never registered with the daemon at all.
 fn build_policies(
-    network: Option<Properties>,
-    filesystem: FilesystemConfig,
+    network: Option<toml::Table>,
+    filesystem: &FilesystemConfig,
     arg_vars: &ArgVars,
     overrides: Option<&NetworkOverrides>,
 ) -> Result<Vec<Policy>> {
@@ -719,10 +424,10 @@ fn build_policies(
         policies.push(Policy::Network(policy));
     }
 
-    // A table that said nothing is not a policy that says off: leaving it out
-    // is what lets `--tui` fill the gap with one of its own.
-    if !filesystem.is_empty() {
-        policies.push(Policy::Filesystem(FilesystemPolicy::from(filesystem)));
+    // A table that said nothing about reporting is not one that says off:
+    // leaving it out is what lets `--tui` fill the gap with one of its own.
+    if let Some(log) = filesystem.log {
+        policies.push(Policy::Filesystem(FilesystemPolicy { log }));
     }
     Ok(policies)
 }
@@ -820,6 +525,7 @@ fn value_to_strings(val: &Value, arg_vars: &ArgVars, is_path: bool) -> Result<Ve
 /// - `$arg_name` / `${arg_name}` look up `name` in `arg_vars` (silently empty if absent).
 ///   If the variable holds N > 1 values, the template is replicated N times (one per value).
 ///   Having more than one multi-value `$arg_*` reference in the same template is an error.
+/// - `$SCUDO_PROJECT_DIR` is the project the command runs in; see [`find_project_dir`].
 /// - All other `$VAR` references are resolved from the environment; missing vars are an error.
 /// - When `is_path` is `true`, every expanded variable value is made absolute using the
 ///   process's current directory. Only the variable expansion is canonicalized; literal
@@ -886,8 +592,12 @@ fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>
                 }
             }
         } else {
-            let raw = std::env::var(name)
-                .with_context(|| format!("undefined environment variable '${name}'"))?;
+            let raw = if name == PROJECT_DIR_VAR {
+                project_dir()?
+            } else {
+                std::env::var(name)
+                    .with_context(|| format!("undefined environment variable '${name}'"))?
+            };
             let val = if is_path { make_absolute(&raw) } else { raw };
             for r in &mut results {
                 r.push_str(literal);
@@ -915,57 +625,13 @@ fn expand_env(s: &str) -> Result<String> {
 #[cfg(test)]
 #[expect(clippy::indexing_slicing)]
 mod tests {
-    use glob::Pattern;
-
     use super::*;
     use crate::{
-        config::ArgAliasDecl,
         logging::Target,
         policy::network::{
             Action, Destination, LogLevel, OnUnavailable, PortRange, PortRule, Protocol,
         },
     };
-
-    fn make_configs(profiles: Vec<(&str, ValidatedProfileConfig)>) -> ValidatedConfigMap {
-        ValidatedConfigMap(
-            profiles
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v))
-                .collect(),
-        )
-    }
-
-    fn profile(pattern: CommandPattern, props: Vec<(&str, Value)>) -> ValidatedProfileConfig {
-        ValidatedProfileConfig {
-            extend: vec![],
-            exec: None,
-            verbose: None,
-            confirm: None,
-            pattern: vec![pattern],
-            arg_aliases: HashMap::new(),
-            arg_flags: vec![],
-            network: None,
-            filesystem: FilesystemConfig::default(),
-            log: LogConfig::default(),
-            properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
-        }
-    }
-
-    fn never_profile(props: Vec<(&str, Value)>) -> ValidatedProfileConfig {
-        ValidatedProfileConfig {
-            pattern: vec![],
-            extend: vec![],
-            exec: None,
-            verbose: None,
-            confirm: None,
-            arg_aliases: HashMap::new(),
-            arg_flags: vec![],
-            network: None,
-            filesystem: FilesystemConfig::default(),
-            log: LogConfig::default(),
-            properties: props.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
-        }
-    }
 
     /// Build a config map through the real load pipeline, so that these tests
     /// exercise validation as well as merging.
@@ -976,8 +642,7 @@ mod tests {
 
     fn resolved_policy(src: &str, command: &str, args: &[&str]) -> NetworkPolicy {
         let configs = configs_from_toml(src);
-        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
-        let resolved = resolve(&configs, command, &args).unwrap();
+        let resolved = resolve(&configs, command, &self::args(args)).unwrap();
         resolved
             .policies
             .into_iter()
@@ -988,19 +653,13 @@ mod tests {
             .expect("expected a network policy")
     }
 
-    fn str(s: &str) -> Value {
-        Value::String(s.into())
-    }
-    fn arr(items: &[&str]) -> Value {
-        Value::Array(items.iter().map(|s| str(s)).collect())
-    }
-    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    #[expect(clippy::missing_asserts_for_indexing)]
     fn has_arg(args: &[String], kv: &str) -> bool {
         args.windows(2).any(|w| w[0] == "-p" && w[1] == kv)
     }
 
     /// Every value emitted for one property, in the order they were emitted.
-    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
+    #[expect(clippy::missing_asserts_for_indexing)]
     fn values(args: &[String], key: &str) -> Vec<String> {
         let prefix = format!("{key}=");
         args.windows(2)
@@ -1009,213 +668,426 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn exact_match() {
-        let configs = make_configs(vec![(
-            "curl",
-            profile(
-                CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-                vec![("MemoryMax", str("1G"))],
-            ),
-        )]);
-        let r = resolve(&configs, "curl", &[]).unwrap();
-        assert!(has_arg(&r.systemd_args, "MemoryMax=1G"));
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(ToString::to_string).collect()
     }
 
-    #[test]
-    fn exact_no_match() {
-        let configs = make_configs(vec![(
-            "curl",
-            profile(
-                CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-                vec![("MemoryMax", str("1G"))],
-            ),
-        )]);
-        let r = resolve(&configs, "wget", &[]).unwrap();
-        assert!(r.systemd_args.is_empty());
+    fn systemd_args(src: &str, command: &str, command_args: &[&str]) -> Vec<String> {
+        resolve(&configs_from_toml(src), command, &args(command_args))
+            .unwrap()
+            .systemd_args
     }
 
-    #[test]
-    fn glob_match() {
-        let configs = make_configs(vec![(
-            "browsers",
-            profile(
-                CommandPattern::Glob(Pattern::new("*browser*").unwrap(), MatchTarget::Command),
-                vec![("PrivateNetwork", Value::Boolean(true))],
-            ),
-        )]);
-        let r = resolve(&configs, "firefox-browser", &[]).unwrap();
-        assert!(has_arg(&r.systemd_args, "PrivateNetwork=yes"));
+    fn select(profiles: &[String], no_match: bool) -> ResolveOptions<'_> {
+        ResolveOptions {
+            profiles,
+            no_match,
+            network: None,
+        }
     }
 
-    #[test]
-    fn never_skipped() {
-        let configs = make_configs(vec![(
-            "base",
-            never_profile(vec![("CPUQuota", str("50%"))]),
-        )]);
-        let r = resolve(&configs, "base", &[]).unwrap();
-        assert!(r.systemd_args.is_empty());
+    fn selected_args(src: &str, profiles: &[&str], command: &str) -> Vec<String> {
+        let names = args(profiles);
+        resolve_with(&configs_from_toml(src), command, &[], select(&names, false))
+            .unwrap()
+            .systemd_args
     }
 
-    /// End-to-end through the config pipeline: the section name is an identifier,
-    /// not a pattern, so a profile without `match` is invisible to the matcher —
-    /// but still reachable by name.
+    // ── matching ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn match_is_a_glob_on_the_command_name() {
+        let src = r#"
+            [curl]
+            match = "curl"
+            systemd.MemoryMax = "1G"
+
+            [code]
+            match = ["zed", "code*"]
+            systemd.CPUQuota = "10%"
+        "#;
+        assert!(has_arg(&systemd_args(src, "curl", &[]), "MemoryMax=1G"));
+        assert!(systemd_args(src, "wget", &[]).is_empty());
+        assert!(has_arg(&systemd_args(src, "zed", &[]), "CPUQuota=10%"));
+        assert!(has_arg(&systemd_args(src, "code-oss", &[]), "CPUQuota=10%"));
+        // A command run by path matches by its name.
+        assert!(has_arg(
+            &systemd_args(src, "/usr/bin/curl", &[]),
+            "MemoryMax=1G"
+        ));
+    }
+
+    /// The section name is an identifier, not a pattern: without `match` the
+    /// profile is invisible to the matcher, but still reachable by name.
     #[test]
     fn profile_without_match_is_only_reachable_by_name() {
+        let src = "[curl]\nsystemd.CPUQuota = \"50%\"\n";
+        assert!(systemd_args(src, "curl", &[]).is_empty());
+        assert!(has_arg(
+            &selected_args(src, &["curl"], "curl"),
+            "CPUQuota=50%"
+        ));
+    }
+
+    /// Several matches are applied in the order they were written, so the
+    /// last one has the last word on a scalar.
+    #[test]
+    fn matches_apply_in_definition_order() {
+        let src = r#"
+            [all]
+            match = "*"
+            systemd.CPUQuota = "90%"
+            systemd.BindPaths = ["/all"]
+
+            [curl]
+            match = "curl"
+            systemd.CPUQuota = "10%"
+            systemd.BindPaths = ["/curl"]
+        "#;
+        let r = systemd_args(src, "curl", &[]);
+        assert_eq!(values(&r, "CPUQuota"), ["10%"]);
+        assert_eq!(values(&r, "BindPaths"), ["/all", "/curl"]);
+    }
+
+    // ── merging ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn extend_applies_the_parent_first() {
+        let src = r#"
+            [base]
+            systemd.CPUQuota = "50%"
+            systemd.ReadOnlyPaths = ["/"]
+            systemd.MemoryMax = "1G"
+
+            [curl]
+            match = "curl"
+            extend = "base"
+            systemd.ReadOnlyPaths = ["/etc"]
+            systemd.MemoryMax = "2G"
+        "#;
+        let r = systemd_args(src, "curl", &[]);
+        assert!(has_arg(&r, "CPUQuota=50%"));
+        // Lists accumulate, scalars are the child's.
+        assert_eq!(values(&r, "ReadOnlyPaths"), ["/", "/etc"]);
+        assert_eq!(values(&r, "MemoryMax"), ["2G"]);
+    }
+
+    /// A diamond applies the shared base once, and both branches' additions
+    /// survive.
+    #[test]
+    fn a_shared_base_is_applied_once() {
+        let src = r#"
+            [base]
+            systemd.BindPaths = ["/base"]
+            systemd.CPUQuota = "5%"
+
+            [a]
+            extend = "base"
+            systemd.BindPaths = ["/a"]
+            systemd.CPUQuota = "10%"
+
+            [b]
+            extend = "base"
+            systemd.BindPaths = ["/b", "/base"]
+            systemd.CPUQuota = "20%"
+
+            [app]
+            match = "app"
+            extend = ["a", "b"]
+            systemd.BindPaths = ["/app"]
+        "#;
+        let r = systemd_args(src, "app", &[]);
+        assert_eq!(values(&r, "BindPaths"), ["/base", "/a", "/b", "/app"]);
+        // The rightmost parent wins over the ones before it.
+        assert_eq!(values(&r, "CPUQuota"), ["20%"]);
+    }
+
+    #[test]
+    fn extend_circular_is_detected() {
         let configs = configs_from_toml(
             r#"
-            [curl]
-            systemd.CPUQuota = "50%"
+            [a]
+            extend = "b"
+            [b]
+            extend = "a"
+            [app]
+            match = "app"
+            extend = "a"
             "#,
         );
-        let r = resolve(&configs, "curl", &[]).unwrap();
-        assert!(r.systemd_args.is_empty());
-
-        let names = args(&["curl"]);
-        let r = resolve_with(&configs, "curl", &[], select(&names, false)).unwrap();
-        assert!(has_arg(&r.systemd_args, "CPUQuota=50%"));
+        let err = resolve(&configs, "app", &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("circular"));
     }
 
     #[test]
-    fn extend() {
-        let base = never_profile(vec![
-            ("CPUQuota", str("50%")),
-            ("ReadOnlyPaths", arr(&["/"])),
-        ]);
-        let mut child = profile(
-            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-            vec![("ReadWritePaths", arr(&["/tmp"]))],
-        );
-        child.extend = vec!["base".into()];
-
-        let configs = make_configs(vec![("base", base), ("curl", child)]);
-        let r = resolve(&configs, "curl", &[]).unwrap();
-
-        assert!(has_arg(&r.systemd_args, "CPUQuota=50%"));
-        assert!(has_arg(&r.systemd_args, "ReadOnlyPaths=/"));
-        assert!(has_arg(&r.systemd_args, "ReadWritePaths=/tmp"));
-    }
-
-    #[test]
-    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
-    fn array_replaces_by_default() {
-        let base = never_profile(vec![("ReadOnlyPaths", arr(&["/", "/etc"]))]);
-        let mut child = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("ReadOnlyPaths", arr(&["/usr"]))],
-        );
-        child.extend = vec!["base".into()];
-
-        let configs = make_configs(vec![("base", base), ("app", child)]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-
-        let paths: Vec<_> = r
-            .systemd_args
-            .windows(2)
-            .filter(|w| w[0] == "-p" && w[1].starts_with("ReadOnlyPaths="))
-            .map(|w| w[1].as_str())
-            .collect();
-        assert_eq!(paths, ["ReadOnlyPaths=/usr"]);
-    }
-
-    #[test]
-    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
-    fn array_extend_with_sentinel() {
-        let base = never_profile(vec![("ReadOnlyPaths", arr(&["/"]))]);
-        let mut child = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("ReadOnlyPaths", arr(&["...", "/etc"]))],
-        );
-        child.extend = vec!["base".into()];
-
-        let configs = make_configs(vec![("base", base), ("app", child)]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-
-        let paths: Vec<_> = r
-            .systemd_args
-            .windows(2)
-            .filter(|w| w[0] == "-p" && w[1].starts_with("ReadOnlyPaths="))
-            .map(|w| w[1].as_str())
-            .collect();
-        assert!(paths.contains(&"ReadOnlyPaths=/"));
-        assert!(paths.contains(&"ReadOnlyPaths=/etc"));
-        assert!(!paths.iter().any(|p| p.contains("...")));
-    }
-
-    #[test]
-    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
-    fn array_sentinel_in_middle() {
-        let base = never_profile(vec![("Paths", arr(&["/base"]))]);
-        let mut child = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("Paths", arr(&["/before", "...", "/after"]))],
-        );
-        child.extend = vec!["base".into()];
-
-        let configs = make_configs(vec![("base", base), ("app", child)]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-
-        let vals: Vec<_> = r
-            .systemd_args
-            .windows(2)
-            .filter(|w| w[0] == "-p" && w[1].starts_with("Paths="))
-            .map(|w| w[1].as_str())
-            .collect();
-        assert_eq!(vals, ["Paths=/before", "Paths=/base", "Paths=/after"]);
-    }
-
-    #[test]
-    fn array_duplicate_sentinel_errors() {
-        let base = never_profile(vec![("Paths", arr(&["/base"]))]);
-        let mut child = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("Paths", arr(&["...", "/mid", "..."]))],
-        );
-        child.extend = vec!["base".into()];
-
-        let configs = make_configs(vec![("base", base), ("app", child)]);
+    fn extending_an_unknown_profile_errors() {
+        let configs = configs_from_toml("[app]\nmatch = \"app\"\nextend = \"nope\"\n");
         resolve(&configs, "app", &[]).unwrap_err();
     }
 
     #[test]
-    #[expect(clippy::missing_asserts_for_indexing, clippy::indexing_slicing)]
-    fn exact_overrides_glob() {
-        let glob_p = profile(
-            CommandPattern::Glob(Pattern::new("cu*").unwrap(), MatchTarget::Command),
-            vec![("MemoryMax", str("512M"))],
+    fn path_with_spaces_is_quoted() {
+        let r = systemd_args(
+            "[app]\nmatch = \"app\"\nsystemd.BindPaths = \"/home/user/My Documents\"\n",
+            "app",
+            &[],
         );
-        let exact_p = profile(
-            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-            vec![("MemoryMax", str("2G"))],
-        );
+        assert!(has_arg(&r, "BindPaths=\"/home/user/My Documents\""));
+    }
 
-        let configs = make_configs(vec![("glob_curl", glob_p), ("curl", exact_p)]);
-        let r = resolve(&configs, "curl", &[]).unwrap();
+    // ── explicit selection ────────────────────────────────────────────────────
 
-        let last_mem = r
-            .systemd_args
-            .windows(2)
-            .rfind(|w| w[0] == "-p" && w[1].starts_with("MemoryMax="))
-            .map(|w| w[1].as_str());
-        assert_eq!(last_mem, Some("MemoryMax=2G"));
+    #[test]
+    fn explicit_profiles_apply_after_the_matches_in_cli_order() {
+        let src = r#"
+            [curl]
+            match = "curl"
+            systemd.MemoryMax = "1G"
+            systemd.CPUQuota = "10%"
+
+            [a]
+            systemd.MemoryMax = "2G"
+
+            [b]
+            systemd.MemoryMax = "3G"
+        "#;
+        let r = selected_args(src, &["b", "a"], "curl");
+        assert!(has_arg(&r, "CPUQuota=10%"));
+        assert_eq!(values(&r, "MemoryMax"), ["2G"]);
     }
 
     #[test]
-    fn path_with_spaces_is_quoted() {
-        let configs = make_configs(vec![(
-            "app",
-            profile(
-                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-                vec![("BindPaths", str("/home/user/My Documents"))],
-            ),
-        )]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-        assert!(has_arg(
-            &r.systemd_args,
-            "BindPaths=\"/home/user/My Documents\""
-        ));
+    fn no_match_applies_only_the_named_profiles() {
+        let configs = configs_from_toml(
+            "[curl]\nmatch = \"curl\"\nsystemd.CPUQuota = \"10%\"\n[extra]\nsystemd.MemoryMax = \"2G\"\n",
+        );
+        let names = args(&["extra"]);
+        let r = resolve_with(&configs, "curl", &[], select(&names, true)).unwrap();
+        assert!(has_arg(&r.systemd_args, "MemoryMax=2G"));
+        assert!(!has_arg(&r.systemd_args, "CPUQuota=10%"));
+
+        let r = resolve_with(&configs, "curl", &[], select(&[], true)).unwrap();
+        assert!(r.systemd_args.is_empty());
     }
+
+    #[test]
+    fn explicit_profile_not_found_errors() {
+        let configs = configs_from_toml("[base]\n");
+        let names = args(&["bsae"]);
+        resolve_with(&configs, "curl", &[], select(&names, false)).unwrap_err();
+    }
+
+    /// A profile that both matches and is named explicitly is applied once.
+    #[test]
+    fn explicit_profile_deduped_against_match() {
+        let configs = configs_from_toml("[app]\nmatch = \"app\"\nsystemd.CPUQuota = \"10%\"\n");
+        let names = args(&["app", "app"]);
+        let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
+        assert_eq!(values(&r.systemd_args, "CPUQuota"), ["10%"]);
+        assert_eq!(r.match_log, ["profile 'app' selected explicitly"]);
+    }
+
+    /// A base already applied for a matched profile moves to where it was
+    /// asked for by name, so it has the last word.
+    #[test]
+    fn an_explicit_base_moves_to_its_explicit_position() {
+        let src = r#"
+            [base]
+            systemd.CPUQuota = "5%"
+
+            [app]
+            match = "app"
+            extend = "base"
+            systemd.CPUQuota = "10%"
+        "#;
+        assert_eq!(
+            values(&selected_args(src, &["base"], "app"), "CPUQuota"),
+            ["5%"]
+        );
+    }
+
+    // ── scenario: combining profiles written separately ───────────────────────
+
+    const COMBINED: &str = r#"
+        [claude]
+        match = "claude"
+        filesystem.hide = ["/home/u"]
+        filesystem.read = ["/", "/home/u/.gitconfig", "/srv/shared"]
+        filesystem.write = ["/home/u/.claude"]
+        network.dest.allow = ["api.anthropic.com"]
+        systemd.MemoryMax = "1G"
+        systemd.Environment = ["A=1"]
+
+        [npm]
+        match = "npm"
+        filesystem.read = ["/", "/srv/shared"]
+        filesystem.write = ["/home/u/.npm"]
+        filesystem.deny = ["/srv/secret", "/home/u/.gitconfig"]
+        network.dest.allow = ["registry.npmjs.org"]
+        systemd.Environment = ["A=1", "B=2"]
+
+        [cargo]
+        match = "cargo"
+        filesystem.write = ["/srv/shared", "/home/u/.cargo"]
+        network.dest.allow = ["*.crates.io", "api.anthropic.com"]
+        systemd.MemoryMax = "4G"
+    "#;
+
+    #[test]
+    fn independent_profiles_combine_on_the_most_permissive_access() {
+        let r = selected_args(COMBINED, &["claude", "npm", "cargo"], "zsh");
+        assert_eq!(values(&r, "TemporaryFileSystem"), ["/home/u"]);
+        assert_eq!(values(&r, "ReadOnlyPaths"), ["-/"]);
+        // Read by two of them, written by the third: writable, and only that.
+        assert_eq!(values(&r, "ReadWritePaths"), ["-/srv/shared"]);
+        assert_eq!(values(&r, "InaccessiblePaths"), ["-/srv/secret"]);
+        // Inside the hidden home, everything granted is mounted back in, and a
+        // read beats a deny.
+        assert_eq!(values(&r, "BindReadOnlyPaths"), ["-/home/u/.gitconfig"]);
+        assert_eq!(
+            values(&r, "BindPaths"),
+            ["-/home/u/.cargo", "-/home/u/.claude", "-/home/u/.npm"]
+        );
+        assert_eq!(values(&r, "Environment"), ["A=1", "B=2"]);
+        assert_eq!(values(&r, "MemoryMax"), ["4G"]);
+    }
+
+    #[test]
+    fn independent_network_rules_accumulate() {
+        let configs = configs_from_toml(COMBINED);
+        let names = args(&["claude", "npm", "cargo"]);
+        let r = resolve_with(&configs, "zsh", &[], select(&names, false)).unwrap();
+        let policy = network_of(r.policies).expect("a network policy");
+        assert_eq!(
+            policy.dest.allow,
+            [
+                Destination::Host("api.anthropic.com".to_owned()),
+                Destination::Host("registry.npmjs.org".to_owned()),
+                Destination::Host("*.crates.io".to_owned()),
+            ]
+        );
+    }
+
+    /// The filesystem lists become mount properties, and nothing else of the table does.
+    #[test]
+    fn filesystem_lists_become_mount_properties() {
+        let r = systemd_args(
+            "[curl]\nmatch = \"curl\"\nfilesystem.log = \"denied\"\nfilesystem.read = [\"/x\"]\n",
+            "curl",
+            &[],
+        );
+        assert_eq!(r, ["-p", "ReadOnlyPaths=-/x"]);
+    }
+
+    #[test]
+    fn filesystem_paths_are_made_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let r = systemd_args(
+            "[app]\nmatch = \"app\"\nfilesystem.write = [\"build\", \"$arg_1\"]\n",
+            "app",
+            &["out/"],
+        );
+        assert_eq!(
+            values(&r, "ReadWritePaths"),
+            [
+                format!("-{}", cwd.join("build").display()),
+                format!("-{}", cwd.join("out").display()),
+            ]
+        );
+    }
+
+    // ── scenario: capturing arguments ─────────────────────────────────────────
+
+    const AGENTS: &str = r#"
+        [claude]
+        match = "claude"
+        args.add_dir = { flags = "--add-dir", greedy = true }
+        filesystem.read = ["$arg_add_dir"]
+
+        [myagent]
+        match = "myagent"
+        args.add_dir = "--add-dir"
+        filesystem.read = ["$arg_add_dir"]
+    "#;
+
+    #[test]
+    fn a_greedy_flag_takes_every_value_after_it() {
+        let r = systemd_args(AGENTS, "claude", &["--add-dir", "/a", "/b", "-c"]);
+        assert_eq!(values(&r, "ReadOnlyPaths"), ["-/a", "-/b"]);
+    }
+
+    #[test]
+    fn a_flag_accumulates_across_occurrences_and_forms() {
+        let r = systemd_args(
+            AGENTS,
+            "myagent",
+            &[
+                "--add-dir",
+                "/a",
+                "prompt",
+                "--add-dir",
+                "/b",
+                "--add-dir=/c",
+            ],
+        );
+        assert_eq!(values(&r, "ReadOnlyPaths"), ["-/a", "-/b", "-/c"]);
+    }
+
+    #[test]
+    fn an_absent_flag_adds_nothing() {
+        assert!(systemd_args(AGENTS, "claude", &[]).is_empty());
+    }
+
+    #[test]
+    fn undeclared_flags_take_no_value() {
+        let vars = parse_command_args(&args(&["--verbose", "dir", "-x", "f"]), &ArgDecls::new());
+        assert_eq!(vars.get("1"), Some(&vec!["dir".to_owned()]));
+        assert_eq!(vars.get("2"), Some(&vec!["f".to_owned()]));
+        assert_eq!(vars.get("rest"), Some(&vec!["dir f".to_owned()]));
+        assert!(!vars.contains_key("verbose"));
+    }
+
+    #[test]
+    fn a_declared_flag_value_is_not_a_positional() {
+        let configs = configs_from_toml("[a]\nargs.target = [\"-t\", \"--target\"]\n");
+        let vars = parse_command_args(&args(&["-t", "dir", "file1"]), &configs.0["a"].args);
+        assert_eq!(vars.get("target"), Some(&vec!["dir".to_owned()]));
+        assert_eq!(vars.get("1"), Some(&vec!["file1".to_owned()]));
+    }
+
+    #[test]
+    fn double_dash_ends_the_flags() {
+        let configs = configs_from_toml("[a]\nargs.x = \"--x\"\n");
+        let vars = parse_command_args(&args(&["--", "--x", "p"]), &configs.0["a"].args);
+        assert_eq!(vars.get("1"), Some(&vec!["--x".to_owned()]));
+        assert_eq!(vars.get("2"), Some(&vec!["p".to_owned()]));
+        assert!(!vars.contains_key("x"));
+    }
+
+    #[test]
+    fn a_multi_valued_argument_replicates_the_template() {
+        let r = systemd_args(
+            "[app]\nmatch = \"app\"\nargs.inc = \"--inc\"\nsystemd.BindPaths = [\"/always\", \"/p$arg_inc\", \"$arg_missing\"]\n",
+            "app",
+            &["--inc", "/a", "--inc", "/b"],
+        );
+        assert_eq!(values(&r, "BindPaths"), ["/always", "/p/a", "/p/b"]);
+    }
+
+    #[test]
+    fn two_multi_valued_arguments_in_one_template_error() {
+        let configs = configs_from_toml(
+            "[app]\nmatch = \"app\"\nargs.a = \"--aa\"\nargs.b = \"--bb\"\nsystemd.BindPaths = \"$arg_a/$arg_b\"\n",
+        );
+        resolve(
+            &configs,
+            "app",
+            &args(&["--aa", "x", "--aa", "y", "--bb", "1", "--bb", "2"]),
+        )
+        .unwrap_err();
+    }
+
+    // ── variables ─────────────────────────────────────────────────────────────
 
     #[test]
     fn expand_var() {
@@ -1230,198 +1102,51 @@ mod tests {
         expand_env("$SCUDO_UNDEFINED_XYZ_VAR").unwrap_err();
     }
 
-    // ── arg variable tests ────────────────────────────────────────────────────
-
-    fn args(s: &[&str]) -> Vec<String> {
-        s.iter().map(ToString::to_string).collect()
-    }
-
     #[test]
-    fn arg_long_auto_detect_space() {
-        let vars = parse_command_args(&args(&["--foo-bar", "val"]), &HashMap::new(), &[]);
-        assert_eq!(vars.get("foo_bar"), Some(&vec!["val".to_owned()]));
-    }
+    fn the_project_dir_is_the_closest_with_git() {
+        let root = std::env::temp_dir().join(format!("scudo-project-{}", std::process::id()));
+        let nested = root.join("repo/src/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(root.join("worktree/sub")).unwrap();
+        std::fs::write(root.join("worktree/.git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::create_dir_all(root.join("plain/sub")).unwrap();
 
-    #[test]
-    fn arg_long_auto_detect_equals() {
-        let vars = parse_command_args(&args(&["--foo-bar=val"]), &HashMap::new(), &[]);
-        assert_eq!(vars.get("foo_bar"), Some(&vec!["val".to_owned()]));
-    }
-
-    #[test]
-    fn arg_short_alias() {
-        let mut aliases: ArgAliases = HashMap::new();
-        aliases.insert(
-            "target_directory".to_owned(),
-            ArgAliasDecl::Simple(vec!["-t".to_owned(), "--target-directory".to_owned()]),
-        );
-        let vars = parse_command_args(&args(&["-t", "my-dir"]), &aliases, &[]);
+        assert_eq!(find_project_dir(&nested), root.join("repo"));
+        assert_eq!(find_project_dir(&root.join("repo")), root.join("repo"));
         assert_eq!(
-            vars.get("target_directory"),
-            Some(&vec!["my-dir".to_owned()])
+            find_project_dir(&root.join("worktree/sub")),
+            root.join("worktree")
         );
+        // Nothing above it is a project (the temp dir is not in a repository):
+        // the directory itself is.
+        let plain = root.join("plain/sub");
+        if !std::env::temp_dir()
+            .ancestors()
+            .any(|d| d.join(".git").exists())
+        {
+            assert_eq!(find_project_dir(&plain), plain);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn arg_repeated_flag() {
-        let mut aliases: ArgAliases = HashMap::new();
-        aliases.insert(
-            "include".to_owned(),
-            ArgAliasDecl::Simple(vec!["--include".to_owned()]),
-        );
-        let vars = parse_command_args(&args(&["--include", "a", "--include", "b"]), &aliases, &[]);
+    fn the_project_dir_variable_expands() {
+        let cwd = std::env::current_dir().unwrap();
         assert_eq!(
-            vars.get("include"),
-            Some(&vec!["a".to_owned(), "b".to_owned()])
+            expand_env("$SCUDO_PROJECT_DIR").unwrap(),
+            find_project_dir(&cwd).to_string_lossy()
         );
     }
 
-    #[test]
-    fn arg_nargs_plus() {
-        let mut aliases: ArgAliases = HashMap::new();
-        aliases.insert(
-            "include".to_owned(),
-            ArgAliasDecl::Extended {
-                flags: vec!["--include".to_owned()],
-                nargs: Some("+".to_owned()),
-            },
-        );
-        let vars = parse_command_args(&args(&["--include", "a", "b", "c"]), &aliases, &[]);
-        assert_eq!(
-            vars.get("include"),
-            Some(&vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
-        );
-    }
+    // ── path canonicalization ─────────────────────────────────────────────────
 
-    #[test]
-    fn arg_missing_silent_filtered_from_array() {
-        let configs = make_configs(vec![(
+    fn path_args(key: &str, template: &str, command_args: &[&str]) -> Vec<String> {
+        systemd_args(
+            &format!("[app]\nmatch = \"app\"\nsystemd.{key} = {template:?}\n"),
             "app",
-            profile(
-                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-                vec![("BindPaths", arr(&["/always", "$arg_optional"]))],
-            ),
-        )]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-        // $arg_optional not set → empty → filtered; only /always remains
-        assert!(has_arg(&r.systemd_args, "BindPaths=/always"));
-        let count = r
-            .systemd_args
-            .windows(2)
-            .filter(|w| {
-                assert_eq!(w.len(), 2);
-                w[0] == "-p" && w[1].starts_with("BindPaths=")
-            })
-            .count();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn arg_template_explosion() {
-        // Array arg variable in BindPaths explodes to one entry per value.
-        // Use absolute paths so canonicalization doesn't alter the values.
-        let mut aliases: ArgAliases = HashMap::new();
-        aliases.insert(
-            "inc".to_owned(),
-            ArgAliasDecl::Simple(vec!["--inc".to_owned()]),
-        );
-        let mut p = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("BindPaths", arr(&["$arg_inc"]))],
-        );
-        p.arg_aliases = aliases;
-        let configs = make_configs(vec![("app", p)]);
-        let r = resolve(&configs, "app", &args(&["--inc", "/a", "--inc", "/b"])).unwrap();
-        assert!(has_arg(&r.systemd_args, "BindPaths=/a"));
-        assert!(has_arg(&r.systemd_args, "BindPaths=/b"));
-    }
-
-    #[test]
-    fn arg_two_array_vars_in_string_errors() {
-        let mut aliases: ArgAliases = HashMap::new();
-        aliases.insert(
-            "a".to_owned(),
-            ArgAliasDecl::Simple(vec!["--aa".to_owned()]),
-        );
-        aliases.insert(
-            "b".to_owned(),
-            ArgAliasDecl::Simple(vec!["--bb".to_owned()]),
-        );
-        let mut p = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("BindPaths", str("$arg_a/$arg_b"))],
-        );
-        p.arg_aliases = aliases;
-        let configs = make_configs(vec![("app", p)]);
-        // Both --aa and --bb have 2 values each → error
-        let result = resolve(
-            &configs,
-            "app",
-            &args(&["--aa", "x", "--aa", "y", "--bb", "1", "--bb", "2"]),
-        );
-        result.unwrap_err();
-    }
-
-    #[test]
-    fn arg_positional_simple() {
-        let vars = parse_command_args(&args(&["my-dir"]), &HashMap::new(), &[]);
-        assert_eq!(vars.get("1"), Some(&vec!["my-dir".to_owned()]));
-    }
-
-    #[test]
-    fn arg_positional_with_bool_flag() {
-        let vars = parse_command_args(&args(&["-p", "my-dir"]), &HashMap::new(), &args(&["-p"]));
-        assert_eq!(vars.get("1"), Some(&vec!["my-dir".to_owned()]));
-        assert!(!vars.contains_key("p"));
-    }
-
-    #[test]
-    fn arg_positional_with_value_flag() {
-        let mut aliases: ArgAliases = HashMap::new();
-        aliases.insert(
-            "target_directory".to_owned(),
-            ArgAliasDecl::Simple(vec!["-t".to_owned()]),
-        );
-        let vars = parse_command_args(&args(&["-t", "dir", "file1"]), &aliases, &[]);
-        assert_eq!(vars.get("target_directory"), Some(&vec!["dir".to_owned()]));
-        assert_eq!(vars.get("1"), Some(&vec!["file1".to_owned()]));
-    }
-
-    #[test]
-    fn arg_rest() {
-        let vars = parse_command_args(
-            &args(&["-p", "dir1", "dir2"]),
-            &HashMap::new(),
-            &args(&["-p"]),
-        );
-        assert_eq!(vars.get("1"), Some(&vec!["dir1".to_owned()]));
-        assert_eq!(vars.get("2"), Some(&vec!["dir2".to_owned()]));
-        assert_eq!(vars.get("rest"), Some(&vec!["dir1 dir2".to_owned()]));
-    }
-
-    #[test]
-    fn arg_double_dash() {
-        let vars = parse_command_args(
-            &args(&["--", "--not-a-flag", "positional"]),
-            &HashMap::new(),
-            &[],
-        );
-        assert_eq!(vars.get("1"), Some(&vec!["--not-a-flag".to_owned()]));
-        assert_eq!(vars.get("2"), Some(&vec!["positional".to_owned()]));
-        assert!(!vars.contains_key("not_a_flag"));
-    }
-
-    // ── path canonicalization tests ───────────────────────────────────────────
-
-    /// Build a profile whose single property is a path property using a $VAR reference.
-    fn path_profile(key: &str, template: &str) -> ValidatedConfigMap {
-        make_configs(vec![(
-            "app",
-            profile(
-                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-                vec![(key, str(template))],
-            ),
-        )])
+            command_args,
+        )
     }
 
     #[test]
@@ -1429,503 +1154,54 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         // SAFETY: test-only env var
         unsafe { std::env::set_var("SCUDO_TEST_PATH", "relative/dir") }
-        let configs = path_profile("BindPaths", "$SCUDO_TEST_PATH");
-        let r = resolve(&configs, "app", &[]).unwrap();
         let expected = cwd.join("relative/dir").to_string_lossy().into_owned();
-        assert!(has_arg(&r.systemd_args, &format!("BindPaths={expected}")));
-    }
-
-    #[test]
-    fn path_env_var_absolute_unchanged() {
-        // SAFETY: test-only env var
-        unsafe { std::env::set_var("SCUDO_TEST_ABS_PATH", "/already/absolute") }
-        let configs = path_profile("BindPaths", "$SCUDO_TEST_ABS_PATH");
-        let r = resolve(&configs, "app", &[]).unwrap();
-        assert!(has_arg(&r.systemd_args, "BindPaths=/already/absolute"));
+        assert!(has_arg(
+            &path_args("BindPaths", "$SCUDO_TEST_PATH", &[]),
+            &format!("BindPaths={expected}")
+        ));
     }
 
     #[test]
     fn path_var_non_path_property_not_canonicalized() {
         // SAFETY: test-only env var
         unsafe { std::env::set_var("SCUDO_TEST_NONPATH", "relative/value") }
-        let configs = path_profile("CPUQuota", "$SCUDO_TEST_NONPATH");
-        let r = resolve(&configs, "app", &[]).unwrap();
-        // CPUQuota is not a path property — value should be unchanged
-        assert!(has_arg(&r.systemd_args, "CPUQuota=relative/value"));
+        assert!(has_arg(
+            &path_args("CPUQuota", "$SCUDO_TEST_NONPATH", &[]),
+            "CPUQuota=relative/value"
+        ));
     }
 
     #[test]
     fn path_arg_relative_made_absolute() {
         let cwd = std::env::current_dir().unwrap();
-        let p = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("BindPaths", str("$arg_1"))],
-        );
-        let configs = make_configs(vec![("app", p)]);
-        let r = resolve(&configs, "app", &args(&["mydir"])).unwrap();
         let expected = cwd.join("mydir").to_string_lossy().into_owned();
-        assert!(has_arg(&r.systemd_args, &format!("BindPaths={expected}")));
+        assert!(has_arg(
+            &path_args("BindPaths", "$arg_1", &["mydir"]),
+            &format!("BindPaths={expected}")
+        ));
     }
 
     #[test]
     fn path_literal_not_touched() {
-        // Hardcoded relative string (no variable) — not canonicalized
-        let configs = path_profile("BindPaths", "relative/hardcoded");
-        let r = resolve(&configs, "app", &[]).unwrap();
-        assert!(has_arg(&r.systemd_args, "BindPaths=relative/hardcoded"));
+        assert!(has_arg(
+            &path_args("BindPaths", "relative/hardcoded", &[]),
+            "BindPaths=relative/hardcoded"
+        ));
     }
 
     #[test]
     fn path_literal_prefix_with_var_relative() {
-        // The `-` prefix is literal; the variable value is canonicalized
         let cwd = std::env::current_dir().unwrap();
         // SAFETY: test-only env var
         unsafe { std::env::set_var("SCUDO_TEST_DASH_PATH", "some/dir") }
-        let configs = path_profile("ReadWritePaths", "-$SCUDO_TEST_DASH_PATH");
-        let r = resolve(&configs, "app", &[]).unwrap();
         let expected = format!("-{}", cwd.join("some/dir").to_string_lossy());
         assert!(has_arg(
-            &r.systemd_args,
+            &path_args("ReadWritePaths", "-$SCUDO_TEST_DASH_PATH", &[]),
             &format!("ReadWritePaths={expected}")
         ));
     }
 
-    // ── multi-extend tests ────────────────────────────────────────────────────
-
-    #[test]
-    fn multi_extend_priority() {
-        // extend = ["a", "b"]: b overrides a; current profile overrides b.
-        let a = never_profile(vec![("CPUQuota", str("10%")), ("MemoryMax", str("128M"))]);
-        let b = never_profile(vec![("CPUQuota", str("20%")), ("MemoryHigh", str("256M"))]);
-        let mut child = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![("CPUQuota", str("50%"))],
-        );
-        child.extend = vec!["a".into(), "b".into()];
-
-        let configs = make_configs(vec![("a", a), ("b", b), ("app", child)]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-
-        // child wins for CPUQuota
-        assert!(has_arg(&r.systemd_args, "CPUQuota=50%"));
-        // b wins over a for CPUQuota (but child wins overall)
-        // MemoryMax from a is present (b didn't override it)
-        assert!(has_arg(&r.systemd_args, "MemoryMax=128M"));
-        // MemoryHigh from b is present
-        assert!(has_arg(&r.systemd_args, "MemoryHigh=256M"));
-    }
-
-    #[test]
-    #[expect(clippy::many_single_char_names)]
-    fn multi_extend_diamond() {
-        // A extends [B, C]; B and C both extend D.
-        // Diamond inheritance must not cause a circular-extend error.
-        let d = never_profile(vec![("MemoryMax", str("64M"))]);
-        let mut b = never_profile(vec![("CPUQuota", str("10%"))]);
-        b.extend = vec!["d".into()];
-        let mut c = never_profile(vec![("CPUQuota", str("20%"))]);
-        c.extend = vec!["d".into()];
-        let mut a = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![],
-        );
-        a.extend = vec!["b".into(), "c".into()];
-
-        let configs = make_configs(vec![("d", d), ("b", b), ("c", c), ("app", a)]);
-        let r = resolve(&configs, "app", &[]).unwrap();
-
-        // D's property visible; no error
-        assert!(has_arg(&r.systemd_args, "MemoryMax=64M"));
-        // C (rightmost) wins over B for CPUQuota
-        assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
-    }
-
-    /// Two parents that both add to the same list must both be honoured. Each
-    /// branch used to be resolved on its own, and the sentinel-free array that
-    /// came out replaced the previous parent's list instead of extending it, so
-    /// only the last parent's additions survived.
-    #[test]
-    fn multi_extend_siblings_accumulate_lists() {
-        let configs = configs_from_toml(
-            r#"
-            [base]
-            systemd.BindPaths = ["/base"]
-
-            [a]
-            extend = "base"
-            systemd.BindPaths = ["...", "/a"]
-
-            [b]
-            extend = "base"
-            systemd.BindPaths = ["...", "/b"]
-
-            [app]
-            match = "app"
-            extend = ["base", "a", "b"]
-            systemd.BindPaths = ["...", "/app"]
-            "#,
-        );
-        let r = resolve(&configs, "app", &[]).unwrap();
-        // "/base" appears once: the shared ancestor is applied a single time.
-        assert_eq!(
-            values(&r.systemd_args, "BindPaths"),
-            ["/base", "/a", "/b", "/app"]
-        );
-    }
-
-    /// The same, one level up: two matched profiles sharing a base apply it
-    /// once, and neither one's additions are lost.
-    #[test]
-    fn a_base_shared_by_two_matched_profiles_is_applied_once() {
-        let configs = configs_from_toml(
-            r#"
-            [base]
-            systemd.BindPaths = ["/base"]
-
-            [globbed]
-            match = { pattern = "ap*", type = "glob" }
-            extend = "base"
-            systemd.BindPaths = ["...", "/glob"]
-
-            [app]
-            match = "app"
-            extend = "base"
-            systemd.BindPaths = ["...", "/exact"]
-            "#,
-        );
-        let r = resolve(&configs, "app", &[]).unwrap();
-        assert_eq!(
-            values(&r.systemd_args, "BindPaths"),
-            ["/base", "/glob", "/exact"]
-        );
-    }
-
-    /// The network table splices its lists the same way, so it accumulates the
-    /// same way across sibling parents.
-    #[test]
-    fn multi_extend_siblings_accumulate_network_lists() {
-        let policy = resolved_policy(
-            r#"
-            [base]
-            network.default = "deny"
-            network.dest.allow = ["1.1.1.1"]
-
-            [a]
-            extend = "base"
-            network.dest.allow = ["...", "a.example"]
-
-            [b]
-            extend = "base"
-            network.dest.allow = ["...", "b.example"]
-
-            [app]
-            match = "app"
-            extend = ["a", "b"]
-            "#,
-            "app",
-            &[],
-        );
-        assert_eq!(
-            policy.dest.allow,
-            vec![
-                Destination::Net {
-                    addr: "1.1.1.1".parse().unwrap(),
-                    prefix_len: 32u8,
-                },
-                Destination::Host("a.example".to_owned()),
-                Destination::Host("b.example".to_owned()),
-            ]
-        );
-    }
-
-    /// A profile that a lower-tier profile extends still has the last word at
-    /// its own tier: where the chain puts it decides, not the inheritance edge.
-    #[test]
-    fn an_exact_match_still_wins_over_a_glob_that_extends_it() {
-        let configs = configs_from_toml(
-            r#"
-            [app]
-            match = "app"
-            systemd.CPUQuota = "50%"
-
-            [globbed]
-            match = { pattern = "ap*", type = "glob" }
-            extend = "app"
-            systemd.CPUQuota = "10%"
-            "#,
-        );
-        let r = resolve(&configs, "app", &[]).unwrap();
-        assert_eq!(values(&r.systemd_args, "CPUQuota"), ["50%"]);
-    }
-
-    #[test]
-    fn extend_circular_still_detected() {
-        let mut a = never_profile(vec![]);
-        a.extend = vec!["b".into()];
-        let mut b = never_profile(vec![]);
-        b.extend = vec!["a".into()];
-        let mut child = profile(
-            CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-            vec![],
-        );
-        child.extend = vec!["a".into()];
-
-        let configs = make_configs(vec![("a", a), ("b", b), ("app", child)]);
-        resolve(&configs, "app", &[]).unwrap_err();
-    }
-
-    #[test]
-    fn full_command_target_match() {
-        use crate::config::MatchTarget;
-        use glob::Pattern;
-        // Profile matches only when "commit" appears in the full command line.
-        let p = profile(
-            CommandPattern::Glob(
-                Pattern::new("git commit*").unwrap(),
-                MatchTarget::FullCommand,
-            ),
-            vec![("CPUQuota", str("10%"))],
-        );
-        let configs = make_configs(vec![("git-commit-sandbox", p)]);
-
-        // Matches when "commit" is the first argument.
-        let r = resolve(&configs, "git", &args(&["commit", "-m", "msg"])).unwrap();
-        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
-
-        // Does not match when no arguments contain "commit".
-        let r = resolve(&configs, "git", &args(&["status"])).unwrap();
-        assert!(r.systemd_args.is_empty());
-
-        // Does not match on command name alone (without matching args).
-        let r = resolve(&configs, "git", &[]).unwrap();
-        assert!(r.systemd_args.is_empty());
-    }
-
-    // ── multi-pattern match semantics ─────────────────────────────────────────
-
-    fn matched(configs: &ValidatedConfigMap, command: &str, command_args: &[&str]) -> bool {
-        !resolve(configs, command, &args(command_args))
-            .unwrap()
-            .systemd_args
-            .is_empty()
-    }
-
-    #[test]
-    fn command_names_in_array_are_alternatives() {
-        let configs = configs_from_toml(
-            r#"
-            [ov]
-            match = ["ov", "openviking", "openviking-server"]
-            systemd.CPUQuota = "10%"
-            "#,
-        );
-        assert!(matched(&configs, "ov", &["health"]));
-        assert!(matched(&configs, "openviking", &[]));
-        assert!(matched(&configs, "openviking-server", &[]));
-        assert!(!matched(&configs, "other", &[]));
-    }
-
-    #[test]
-    fn full_command_patterns_are_extra_conditions() {
-        let configs = configs_from_toml(
-            r#"
-            [git-commit]
-            match = ["git", { pattern = "\\bcommit\\b", type = "regex", target = "full_command" }]
-            systemd.CPUQuota = "10%"
-            "#,
-        );
-        assert!(matched(&configs, "git", &["commit", "-m", "x"]));
-        assert!(!matched(&configs, "git", &["status"]));
-        assert!(!matched(&configs, "hg", &["commit"]));
-    }
-
-    #[test]
-    fn alternatives_combine_with_full_command_conditions() {
-        let configs = configs_from_toml(
-            r#"
-            [vcs-commit]
-            match = ["git", "hg", { pattern = "commit", type = "regex", target = "full_command" }]
-            systemd.CPUQuota = "10%"
-            "#,
-        );
-        assert!(matched(&configs, "hg", &["commit"]));
-        assert!(matched(&configs, "git", &["commit"]));
-        assert!(!matched(&configs, "hg", &["log"]));
-        assert!(!matched(&configs, "svn", &["commit"]));
-    }
-
-    #[test]
-    fn tier_comes_from_the_pattern_that_matched() {
-        let configs = configs_from_toml(
-            r#"
-            [named]
-            match = ["ov", { pattern = "o*", type = "glob" }]
-            systemd.CPUQuota = "10%"
-
-            [wide]
-            match = { pattern = "*", type = "glob" }
-            systemd.CPUQuota = "90%"
-            "#,
-        );
-        // `ov` hits the exact entry, so `named` outranks the glob-only `wide`.
-        let r = resolve(&configs, "ov", &[]).unwrap();
-        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
-        assert!(!has_arg(&r.systemd_args, "CPUQuota=90%"));
-        assert!(
-            r.match_log
-                .iter()
-                .any(|l| l.contains("'named' matched exact"))
-        );
-
-        // `oo` only hits the glob entry, so `named` is a glob match too.
-        let r = resolve(&configs, "oo", &[]).unwrap();
-        assert!(
-            r.match_log
-                .iter()
-                .any(|l| l.contains("'named' matched glob"))
-        );
-    }
-
-    #[test]
-    fn sentinel_adds_parent_names_as_alternatives() {
-        let configs = configs_from_toml(
-            r#"
-            [base]
-            match = ["base"]
-
-            [child]
-            extend = "base"
-            match = ["...", "extra"]
-            systemd.CPUQuota = "10%"
-            "#,
-        );
-        assert!(matched(&configs, "base", &[]));
-        assert!(matched(&configs, "extra", &[]));
-        assert!(!matched(&configs, "other", &[]));
-    }
-    // ── explicit profile selection tests ──────────────────────────────────────
-
-    fn select(profiles: &[String], no_match: bool) -> ResolveOptions<'_> {
-        ResolveOptions {
-            profiles,
-            no_match,
-            network: None,
-        }
-    }
-
-    #[test]
-    fn explicit_profile_bypasses_match() {
-        // A profile that never matches on its own is applied when named explicitly.
-        let configs = make_configs(vec![(
-            "netblock",
-            never_profile(vec![("PrivateNetwork", Value::Boolean(true))]),
-        )]);
-        let names = args(&["netblock"]);
-        let r = resolve_with(&configs, "curl", &[], select(&names, false)).unwrap();
-        assert!(has_arg(&r.systemd_args, "PrivateNetwork=yes"));
-    }
-
-    #[test]
-    fn explicit_profile_appended_to_matches() {
-        // Matched profiles still apply; the explicit one wins on conflicting keys.
-        let matched = profile(
-            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-            vec![("MemoryMax", str("1G")), ("CPUQuota", str("10%"))],
-        );
-        let extra = never_profile(vec![("MemoryMax", str("2G"))]);
-        let configs = make_configs(vec![("curl", matched), ("extra", extra)]);
-
-        let names = args(&["extra"]);
-        let r = resolve_with(&configs, "curl", &[], select(&names, false)).unwrap();
-        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
-        assert!(has_arg(&r.systemd_args, "MemoryMax=2G"));
-        assert!(!has_arg(&r.systemd_args, "MemoryMax=1G"));
-    }
-
-    #[test]
-    fn no_match_ignores_matching_profiles() {
-        let matched = profile(
-            CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-            vec![("CPUQuota", str("10%"))],
-        );
-        let extra = never_profile(vec![("MemoryMax", str("2G"))]);
-        let configs = make_configs(vec![("curl", matched), ("extra", extra)]);
-
-        let names = args(&["extra"]);
-        let r = resolve_with(&configs, "curl", &[], select(&names, true)).unwrap();
-        assert!(has_arg(&r.systemd_args, "MemoryMax=2G"));
-        assert!(!has_arg(&r.systemd_args, "CPUQuota=10%"));
-    }
-
-    #[test]
-    fn no_match_without_profiles_is_empty() {
-        let configs = make_configs(vec![(
-            "curl",
-            profile(
-                CommandPattern::Exact("curl".to_owned(), MatchTarget::Command),
-                vec![("CPUQuota", str("10%"))],
-            ),
-        )]);
-        let r = resolve_with(&configs, "curl", &[], select(&[], true)).unwrap();
-        assert!(r.systemd_args.is_empty());
-    }
-
-    #[test]
-    fn explicit_profile_not_found_errors() {
-        let configs = make_configs(vec![("base", never_profile(vec![]))]);
-        let names = args(&["bsae"]);
-        resolve_with(&configs, "curl", &[], select(&names, false)).unwrap_err();
-    }
-
-    #[test]
-    fn explicit_synthetic_name_not_selectable() {
-        // Keys generated by cross-file self-extend must stay internal.
-        let synthetic = "\u{0}app\u{0}0";
-        let configs = make_configs(vec![(
-            synthetic,
-            never_profile(vec![("CPUQuota", str("10%"))]),
-        )]);
-        let names = args(&[synthetic]);
-        resolve_with(&configs, "app", &[], select(&names, false)).unwrap_err();
-    }
-
-    #[test]
-    fn explicit_profile_deduped_against_match() {
-        // A profile that both matches and is named explicitly is applied once only.
-        let configs = make_configs(vec![(
-            "app",
-            profile(
-                CommandPattern::Exact("app".to_owned(), MatchTarget::Command),
-                vec![("CPUQuota", str("10%"))],
-            ),
-        )]);
-        let names = args(&["app", "app"]);
-        let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
-
-        assert!(has_arg(&r.systemd_args, "CPUQuota=10%"));
-        let mentions = r
-            .match_log
-            .iter()
-            .filter(|line| line.starts_with("profile 'app'"))
-            .count();
-        assert_eq!(mentions, 1);
-        assert!(
-            r.match_log
-                .iter()
-                .any(|l| l.contains("selected explicitly"))
-        );
-    }
-
-    #[test]
-    fn explicit_profiles_applied_in_cli_order() {
-        let a = never_profile(vec![("CPUQuota", str("10%"))]);
-        let b = never_profile(vec![("CPUQuota", str("20%"))]);
-        let configs = make_configs(vec![("a", a), ("b", b)]);
-
-        let names = args(&["a", "b"]);
-        let r = resolve_with(&configs, "app", &[], select(&names, false)).unwrap();
-        assert!(has_arg(&r.systemd_args, "CPUQuota=20%"));
-    }
+    // ── logging, reporting and network ────────────────────────────────────────
 
     #[test]
     fn log_settings_inherit_through_extend() {
@@ -1956,7 +1232,7 @@ mod tests {
         let configs = configs_from_toml(
             r#"
             [default]
-            match = { type = "glob", pattern = "*" }
+            match = "*"
             log.level = "debug"
 
             [curl]
@@ -2264,7 +1540,7 @@ mod tests {
             [curl]
             match = "curl"
             extend = "base"
-            network.dest.allow = ["...", "api.github.com"]
+            network.dest.allow = ["api.github.com"]
             "#,
             "curl",
             &[],
@@ -2319,29 +1595,6 @@ mod tests {
         );
         assert_eq!(policy.ports.allow.len(), 1);
         assert_eq!(policy.ports.deny.len(), 1);
-    }
-
-    /// Without the sentinel, a child's list replaces the inherited one — the
-    /// same rule as for every other array-valued property.
-    #[test]
-    fn network_list_without_sentinel_replaces() {
-        let policy = resolved_policy(
-            r#"
-            [base]
-            network.dest.allow = ["1.1.1.1"]
-
-            [curl]
-            match = "curl"
-            extend = "base"
-            network.dest.allow = ["api.github.com"]
-            "#,
-            "curl",
-            &[],
-        );
-        assert_eq!(
-            policy.dest.allow,
-            vec![Destination::Host("api.github.com".to_owned())]
-        );
     }
 
     #[test]
@@ -2509,7 +1762,7 @@ mod tests {
             r#"
             [curl]
             match = "curl"
-            arg_aliases.host = { flags = ["--host"], nargs = "+" }
+            args.host = { flags = "--host", greedy = true }
             network.dest.allow = ["$arg_host"]
             "#,
             "curl",
@@ -2532,7 +1785,7 @@ mod tests {
             r#"
             [curl]
             match = "curl"
-            arg_aliases.port = { flags = ["--port"], nargs = "+" }
+            args.port = { flags = "--port", greedy = true }
             network.dest.allow = ["api.github.com"]
             network.ports.allow = ["$arg_port"]
             "#,

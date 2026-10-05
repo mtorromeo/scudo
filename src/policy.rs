@@ -11,7 +11,7 @@ pub mod network;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub use filesystem::{FilesystemConfig, FilesystemPolicy};
+pub use filesystem::{Access, FilesystemConfig, FilesystemPolicy, mount_properties};
 pub use network::{LogLevel, NetworkConfig, NetworkOverrides, NetworkPolicy, OnUnavailable};
 
 /// A single enforcement policy.

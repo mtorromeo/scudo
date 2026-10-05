@@ -45,10 +45,7 @@ fn stderr_of(config: &str, args: &[&str]) -> String {
 /// no reserved section, only the ordinary precedence of glob < regex < exact.
 #[test]
 fn a_catch_all_profile_sets_the_default_level() {
-    let stderr = stderr_of(
-        "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\nlog.level = \"debug\"\n",
-        &[],
-    );
+    let stderr = stderr_of("[default]\nmatch = \"*\"\nlog.level = \"debug\"\n", &[]);
     assert!(stderr.contains(DEBUG_LINE), "{stderr}");
 }
 
@@ -62,7 +59,7 @@ fn nothing_configured_says_nothing() {
 /// catch-all as well as to make it louder.
 #[test]
 fn an_exact_profile_can_be_quieter_than_the_catch_all() {
-    let config = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\nlog.level = \"debug\"\n\
+    let config = "[default]\nmatch = \"*\"\nlog.level = \"debug\"\n\
                   \n[quiet]\nmatch = \"true\"\nlog.level = \"error\"\n";
     let stderr = stderr_of(config, &[]);
     assert!(!stderr.contains(DEBUG_LINE), "{stderr}");
@@ -70,11 +67,11 @@ fn an_exact_profile_can_be_quieter_than_the_catch_all() {
 
 #[test]
 fn the_command_line_has_the_last_word() {
-    let config = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\nlog.level = \"debug\"\n";
+    let config = "[default]\nmatch = \"*\"\nlog.level = \"debug\"\n";
     let stderr = stderr_of(config, &["--log-level", "error"]);
     assert!(!stderr.contains(DEBUG_LINE), "{stderr}");
 
-    let quiet = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\nlog.level = \"error\"\n";
+    let quiet = "[default]\nmatch = \"*\"\nlog.level = \"error\"\n";
     let stderr = stderr_of(quiet, &["--log-level", "debug"]);
     assert!(stderr.contains(DEBUG_LINE), "{stderr}");
 }
@@ -82,7 +79,7 @@ fn the_command_line_has_the_last_word() {
 /// `verbose` predates the log table and has to keep meaning what it meant.
 #[test]
 fn verbose_in_a_profile_still_buys_debug() {
-    let config = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\nverbose = true\n";
+    let config = "[default]\nmatch = \"*\"\nverbose = true\n";
     let stderr = stderr_of(config, &[]);
     assert!(stderr.contains(DEBUG_LINE), "{stderr}");
 }
@@ -99,7 +96,7 @@ fn the_verbose_flag_only_ever_raises_the_level() {
 /// naming one is enough to move the output off stderr.
 #[test]
 fn a_path_takes_the_output_off_stderr() {
-    let config = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\n\
+    let config = "[default]\nmatch = \"*\"\n\
                   log.level = \"debug\"\nlog.path = \"$SCUDO_CONFIG_DIR/only.log\"\n";
     let (stderr, dir) = run(config, &[]);
     assert!(stderr.is_empty(), "{stderr}");
@@ -114,7 +111,7 @@ fn a_path_takes_the_output_off_stderr() {
 /// the config was read from.
 #[test]
 fn the_config_dir_variable_works_in_a_log_path() {
-    let config = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\n\
+    let config = "[default]\nmatch = \"*\"\n\
                   log.level = \"debug\"\nlog.target = [\"stderr\", \"file\"]\n\
                   log.path = \"$SCUDO_CONFIG_DIR/scudo.log\"\n";
     let (stderr, dir) = run(config, &[]);
@@ -129,7 +126,7 @@ fn the_config_dir_variable_works_in_a_log_path() {
 /// when the config is read rather than ignored for ever.
 #[test]
 fn a_misspelled_key_is_a_config_error() {
-    let config = "[default]\nmatch = { type = \"glob\", pattern = \"*\" }\nlog.levl = \"debug\"\n";
+    let config = "[default]\nmatch = \"*\"\nlog.levl = \"debug\"\n";
     let stderr = stderr_of(config, &[]);
     assert!(stderr.contains("levl"), "{stderr}");
 }

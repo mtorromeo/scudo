@@ -1,41 +1,20 @@
-use std::{collections::HashMap, env::VarError, path::PathBuf, sync::OnceLock};
+use std::{env::VarError, path::PathBuf, sync::OnceLock};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use glob::Pattern;
+use indexmap::IndexMap;
 use regex::Regex;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 
-pub type ArgAliases = HashMap<String, ArgAliasDecl>;
+use crate::{
+    logging::LogConfig,
+    policy::{FilesystemConfig, NetworkConfig},
+    trust,
+    tui::TuiConfig,
+};
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum ArgAliasDecl {
-    /// Simple form: `foo = ["-f", "--foo"]`.
-    Simple(Vec<String>),
-    /// Extended form: `foo = { flags = ["-f", "--foo"], nargs = "+" }`.
-    Extended {
-        flags: Vec<String>,
-        nargs: Option<String>,
-    },
-}
-
-impl ArgAliasDecl {
-    #[must_use]
-    pub fn flags(&self) -> &[String] {
-        match self {
-            ArgAliasDecl::Simple(v) => v,
-            ArgAliasDecl::Extended { flags, .. } => flags,
-        }
-    }
-
-    /// Returns `true` if this alias consumes all following non-flag args as values.
-    #[must_use]
-    pub fn is_multi_value(&self) -> bool {
-        matches!(self, ArgAliasDecl::Extended { nargs: Some(n), .. } if n == "+")
-    }
-}
-
-fn deserialize_extend<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+/// A list written as a single string or as an array of them.
+fn one_or_many<'de, D>(de: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -45,104 +24,54 @@ where
         One(String),
         Many(Vec<String>),
     }
-    match OneOrMany::deserialize(de)? {
+    // The untagged enum's own error names the enum rather than what was wrong.
+    match OneOrMany::deserialize(de)
+        .map_err(|_ignored| de::Error::custom("expected a string or an array of strings"))?
+    {
         OneOrMany::One(s) => Ok(vec![s]),
         OneOrMany::Many(v) => Ok(v),
     }
 }
 
-use crate::{
-    logging::LogConfig,
-    policy::{FilesystemConfig, NetworkConfig},
-    trust,
-    tui::TuiConfig,
-};
+/// Maps a `$arg_<name>` variable to the flags that fill it.
+pub type ArgDecls = IndexMap<String, ArgDecl>;
 
-/// Match type for a pattern entry. Defaults to `exact` when unspecified.
-#[derive(Debug, Deserialize, Clone, Default, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum MatchType {
-    #[default]
-    Exact,
-    Glob,
-    Regex,
+/// The flags behind one `$arg_*` variable.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ArgDecl {
+    /// `dir = "--add-dir"`.
+    One(String),
+    /// `dir = ["-d", "--add-dir"]`.
+    Many(Vec<String>),
+    /// `dir = { flags = "--add-dir", greedy = true }`.
+    Table(ArgTable),
 }
 
-/// What a pattern is compared against.
-#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum MatchTarget {
-    /// Compare against the command name only (default).
-    #[default]
-    Command,
-    /// Compare against the full command line: command name and all arguments joined with spaces.
-    FullCommand,
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgTable {
+    #[serde(deserialize_with = "one_or_many")]
+    flags: Vec<String>,
+    /// Take every argument that follows the flag up to the next one starting
+    /// with `-`, rather than only the next one.
+    #[serde(default)]
+    greedy: bool,
 }
 
-/// Compiled match pattern stored on a validated profile.
-/// `Sentinel` represents `"..."` — replaced with the parent profile's patterns at resolve time.
-///
-/// Within one profile, patterns targeting the command name are alternatives (any
-/// one of them suffices), while patterns targeting the full command line are
-/// additional conditions that must all hold.
-#[derive(Debug, Clone)]
-pub enum CommandPattern {
-    Exact(String, MatchTarget),
-    Regex(Regex, MatchTarget),
-    Glob(Pattern, MatchTarget),
-    /// `"..."` — splices the first parent's patterns in at this position during resolve.
-    Sentinel,
-}
-
-impl CommandPattern {
-    /// What the pattern is compared against; `None` for an unresolved sentinel.
+impl ArgDecl {
     #[must_use]
-    pub fn target(&self) -> Option<MatchTarget> {
+    pub fn flags(&self) -> &[String] {
         match self {
-            CommandPattern::Exact(_, t)
-            | CommandPattern::Regex(_, t)
-            | CommandPattern::Glob(_, t) => Some(*t),
-            CommandPattern::Sentinel => None,
+            ArgDecl::One(flag) => core::slice::from_ref(flag),
+            ArgDecl::Many(flags) | ArgDecl::Table(ArgTable { flags, .. }) => flags,
         }
     }
-}
 
-/// A single raw match entry as written in TOML.
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum MatchEntry {
-    /// Bare string: `"curl"` → exact match against command name; `"..."` → Sentinel.
-    Simple(String),
-    /// Table form: `{ pattern = "curl*", type = "glob", target = "full_command" }`.
-    Extended {
-        pattern: Option<String>,
-        #[serde(rename = "type", default)]
-        match_type: MatchType,
-        #[serde(default)]
-        target: MatchTarget,
-    },
-}
-
-/// Deserialize the `match` field.
-///
-/// - field absent → `None`  (serde `default` handles this; the profile never matches)
-/// - single entry → `Some(vec![entry])`
-/// - array        → `Some(entries)`
-fn deserialize_match_field<'de, D>(de: D) -> Result<Option<Vec<MatchEntry>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum MatchDecl {
-        One(MatchEntry),
-        Many(Vec<MatchEntry>),
+    #[must_use]
+    pub fn is_greedy(&self) -> bool {
+        matches!(self, ArgDecl::Table(ArgTable { greedy: true, .. }))
     }
-    let decl = MatchDecl::deserialize(de)?;
-    Ok(Some(match decl {
-        MatchDecl::One(e) => vec![e],
-        MatchDecl::Many(v) => v,
-    }))
 }
 
 /// A profile as written in TOML. Systemd unit properties live in the `systemd`
@@ -152,46 +81,31 @@ where
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
-    /// `None` = absent: the profile never matches a command on its own and is
-    /// reachable only through `extend` or `--profile`.
-    /// `Some([…])` = match with the listed pattern(s).
-    #[serde(
-        rename = "match",
-        default,
-        deserialize_with = "deserialize_match_field"
-    )]
-    pub r#match: Option<Vec<MatchEntry>>,
-    /// Profiles to inherit from, in left-to-right order (later entries take precedence).
-    /// Accepts a single string or an array. Including this profile's own name extends from
-    /// the same-named profile in lower-priority config files.
-    #[serde(default, deserialize_with = "deserialize_extend")]
+    /// Globs on the command name; any one of them matching is enough. Empty:
+    /// the profile is reachable only through `extend` or `--profile`.
+    #[serde(rename = "match", default, deserialize_with = "one_or_many")]
+    pub r#match: Vec<String>,
+    /// Profiles applied before this one.
+    #[serde(default, deserialize_with = "one_or_many")]
     pub extend: Vec<String>,
-    /// When `true`, prevents this profile from being used as a base by a higher-priority
-    /// config file that self-extends (the self-extend is silently dropped).
-    /// Higher-priority files can still replace this profile outright.
-    #[serde(default)]
-    pub r#final: bool,
+    /// Whether this profile adds to a same-named one from a lower-priority
+    /// config file (the default) or replaces it.
+    pub inherit: Option<bool>,
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
-    /// Maps variable names to the flag(s) that populate them.
+    /// The `$arg_*` variables filled from the command's flags.
     #[serde(default)]
-    pub arg_aliases: ArgAliases,
-    /// Flags that take no value (boolean flags); prevents consuming the next arg.
-    #[serde(default)]
-    pub arg_flags: Vec<String>,
-    /// Network policy, kept in its raw form so that `extend` can merge it field
-    /// by field with the same array semantics as every other property.
+    pub args: ArgDecls,
+    /// Network policy, kept in its raw form so that its lists can be merged
+    /// before anything in them is expanded.
     #[serde(default)]
     pub network: Option<toml::Table>,
-    /// The `[<profile>.filesystem]` sub-table: whether the sandbox says which
-    /// paths its restrictions turned away. Parsed here rather than kept raw for
-    /// the same reason as `log` — it holds no lists to splice.
+    /// The `[<profile>.filesystem]` sub-table: path access, and whether the
+    /// sandbox says which paths its restrictions turned away.
     #[serde(default)]
     pub filesystem: FilesystemConfig,
-    /// The `[<profile>.log]` sub-table: level and destination. Unlike `network`
-    /// it holds no lists, so there is no `"..."` splicing to preserve and it can
-    /// be parsed into its final shape here rather than merged as raw TOML.
+    /// The `[<profile>.log]` sub-table: level and destination.
     #[serde(default)]
     pub log: LogConfig,
     /// The `[<profile>.systemd]` sub-table: unit properties keyed by their exact
@@ -199,10 +113,10 @@ pub struct ProfileConfig {
     /// thereof. Keeping them in a table of their own is what lets the profile's
     /// own keys be checked for typos — see `deny_unknown_fields` above.
     #[serde(default)]
-    pub systemd: HashMap<String, toml::Value>,
+    pub systemd: toml::Table,
 }
 
-pub type ConfigMap = HashMap<String, ProfileConfig>;
+pub type ConfigMap = IndexMap<String, ProfileConfig>;
 
 /// The name of the reserved table, which is therefore not a profile name.
 pub const SETTINGS_SECTION: &str = "scudo";
@@ -242,61 +156,180 @@ pub struct Loaded {
     pub settings: Settings,
 }
 
-#[derive(Debug, Clone)]
-pub struct ValidatedProfileConfig {
-    pub pattern: Vec<CommandPattern>,
+/// A profile once its patterns are compiled and its tables checked.
+///
+/// Profiles combine one way only, whatever brought them together — `extend`,
+/// matching the same command, `--profile`, or sharing a name across config
+/// files: see [`Profile::merge`].
+#[derive(Debug, Clone, Default)]
+pub struct Profile {
+    pub patterns: Vec<Pattern>,
     pub extend: Vec<String>,
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
-    pub arg_aliases: ArgAliases,
-    pub arg_flags: Vec<String>,
+    pub args: ArgDecls,
     pub network: Option<toml::Table>,
     pub filesystem: FilesystemConfig,
     pub log: LogConfig,
-    pub properties: HashMap<String, toml::Value>,
+    pub systemd: toml::Table,
 }
 
-#[derive(Debug, Clone)]
-pub struct ValidatedConfigMap(pub HashMap<String, ValidatedProfileConfig>);
+impl Profile {
+    /// Apply `other` on top of `self`.
+    ///
+    /// Lists accumulate, without repeating an entry; everything else is taken
+    /// from `other` when it says anything. That is what lets profiles written
+    /// without knowing about each other be combined: none of them can take
+    /// away what another one added.
+    pub fn merge(&mut self, other: &Profile) {
+        union(&mut self.patterns, &other.patterns);
+        union(&mut self.extend, &other.extend);
+        self.exec = other.exec.clone().or(self.exec.take());
+        self.verbose = other.verbose.or(self.verbose);
+        self.confirm = other.confirm.or(self.confirm);
+        self.args
+            .extend(other.args.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if let Some(network) = &other.network {
+            merge_table(self.network.get_or_insert_default(), network);
+        }
+        self.filesystem = other
+            .filesystem
+            .clone()
+            .over(core::mem::take(&mut self.filesystem));
+        self.log = other.log.clone().over(core::mem::take(&mut self.log));
+        merge_table(&mut self.systemd, &other.systemd);
+    }
+
+    fn validate(name: &str, config: ProfileConfig) -> Result<Profile> {
+        if config.extend.iter().any(|e| e == name) {
+            bail!(
+                "profile '{name}': a profile no longer needs to extend itself, \
+                 it inherits from the same-named one in lower-priority files on its own \
+                 (`inherit = false` replaces it instead)"
+            );
+        }
+        let lists = config
+            .r#match
+            .iter()
+            .chain(&config.extend)
+            .chain(&config.filesystem.write)
+            .chain(&config.filesystem.read)
+            .chain(&config.filesystem.hide)
+            .chain(&config.filesystem.deny);
+        let in_tables = |table: &toml::Table| table.values().any(holds_sentinel);
+        if lists.into_iter().any(|e| e == SENTINEL)
+            || in_tables(&config.systemd)
+            || config.network.as_ref().is_some_and(in_tables)
+        {
+            bail!(
+                "profile '{name}': '{SENTINEL}' is no longer needed, \
+                 lists always add to what they inherit"
+            );
+        }
+        if let Some(table) = &config.network {
+            validate_network(name, table)?;
+        }
+        let patterns = config
+            .r#match
+            .iter()
+            .map(|p| {
+                Pattern::new(p)
+                    .with_context(|| format!("profile '{name}': invalid match pattern '{p}'"))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Profile {
+            patterns,
+            extend: config.extend,
+            exec: config.exec,
+            verbose: config.verbose,
+            confirm: config.confirm,
+            args: config.args,
+            network: config.network,
+            filesystem: config.filesystem,
+            log: config.log,
+            systemd: config.systemd,
+        })
+    }
+}
+
+/// What used to splice an inherited list in. Lists now always accumulate, so
+/// finding it means a config written for the old rules.
+const SENTINEL: &str = "...";
+
+fn holds_sentinel(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Array(items) => items
+            .iter()
+            .any(|v| v.as_str() == Some(SENTINEL) || holds_sentinel(v)),
+        toml::Value::Table(table) => table.values().any(holds_sentinel),
+        toml::Value::String(_)
+        | toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_) => false,
+    }
+}
+
+fn union<T: PartialEq + Clone>(base: &mut Vec<T>, extra: &[T]) {
+    for item in extra {
+        if !base.contains(item) {
+            base.push(item.clone());
+        }
+    }
+}
+
+/// Merge `src` into `dst`: arrays accumulate, tables merge key by key, and
+/// anything else is replaced.
+fn merge_table(dst: &mut toml::Table, src: &toml::Table) {
+    for (key, value) in src {
+        match (dst.get_mut(key), value) {
+            (Some(toml::Value::Array(base)), toml::Value::Array(extra)) => union(base, extra),
+            (Some(toml::Value::Table(base)), toml::Value::Table(extra)) => {
+                merge_table(base, extra);
+            }
+            _ => {
+                dst.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// Every profile, in the order they were defined: files from the lowest
+/// priority to the highest, then by position within the file. A profile
+/// redefined by a later file keeps its first position.
+#[derive(Debug, Clone, Default)]
+pub struct ValidatedConfigMap(pub IndexMap<String, Profile>);
+
+impl ValidatedConfigMap {
+    /// Add one config file's profiles on top of what is already loaded.
+    fn layer(&mut self, configs: ConfigMap) -> Result<()> {
+        for (name, config) in configs {
+            let inherit = config.inherit.unwrap_or(true);
+            let profile = Profile::validate(&name, config)?;
+            match self.0.get_mut(&name) {
+                Some(existing) if inherit => existing.merge(&profile),
+                _ => {
+                    self.0.insert(name, profile);
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl TryFrom<ConfigMap> for ValidatedConfigMap {
     type Error = anyhow::Error;
 
     fn try_from(value: ConfigMap) -> Result<Self> {
-        let map = value
-            .into_iter()
-            .map(|(name, config)| {
-                let pattern = build_patterns(&name, config.r#match)?;
-                if let Some(table) = &config.network {
-                    validate_network(&name, table)?;
-                }
-                Ok((
-                    name,
-                    ValidatedProfileConfig {
-                        pattern,
-                        extend: config.extend,
-                        exec: config.exec,
-                        verbose: config.verbose,
-                        confirm: config.confirm,
-                        arg_aliases: config.arg_aliases,
-                        arg_flags: config.arg_flags,
-                        network: config.network,
-                        filesystem: config.filesystem,
-                        log: config.log,
-                        properties: config.systemd,
-                    },
-                ))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-        Ok(ValidatedConfigMap(map))
+        let mut map = ValidatedConfigMap::default();
+        map.layer(value)?;
+        Ok(map)
     }
 }
 
 /// Check a profile's `network` table parses, so a typo is reported when the
 /// config is read rather than when a command is about to run.
-///
-/// `"..."` sentinels are skipped: they are resolved later, when profiles merge.
 fn validate_network(name: &str, table: &toml::Table) -> Result<()> {
     let config: NetworkConfig = toml::Value::Table(table.clone())
         .try_into()
@@ -304,43 +337,6 @@ fn validate_network(name: &str, table: &toml::Table) -> Result<()> {
     config
         .validate()
         .with_context(|| format!("profile '{name}': invalid network policy"))
-}
-
-/// Convert the raw `match` field into a vec of compiled patterns.
-///
-/// - `None` (field absent) → `[]` (never matches)
-/// - `Some([…])` → compiled entries
-fn build_patterns(name: &str, decl: Option<Vec<MatchEntry>>) -> Result<Vec<CommandPattern>> {
-    decl.unwrap_or_default()
-        .into_iter()
-        .map(|e| compile_entry(name, e))
-        .collect()
-}
-
-fn compile_entry(name: &str, e: MatchEntry) -> Result<CommandPattern> {
-    let (pattern, match_type, target) = match e {
-        MatchEntry::Simple(s) if s == "..." => return Ok(CommandPattern::Sentinel),
-        MatchEntry::Simple(s) => {
-            return Ok(CommandPattern::Exact(s, MatchTarget::Command));
-        }
-        MatchEntry::Extended {
-            pattern,
-            match_type,
-            target,
-        } => (pattern, match_type, target),
-    };
-    // The table form has no implicit pattern: there is nothing sensible to fall
-    // back to now that the section name no longer doubles as one.
-    let p = pattern.with_context(|| format!("profile '{name}': match entry requires a pattern"))?;
-    match match_type {
-        MatchType::Exact => Ok(CommandPattern::Exact(p, target)),
-        MatchType::Glob => Pattern::new(&p)
-            .with_context(|| format!("profile '{name}': invalid glob pattern '{p}'"))
-            .map(|pat| CommandPattern::Glob(pat, target)),
-        MatchType::Regex => Regex::new(&p)
-            .with_context(|| format!("profile '{name}': invalid regex '{p}'"))
-            .map(|r| CommandPattern::Regex(r, target)),
-    }
 }
 
 /// The variable name that expands to the directory containing the config file a
@@ -392,11 +388,23 @@ fn substitute_config_dir(value: &mut toml::Value, dir: &str) {
 /// Substitute the config-dir variable in all of a profile's string values.
 ///
 /// Done eagerly, per config file, because once profiles from different files are
-/// merged (via `extend` or multiple matches) we can no longer tell which file a
+/// merged (by name, via `extend`, or by matching together) we can no longer tell which file a
 /// given property came from.
 fn substitute_profile_config_dir(profile: &mut ProfileConfig, dir: &str) {
-    for value in profile.systemd.values_mut() {
+    for (_, value) in &mut profile.systemd {
         substitute_config_dir(value, dir);
+    }
+    let fs = &mut profile.filesystem;
+    for path in fs
+        .write
+        .iter_mut()
+        .chain(fs.read.iter_mut())
+        .chain(fs.hide.iter_mut())
+        .chain(fs.deny.iter_mut())
+    {
+        if path.contains(CONFIG_DIR_VAR) {
+            *path = substitute_config_dir_str(path, dir);
+        }
     }
     if let Some(network) = profile.network.as_mut() {
         for (_, value) in network.iter_mut() {
@@ -446,7 +454,7 @@ fn split_settings(mut table: toml::Table, path: &std::path::Path) -> Result<(Con
 
 /// Load and merge configs from all search paths (lowest to highest priority).
 pub fn load_configs() -> Result<Loaded> {
-    let mut merged: ConfigMap = HashMap::new();
+    let mut profiles = ValidatedConfigMap::default();
     let mut settings = Settings::default();
     for path in config_search_paths() {
         if !path.is_file() {
@@ -463,7 +471,7 @@ pub fn load_configs() -> Result<Loaded> {
 
         let table: toml::Table =
             toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
-        let (file_configs, mut file_settings) = split_settings(table, &path)?;
+        let (mut file_configs, mut file_settings) = split_settings(table, &path)?;
 
         // Directory containing this config file — the value of `$SCUDO_CONFIG_DIR`
         // for every profile defined in it.
@@ -475,35 +483,14 @@ pub fn load_configs() -> Result<Loaded> {
         substitute_settings_config_dir(&mut file_settings, &config_dir);
         settings = file_settings.over(settings);
 
-        let mut synthetic_counter: HashMap<String, usize> = HashMap::new();
-        for (name, mut new_profile) in file_configs {
-            substitute_profile_config_dir(&mut new_profile, &config_dir);
-            // Check for self-reference in extend list.
-            let self_pos = new_profile.extend.iter().position(|e| e == &name);
-            if let Some(pos) = self_pos {
-                // Inherit from the lower-priority same-named profile, unless it is `final`.
-                let inheritable = merged.get(&name).is_some_and(|e| !e.r#final);
-                if inheritable {
-                    let mut existing = merged.remove(&name).expect("just checked");
-                    let n = synthetic_counter.entry(name.clone()).or_insert(0);
-                    let synthetic = format!("\x00{name}\x00{n}");
-                    *n = n.saturating_add(1);
-                    existing.r#match = Some(vec![]); // drop its patterns: only the new profile matches
-                    merged.insert(synthetic.clone(), existing);
-                    if let Some(slot) = new_profile.extend.get_mut(pos) {
-                        *slot = synthetic;
-                    }
-                } else {
-                    new_profile.extend.remove(pos); // final or absent — drop self-ref silently
-                }
-            }
-            merged.insert(name, new_profile);
+        for profile in file_configs.values_mut() {
+            substitute_profile_config_dir(profile, &config_dir);
         }
+        profiles
+            .layer(file_configs)
+            .with_context(|| format!("in {}", path.display()))?;
     }
-    Ok(Loaded {
-        profiles: merged.try_into()?,
-        settings,
-    })
+    Ok(Loaded { profiles, settings })
 }
 
 pub fn user_path() -> Result<PathBuf, VarError> {
@@ -622,60 +609,37 @@ mod tests {
         assert_eq!(merged.log.level, Some(crate::logging::Level::Warn));
     }
 
-    /// Simulate loading two config layers (lower-priority first, then higher-priority)
-    /// and return the resulting `ValidatedConfigMap`.
-    fn merge_layers(lower: ConfigMap, higher: ConfigMap) -> Result<ValidatedConfigMap> {
-        let mut merged: ConfigMap = HashMap::new();
-        let mut synthetic_counter: HashMap<String, usize> = HashMap::new();
-        for layer in [lower, higher] {
-            for (name, mut new_profile) in layer {
-                let self_pos = new_profile.extend.iter().position(|e| e == &name);
-                if let Some(pos) = self_pos {
-                    let inheritable = merged.get(&name).is_some_and(|e| !e.r#final);
-                    if inheritable {
-                        let mut existing = merged.remove(&name).expect("just checked");
-                        let n = synthetic_counter.entry(name.clone()).or_insert(0);
-                        let synthetic = format!("\x00{name}\x00{n}");
-                        *n = n.saturating_add(1);
-                        existing.r#match = Some(vec![]);
-                        merged.insert(synthetic.clone(), existing);
-                        if let Some(slot) = new_profile.extend.get_mut(pos) {
-                            *slot = synthetic;
-                        }
-                    } else {
-                        new_profile.extend.remove(pos);
-                    }
-                }
-                merged.insert(name, new_profile);
-            }
+    /// Load config files the way `load_configs` does, lowest priority first.
+    fn load(files: &[&str]) -> ValidatedConfigMap {
+        let mut map = ValidatedConfigMap::default();
+        for src in files {
+            let (profiles, _) = split(src).unwrap();
+            map.layer(profiles).unwrap();
         }
-        merged.try_into()
+        map
     }
 
-    /// A profile named `app` that also matches the `app` command, so that the
-    /// tests below can reach it through `resolve` and not just by name.
-    fn simple_profile(cpu: &str) -> ProfileConfig {
-        let mut props = HashMap::new();
-        props.insert("CPUQuota".to_owned(), toml::Value::String(cpu.to_owned()));
-        ProfileConfig {
-            r#match: Some(vec![MatchEntry::Simple("app".to_owned())]),
-            systemd: props,
-            ..Default::default()
-        }
-    }
-
-    fn patterns_of(src: &str, profile: &str) -> Result<Vec<CommandPattern>> {
-        let raw: ConfigMap = toml::from_str(src)?;
-        let config = raw.get(profile).context("profile present")?.clone();
-        build_patterns(profile, config.r#match)
+    fn profile_error(src: &str) -> String {
+        let (profiles, _) = split(src).unwrap();
+        format!("{:#}", ValidatedConfigMap::try_from(profiles).unwrap_err())
     }
 
     #[test]
     fn absent_match_never_matches() {
-        // The section name is an identifier, not a pattern: without `match` the
-        // profile is reachable only through `extend` or `--profile`.
-        let patterns = patterns_of("[curl]\nsystemd.MemoryMax = \"256M\"\n", "curl").unwrap();
-        assert!(patterns.is_empty());
+        let map = load(&["[curl]\nsystemd.MemoryMax = \"256M\"\n"]);
+        assert!(map.0["curl"].patterns.is_empty());
+    }
+
+    #[test]
+    fn match_takes_one_glob_or_several() {
+        let map = load(&["[a]\nmatch = \"curl\"\n[b]\nmatch = [\"zed\", \"code*\"]\n"]);
+        assert_eq!(map.0["a"].patterns.len(), 1);
+        assert!(map.0["b"].patterns.iter().any(|p| p.matches("code-oss")));
+    }
+
+    #[test]
+    fn invalid_pattern_is_reported() {
+        assert!(profile_error("[curl]\nmatch = \"[\"\n").contains("invalid match pattern"));
     }
 
     /// Systemd properties belong in the `systemd` sub-table, so a stray key at
@@ -683,81 +647,88 @@ mod tests {
     /// property — and saying so beats silently dropping it.
     #[test]
     fn unknown_profile_key_is_rejected() {
-        let err = toml::from_str::<ConfigMap>("[curl]\nMemoryMax = \"256M\"\n")
-            .expect_err("unknown key at the profile level");
-        assert!(err.to_string().contains("unknown field `MemoryMax`"));
+        for key in [
+            "MemoryMax = \"256M\"",
+            "final = true",
+            "arg_flags = [\"-p\"]",
+        ] {
+            split(&format!("[curl]\n{key}\n")).expect_err(key);
+        }
+        split("[curl]\nmatch = { pattern = \"curl\", type = \"glob\" }\n")
+            .expect_err("the table form of match is gone");
+    }
+
+    /// Profiles are kept in the order they were written, which is the order
+    /// they are applied in when several match.
+    #[test]
+    fn definition_order_is_kept() {
+        let map = load(&["[b]\n[a]\n[c]\n", "[d]\n[a]\n"]);
+        let names: Vec<&str> = map.0.keys().map(String::as_str).collect();
+        assert_eq!(names, ["b", "a", "c", "d"]);
+    }
+
+    /// A same-named profile in a higher-priority file adds to the one below:
+    /// lists accumulate, and what it says itself wins.
+    #[test]
+    fn a_same_named_profile_inherits_by_default() {
+        let map = load(&[
+            "[cargo]\nmatch = \"cargo\"\nconfirm = true\nfilesystem.read = [\"/a\"]\nsystemd.MemoryMax = \"1G\"\n",
+            "[cargo]\nfilesystem.read = [\"/b\"]\nsystemd.MemoryMax = \"2G\"\n",
+        ]);
+        let cargo = &map.0["cargo"];
+        assert_eq!(cargo.patterns.len(), 1);
+        assert_eq!(cargo.confirm, Some(true));
+        assert_eq!(cargo.filesystem.read, ["/a", "/b"]);
+        assert_eq!(
+            cargo.systemd.get("MemoryMax"),
+            Some(&toml::Value::String("2G".to_owned()))
+        );
     }
 
     #[test]
-    fn match_entry_without_pattern_is_rejected() {
-        // No implicit fallback to the section name in the table form either.
+    fn inherit_false_replaces_the_profile() {
+        let map = load(&[
+            "[cargo]\nmatch = \"cargo\"\nconfirm = true\nfilesystem.read = [\"/a\"]\n",
+            "[cargo]\ninherit = false\nfilesystem.read = [\"/b\"]\n",
+        ]);
+        let cargo = &map.0["cargo"];
+        assert!(cargo.patterns.is_empty());
+        assert_eq!(cargo.confirm, None);
+        assert_eq!(cargo.filesystem.read, ["/b"]);
+    }
+
+    /// Configs written for the old rules say so, rather than silently
+    /// meaning something else now.
+    #[test]
+    fn the_old_sentinel_is_reported() {
         for src in [
-            "[curl]\nmatch = { type = \"exact\" }\n",
-            "[curl]\nmatch = { target = \"full_command\" }\n",
-            "[curl]\nmatch = { type = \"glob\" }\n",
-            "[curl]\nmatch = { type = \"regex\" }\n",
+            "[a]\nsystemd.BindPaths = [\"...\", \"/x\"]\n",
+            "[a]\nnetwork.dest.allow = [\"...\"]\n",
+            "[a]\nfilesystem.read = [\"...\"]\n",
+            "[a]\nmatch = [\"...\", \"a\"]\n",
         ] {
-            let err = patterns_of(src, "curl").expect_err("pattern is required");
-            assert!(
-                format!("{err:#}").contains("requires a pattern"),
-                "unexpected error for {src:?}: {err:#}"
-            );
+            assert!(profile_error(src).contains("no longer needed"), "{src}");
         }
     }
 
     #[test]
-    fn invalid_pattern_is_reported() {
-        let err = patterns_of(
-            "[curl]\nmatch = { pattern = \"[\", type = \"regex\" }\n",
-            "curl",
-        )
-        .expect_err("invalid regex");
-        assert!(format!("{err:#}").contains("invalid regex"));
+    fn extending_itself_is_reported() {
+        assert!(profile_error("[a]\nextend = \"a\"\n").contains("inherit"));
     }
 
     #[test]
-    fn final_allows_replace() {
-        // A `final` lower-priority profile can still be replaced outright.
-        let mut lower = simple_profile("10%");
-        lower.r#final = true;
-        let higher = simple_profile("50%");
-
-        let configs = merge_layers(
-            HashMap::from([("app".to_owned(), lower)]),
-            HashMap::from([("app".to_owned(), higher)]),
-        )
-        .unwrap();
-
-        let p = &configs.0["app"];
-        assert_eq!(
-            p.properties.get("CPUQuota"),
-            Some(&toml::Value::String("50%".to_owned()))
-        );
-    }
-
-    #[test]
-    fn final_blocks_self_extend() {
-        // A `final` lower-priority profile is not usable as a base for self-extend.
-        // The self-reference is silently dropped; the higher-priority profile still wins.
-        let mut lower = simple_profile("10%");
-        lower.r#final = true;
-
-        let mut higher = simple_profile("50%");
-        higher.extend = vec!["app".to_owned()]; // self-extend
-
-        let configs = merge_layers(
-            HashMap::from([("app".to_owned(), lower)]),
-            HashMap::from([("app".to_owned(), higher)]),
-        )
-        .unwrap();
-
-        let p = &configs.0["app"];
-        // Self-ref was dropped → extend is empty → only higher's own property
-        assert!(p.extend.is_empty());
-        assert_eq!(
-            p.properties.get("CPUQuota"),
-            Some(&toml::Value::String("50%".to_owned()))
-        );
+    fn arguments_are_declared_by_flag() {
+        let map = load(&[r#"
+            [claude]
+            args.one = "--one"
+            args.many = ["-m", "--many"]
+            args.greedy = { flags = "--add-dir", greedy = true }
+        "#]);
+        let args = &map.0["claude"].args;
+        assert_eq!(args["one"].flags(), ["--one"]);
+        assert_eq!(args["many"].flags(), ["-m", "--many"]);
+        assert!(!args["many"].is_greedy());
+        assert!(args["greedy"].is_greedy());
     }
 
     #[test]
@@ -780,7 +751,7 @@ mod tests {
 
     #[test]
     fn config_dir_substitution_in_profile() {
-        let mut props = HashMap::new();
+        let mut props = toml::Table::new();
         props.insert(
             "BindReadOnlyPaths".to_owned(),
             toml::Value::Array(vec![
@@ -804,45 +775,5 @@ mod tests {
             ]))
         );
         assert_eq!(profile.exec.as_deref(), Some("/home/user/wrapper.sh"));
-    }
-
-    #[test]
-    fn self_extend_inherits_lower_priority() {
-        // Higher-priority profile self-extends → lower-priority properties are inherited.
-        let lower = simple_profile("10%");
-
-        let mut higher_props = HashMap::new();
-        higher_props.insert(
-            "MemoryMax".to_owned(),
-            toml::Value::String("256M".to_owned()),
-        );
-        let higher = ProfileConfig {
-            r#match: Some(vec![MatchEntry::Simple("app".to_owned())]),
-            extend: vec!["app".to_owned()],
-            systemd: higher_props,
-            ..Default::default()
-        };
-
-        let configs = merge_layers(
-            HashMap::from([("app".to_owned(), lower)]),
-            HashMap::from([("app".to_owned(), higher)]),
-        )
-        .unwrap();
-
-        let p = &configs.0["app"];
-        // extend should now reference the synthetic key (not "app")
-        assert!(!p.extend.is_empty());
-        assert_ne!(p.extend.first().map(String::as_str), Some("app"));
-
-        // When resolved, both properties should appear
-        let r = crate::profile::resolve(&configs, "app", &[]).unwrap();
-        let has = |kv: &str| {
-            r.systemd_args.windows(2).any(|w| {
-                assert_eq!(w.len(), 2);
-                w[0] == "-p" && w[1] == kv
-            })
-        };
-        assert!(has("CPUQuota=10%"), "inherited from lower");
-        assert!(has("MemoryMax=256M"), "from higher");
     }
 }

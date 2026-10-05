@@ -331,10 +331,6 @@ pub enum PortSpec {
 }
 
 impl PortSpec {
-    fn is_sentinel(&self) -> bool {
-        matches!(self, PortSpec::Spec(s) if s == SENTINEL)
-    }
-
     fn has_variables(&self) -> bool {
         matches!(self, PortSpec::Spec(s) if s.contains('$'))
     }
@@ -389,25 +385,21 @@ impl<'de> Deserialize<'de> for PortSpec {
     }
 }
 
-/// The array sentinel that splices in the inherited list; see `profile::merge_into`.
-pub const SENTINEL: &str = "...";
-
 impl NetworkConfig {
     /// Check every entry parses, so that a typo is caught when the config is
     /// read rather than when a command is about to run.
     ///
-    /// Entries are skipped when they cannot be judged yet: `"..."` is resolved
-    /// when profiles merge, and `$VAR` / `$arg_*` when the command line is
-    /// known. Both are validated for real once resolved.
+    /// Entries holding `$VAR` / `$arg_*` are skipped: they cannot be judged
+    /// until the command line is known, and are validated once expanded.
     pub fn validate(&self) -> Result<()> {
         for entry in self.dest.deny.iter().chain(self.dest.allow.iter()) {
-            if entry == SENTINEL || entry.contains('$') {
+            if entry.contains('$') {
                 continue;
             }
             parse_dest(entry)?;
         }
         for entry in self.ports.deny.iter().chain(self.ports.allow.iter()) {
-            if entry.is_sentinel() || entry.has_variables() {
+            if entry.has_variables() {
                 continue;
             }
             entry.clone().into_rule()?;
@@ -623,21 +615,10 @@ fn destinations(entries: Vec<String>) -> Result<Vec<Destination>> {
 }
 
 fn port_rules(entries: Vec<PortSpec>) -> Result<Vec<PortRule>> {
-    entries
-        .into_iter()
-        .map(|entry| {
-            if entry.is_sentinel() {
-                bail!("'{SENTINEL}' is only meaningful in a profile that extends another");
-            }
-            entry.into_rule()
-        })
-        .collect()
+    entries.into_iter().map(PortSpec::into_rule).collect()
 }
 
 fn parse_dest(s: &str) -> Result<Vec<Destination>> {
-    if s == SENTINEL {
-        bail!("'{SENTINEL}' is only meaningful in a profile that extends another");
-    }
     parse_net(s.trim()).with_context(|| format!("invalid network destination '{s}'"))
 }
 
@@ -774,6 +755,14 @@ fn parse_host(s: &str) -> Result<Destination> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '*' | '?'))
     {
         bail!("'{s}' is neither an IP address nor a valid host name");
+    }
+    // A fully qualified name may end in a dot; no label may be empty otherwise.
+    if s.strip_suffix('.')
+        .unwrap_or(s)
+        .split('.')
+        .any(str::is_empty)
+    {
+        bail!("'{s}' is not a valid host name: it has an empty label");
     }
     Ok(Destination::Host(s.to_ascii_lowercase()))
 }
@@ -1171,18 +1160,6 @@ mod tests {
         assert!(error(r#"dest = { allow = ["10.0.0.0/33"] }"#).contains("prefix length"));
         assert!(error(r#"ports = { allow = ["443/sctp"] }"#).contains("sctp"));
         assert!(error(r#"dest = { allow = ["not a host"] }"#).contains("not a host"));
-    }
-
-    #[test]
-    fn sentinel_passes_validation_but_not_conversion() {
-        let config: NetworkConfig =
-            toml::from_str(r#"dest = { allow = ["...", "1.1.1.1"] }"#).unwrap();
-        config.validate().unwrap();
-        drop(NetworkPolicy::try_from(config).unwrap_err());
-
-        let config: NetworkConfig = toml::from_str(r#"ports = { allow = ["..."] }"#).unwrap();
-        config.validate().unwrap();
-        drop(NetworkPolicy::try_from(config).unwrap_err());
     }
 
     /// Entries holding a variable are checked once it is expanded, not before.

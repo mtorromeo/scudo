@@ -1,6 +1,13 @@
-//! Reporting what the sandbox's filesystem restrictions turned away.
+//! The filesystem half of a profile: which paths the command may write, read,
+//! not see, or not touch — and reporting what those restrictions turned away.
 //!
-//! This is the one policy kind that enforces nothing. systemd applies the
+//! Access is declared as four lists rather than as systemd properties, so that
+//! profiles written without knowing about each other can be combined: every
+//! path ends up with the most permissive access any of them asked for, and
+//! whether that takes `ReadOnlyPaths=` or a bind mount depends on whether some
+//! profile hid a directory above it — something no single profile can know.
+//!
+//! Reporting is the one policy kind that enforces nothing. systemd applies the
 //! filesystem restrictions itself, by rearranging the unit's mount namespace,
 //! and scudo has no say in the verdict — it only asks the daemon to notice, and
 //! to name the path, which is the one thing the command is never told.
@@ -9,6 +16,11 @@
 //! everything the machinery needs is what a policy gets: a registration, a
 //! token, a bus, and a shim that claims it from inside the cgroup. There is no
 //! other way for the daemon to learn which cgroup to watch.
+
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,33 +47,122 @@ impl FilesystemPolicy {
 
 /// What a `[profile.filesystem]` table may say.
 ///
-/// The same shape as the policy, because there is nothing here to normalise:
-/// unlike the network table there are no lists to splice and no addresses to
-/// parse. It exists so that the parse error names the table.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+/// The paths are kept as written: they may still hold `$VAR` and `$arg_*`
+/// references, which are only expanded once the command line is known.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemConfig {
     pub log: Option<LogLevel>,
+    /// Paths the command may read and write.
+    #[serde(default)]
+    pub write: Vec<String>,
+    /// Paths the command may read but not write.
+    #[serde(default)]
+    pub read: Vec<String>,
+    /// Directories replaced by an empty, throwaway one.
+    #[serde(default)]
+    pub hide: Vec<String>,
+    /// Paths the command may not access at all.
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 impl FilesystemConfig {
-    /// This table over `lower`, field by field.
-    ///
-    /// Like `log` and unlike `network`: there is nothing here to splice, so the
-    /// table is parsed into its final shape when the config is read and merged
-    /// with `.or()` rather than carried around as raw TOML.
+    /// This table over `lower`: the lists accumulate, and `log` is the one
+    /// that was said last.
     #[must_use]
     pub fn over(self, lower: Self) -> Self {
         FilesystemConfig {
             log: self.log.or(lower.log),
+            write: union(lower.write, self.write),
+            read: union(lower.read, self.read),
+            hide: union(lower.hide, self.hide),
+            deny: union(lower.deny, self.deny),
         }
     }
+}
 
-    /// Does this table ask for anything at all?
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.log.is_none()
+fn union(mut base: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    for entry in extra {
+        if !base.contains(&entry) {
+            base.push(entry);
+        }
     }
+    base
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                out.push(component);
+            }
+        }
+    }
+    out
+}
+
+/// The access a path is given, from least to most permissive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Access {
+    Deny,
+    Hide,
+    Read,
+    Write,
+}
+
+/// Turn the accesses asked for into the systemd properties that realise them.
+///
+/// A path named more than once gets the most permissive access among them, so
+/// a profile that only reads a directory cannot take writing away from one
+/// that writes it. A path inside a hidden directory is not there to be made
+/// read-only or writable, so it is bind-mounted back in instead. Every path
+/// but a hidden one is prefixed with `-`, which tells systemd to skip it when
+/// it does not exist: a tool's config directory often does not yet.
+///
+/// Paths are expected to be absolute already; they are only normalised here,
+/// lexically, so that `/a/b/`, `/a/./b` and `/a/c/../b` are the same path.
+/// Symlinks are left alone on purpose: binding a link's target in place of the
+/// link would put it somewhere the command does not look.
+#[must_use]
+pub fn mount_properties<I>(entries: I) -> Vec<(&'static str, String)>
+where
+    I: IntoIterator<Item = (Access, PathBuf)>,
+{
+    let mut paths: BTreeMap<PathBuf, Access> = BTreeMap::new();
+    for (access, path) in entries {
+        let path = normalize(&path);
+        let slot = paths.entry(path).or_insert(access);
+        *slot = (*slot).max(access);
+    }
+
+    let hidden: Vec<&Path> = paths
+        .iter()
+        .filter(|&(_, access)| *access == Access::Hide)
+        .map(|(path, _)| path.as_path())
+        .collect();
+    let under_hidden = |path: &Path| hidden.iter().any(|h| *h != path && path.starts_with(h));
+
+    paths
+        .iter()
+        .map(|(path, access)| {
+            let shown = path.to_string_lossy();
+            let optional = format!("-{shown}");
+            match access {
+                Access::Deny => ("InaccessiblePaths", optional),
+                Access::Hide => ("TemporaryFileSystem", shown.into_owned()),
+                Access::Read if under_hidden(path) => ("BindReadOnlyPaths", optional),
+                Access::Read => ("ReadOnlyPaths", optional),
+                Access::Write if under_hidden(path) => ("BindPaths", optional),
+                Access::Write => ("ReadWritePaths", optional),
+            }
+        })
+        .collect()
 }
 
 impl From<FilesystemConfig> for FilesystemPolicy {
@@ -95,17 +196,94 @@ mod tests {
     fn a_child_overrides_what_it_mentions_and_inherits_the_rest() {
         let parent = FilesystemConfig {
             log: Some(LogLevel::Denied),
+            read: vec!["/a".to_owned()],
+            ..FilesystemConfig::default()
         };
         let quiet = FilesystemConfig {
             log: Some(LogLevel::Off),
+            read: vec!["/b".to_owned(), "/a".to_owned()],
+            ..FilesystemConfig::default()
         };
-        assert_eq!(quiet.over(parent).log, Some(LogLevel::Off));
+        let merged = quiet.over(parent.clone());
+        assert_eq!(merged.log, Some(LogLevel::Off));
+        assert_eq!(merged.read, ["/a", "/b"]);
         assert_eq!(
             FilesystemConfig::default().over(parent).log,
             Some(LogLevel::Denied)
         );
-        assert!(FilesystemConfig::default().is_empty());
-        assert!(!quiet.is_empty());
+    }
+
+    fn props(entries: &[(Access, &str)]) -> Vec<(&'static str, String)> {
+        mount_properties(entries.iter().map(|(a, p)| (*a, PathBuf::from(p))))
+    }
+
+    #[test]
+    fn each_access_has_its_property() {
+        assert_eq!(
+            props(&[
+                (Access::Write, "/w"),
+                (Access::Read, "/r"),
+                (Access::Hide, "/h"),
+                (Access::Deny, "/d"),
+            ]),
+            [
+                ("InaccessiblePaths", "-/d".to_owned()),
+                ("TemporaryFileSystem", "/h".to_owned()),
+                ("ReadOnlyPaths", "-/r".to_owned()),
+                ("ReadWritePaths", "-/w".to_owned()),
+            ]
+        );
+    }
+
+    /// Profiles that disagree about a path end up with the most permissive
+    /// access among them, whatever order they come in.
+    #[test]
+    fn the_most_permissive_access_wins() {
+        for entries in [
+            [
+                (Access::Read, "/p"),
+                (Access::Write, "/p/"),
+                (Access::Deny, "/p"),
+            ],
+            [
+                (Access::Deny, "/p"),
+                (Access::Write, "/p"),
+                (Access::Read, "/./p"),
+            ],
+        ] {
+            assert_eq!(props(&entries), [("ReadWritePaths", "-/p".to_owned())]);
+        }
+        assert_eq!(
+            props(&[(Access::Deny, "/p"), (Access::Read, "/p")]),
+            [("ReadOnlyPaths", "-/p".to_owned())]
+        );
+        assert_eq!(
+            props(&[(Access::Hide, "/p"), (Access::Deny, "/p")]),
+            [("TemporaryFileSystem", "/p".to_owned())]
+        );
+    }
+
+    /// Inside a hidden directory there is nothing to restrict: what is granted
+    /// there has to be mounted back in.
+    #[test]
+    fn grants_inside_a_hidden_directory_are_bind_mounts() {
+        assert_eq!(
+            props(&[
+                (Access::Hide, "/home/u"),
+                (Access::Read, "/home/u/.gitconfig"),
+                (Access::Write, "/home/u/proj"),
+                (Access::Deny, "/home/u/proj/secret"),
+                (Access::Read, "/home/user2"),
+            ]),
+            [
+                ("TemporaryFileSystem", "/home/u".to_owned()),
+                ("BindReadOnlyPaths", "-/home/u/.gitconfig".to_owned()),
+                ("BindPaths", "-/home/u/proj".to_owned()),
+                ("InaccessiblePaths", "-/home/u/proj/secret".to_owned()),
+                // A sibling that merely shares a prefix is not inside it.
+                ("ReadOnlyPaths", "-/home/user2".to_owned()),
+            ]
+        );
     }
 
     /// `deny_unknown_fields` is what makes a typo an error rather than a

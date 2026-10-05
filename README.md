@@ -56,7 +56,7 @@ export PATH="$HOME/.scudo/shims:$PATH"
 
 The shims directory itself is excluded from the PATH search used for the existence check, which prevents FUSE re-entrancy deadlocks when the shims directory is already in `PATH`.
 
-> **Warning:** When using the FUSE shim, avoid broad matchers (`glob`, `regex`) that match large numbers of commands in combination with `confirm = true` or `verbose = true`. Because the shim intercepts every command in your session — including those run by scripts, your shell itself, and every subprocess — an overly wide profile with interactive options will trigger a confirmation prompt or dump debug output for each of them, making the environment unusable. Reserve `confirm` and `verbose` for profiles with narrow, exact-match patterns, and validate broad profiles without those options first.
+> **Warning:** When using the FUSE shim, avoid broad globs (`*`, `code*`) that match large numbers of commands in combination with `confirm = true` or `verbose = true`. Because the shim intercepts every command in your session — including those run by scripts, your shell itself, and every subprocess — an overly wide profile with interactive options will trigger a confirmation prompt or dump debug output for each of them, making the environment unusable. Reserve `confirm` and `verbose` for profiles that match a few commands by name, and validate broad profiles without those options first.
 
 By default the command search path is read from the `PATH` environment variable; pass `--path` / `-p` to override it:
 
@@ -126,14 +126,14 @@ Each TOML section defines a profile. The section name identifies the profile for
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `match` | see [Match patterns](#match-patterns) | Pattern(s) to match against the command name. Absent = the profile never matches a command on its own and is reachable only through `extend` or `--profile`. |
-| `extend` | string or array of strings | Profile(s) to inherit properties from, in left-to-right order (later entries take precedence); see [Extending several profiles](#extending-several-profiles). Including this profile's own name extends from the same-named profile in lower-priority config files; see [Cross-file profile inheritance](#cross-file-profile-inheritance). |
-| `final` | bool | When `true`, this profile cannot be used as a base by a same-named profile in a higher-priority config file that self-extends. Higher-priority files can still replace it outright. (default: `false`) |
+| `match` | string or array of strings | Glob(s) matched against the command name; any one is enough. See [Match patterns](#match-patterns). Absent = the profile never matches a command on its own and is reachable only through `extend` or `--profile`. |
+| `extend` | string or array of strings | Profile(s) applied before this one, left to right; see [Combining profiles](#combining-profiles) |
+| `inherit` | bool | Whether this profile adds to a same-named profile from a lower-priority config file (`true`, the default) or replaces it (`false`); see [Same-named profiles across files](#same-named-profiles-across-files) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
-| `arg_aliases` | table | Maps variable names to the flag(s) that populate them; see [Command argument variables](#command-argument-variables) |
-| `arg_flags` | array of strings | Flags that take no value (boolean flags); needed for correct positional detection |
+| `args` | table | Maps `$arg_*` variable names to the flag(s) that fill them; see [Command argument variables](#command-argument-variables) |
+| `filesystem` | table | Which paths the command may write, read, not see or not touch; see [Filesystem access](#filesystem-access) |
 | `network` | table | Network policy; see [Network filtering](#network-filtering) |
 | `log` | table | Level and destination for scudo's own output; see [Logging](#logging) |
 | `systemd` | table | Unit properties passed to `systemd-run`; see below |
@@ -149,66 +149,87 @@ Any other key is a typo and scudo says so instead of ignoring it.
 ```toml
 # Base profile — no `match`, so it is never matched directly, only used via extend
 [sandboxed]
-
-[sandboxed.systemd]
-ReadOnlyPaths = ["/"]
-ReadWritePaths = ["/tmp", "$XDG_RUNTIME_DIR"]
-PrivateTmp = true
+filesystem.read = ["/"]
+filesystem.write = ["/tmp", "$XDG_RUNTIME_DIR"]
+systemd.PrivateTmp = true
 
 [sandboxed-home]
 extend = "sandboxed"
+filesystem.hide = ["$HOME"]
+filesystem.write = ["$HOME/.cache"]
 
-[sandboxed-home.systemd]
-TemporaryFileSystem = "$HOME"
-BindPaths = ["$HOME/.cache"]
-
-# curl: exact match, extends the base sandbox
+# curl: extends the base sandbox
 [curl]
 match = "curl"
 extend = "sandboxed"
+systemd.MemoryMax = "256M"
 
-[curl.systemd]
-PrivateNetwork = false
-MemoryMax = "256M"
-
-# code: match VS Code and variants via regex, extend the sandboxed profile with code-specific paths
-[code]
-match = { pattern = "^(vs)?cod(e|e-oss|ium)?$", type = "regex" }
+# claude: works on the project it is started in, plus any --add-dir
+[claude]
+match = "claude"
 extend = "sandboxed-home"
+args.add_dir = { flags = "--add-dir", greedy = true }
+filesystem.read = ["$HOME/.gitconfig", "$arg_add_dir"]
+filesystem.write = ["$SCUDO_PROJECT_DIR", "$HOME/.claude", "$HOME/.claude.json"]
+network.dest.allow = ["*.anthropic.com"]
 
-[code.systemd]
-ReadWritePaths = ["...", "/proc", "/dev/shm", "/dev/dri"]
-BindPaths = [
-  "...",
+# code: VS Code and its variants
+[code]
+match = ["code", "code-oss", "codium", "vscode"]
+extend = "sandboxed-home"
+filesystem.write = [
+  "/proc",
+  "/dev/shm",
+  "/dev/dri",
   "$HOME/.vscode",
-  "$HOME/.vscode-insiders",
-  "$HOME/.vscode-insiders-shared",
   "$HOME/.vscode-oss",
-  "$HOME/.vscode-oss-shared",
-  "$HOME/.vscode-remote-workspace",
   "$HOME/.config/Code",
-  "$HOME/.config/code-oss",
   "$HOME/.config/Code - OSS",
-  "$HOME/.config/Code - Insiders",
-  "$PWD",
+  "$SCUDO_PROJECT_DIR",
 ]
 
-# npm: extend the sandboxed-home profile with npm-specific paths, including $HOME/.npm and $HOME/.npmrc and the current working directory
+# npm: the npm cache and config, and the project
 [npm]
 match = "npm"
 extend = "sandboxed-home"
-
-[npm.systemd]
-BindPaths = ["...", "$HOME/.npm", "$PWD"]
-BindReadOnlyPaths = ["$HOME/.npmrc"]
+filesystem.write = ["$HOME/.npm", "$SCUDO_PROJECT_DIR"]
+filesystem.read = ["$HOME/.npmrc"]
 
 [pnpm]
 match = "pnpm"
 extend = "npm"
-
-[pnpm.systemd]
-BindPaths = ["...", "$HOME/.pnpm-store"]
+filesystem.write = ["$HOME/.pnpm-store"]
 ```
+
+Every list adds to the ones it inherits: `pnpm` can write `~/.npm`, the project and `~/.pnpm-store`, and read everything `sandboxed` lets it read.
+
+### Filesystem access
+
+The `filesystem` table says what the command may do with a path, in four lists:
+
+| List | Meaning | Becomes |
+|------|---------|---------|
+| `write` | read and write | `ReadWritePaths=`, or `BindPaths=` inside a hidden directory |
+| `read` | read only | `ReadOnlyPaths=`, or `BindReadOnlyPaths=` inside a hidden directory |
+| `hide` | replaced by an empty, throwaway directory | `TemporaryFileSystem=` |
+| `deny` | no access at all | `InaccessiblePaths=` |
+
+```toml
+[claude.filesystem]
+hide = ["$HOME"]
+deny = ["/etc/shadow"]
+read = ["/", "$HOME/.gitconfig"]
+write = ["$SCUDO_PROJECT_DIR", "$HOME/.claude"]
+```
+
+Writing the lists rather than the systemd properties is what lets profiles written without knowing about each other be combined:
+
+- **A path named more than once gets the most permissive access** among them: `write` beats `read`, which beats `hide`, which beats `deny`. Which profile came first does not matter, so a profile that only reads a directory cannot take writing away from one that writes it.
+- **What is granted inside a hidden directory is mounted back in.** A path under a `TemporaryFileSystem=` is not there to be made read-only, so `read` and `write` turn into bind mounts there — even when the `hide` comes from a different profile than the grant.
+
+Every entry is made absolute against the current directory, and an entry that expands to nothing (an absent `$arg_*`) is dropped. Paths that do not exist are skipped rather than failing the command (they are passed with systemd's `-` prefix): a tool's config directory often does not exist yet.
+
+Properties written by hand in the `systemd` table are passed as they are, next to the ones generated here.
 
 ### Network filtering
 
@@ -293,8 +314,7 @@ Every entry of a list carries the same verdict, so which one matches cannot chan
 and `deny` beating `allow` is a property of how the two are consulted rather than of where
 rules sit. That makes merging two profiles' lists a plain union: commutative, idempotent, and
 impossible to get wrong by reordering. Entries take `$VAR` and `$arg_*` expansions like any
-other profile value, and `"..."` splices in the list inherited from an extended profile —
-each of the four lists inheriting on its own.
+other profile value, and each of the four lists adds to the one it inherits.
 
 #### From the command line
 
@@ -511,10 +531,8 @@ scudo: warning: blocked open of /etc/shadow (permission denied)
 [code]
 match = ["code"]
 filesystem.log = "denied"          # off (the default) | denied
-
-[code.systemd]
-TemporaryFileSystem = "$HOME"
-BindPaths = ["$HOME/.config/Code"]
+filesystem.hide = ["$HOME"]
+filesystem.write = ["$HOME/.config/Code"]
 ```
 
 **Not every `ENOENT` is a refusal, and telling them apart is the point.** A shell walking
@@ -598,12 +616,12 @@ profile matching everything says the same thing and is still perfectly good:
 
 ```toml
 [default]
-match = { type = "glob", pattern = "*" }
+match = "*"
 log.level = "info"
 ```
 
-Between two profiles the ordinary precedence applies (glob < regex < exact, and `--profile`
-above all). `verbose = true` is still accepted and means `log.level = "debug"`; a level
+Between two profiles the ordinary order applies (the one written later wins, and `--profile`
+above all; see [Combining profiles](#combining-profiles)), so write the catch-all first. `verbose = true` is still accepted and means `log.level = "debug"`; a level
 written out next to it wins, being the more specific of the two.
 
 The command line overrides the profiles:
@@ -810,30 +828,17 @@ tui.scrollback = 20000      # default 10000 lines
 
 ### Match patterns
 
-The `match` field controls which commands a profile applies to:
+`match` holds one glob, or an array of them, compared against the name of the command — its last path component, so `/usr/bin/curl` is `curl`. Any one of them matching is enough.
 
 | Form | Meaning |
 |------|---------|
 | absent | never match — base profile usable only via `extend` or `--profile` |
-| `match = "curl"` | exact match for `curl` |
-| `match = { pattern = "curl" }` | same, explicit table form |
-| `match = { pattern = "curl*", type = "glob" }` | glob match |
-| `match = { pattern = "^curl", type = "regex" }` | regex match |
-| `match = { pattern = "git commit*", type = "glob", target = "full_command" }` | glob match against full command line |
-| `match = ["zed", "zeditor"]` | matches either `zed` or `zeditor` |
-| `match = [...]` | array of any of the above forms (see below) |
+| `match = "curl"` | `curl` |
+| `match = ["zed", "zeditor"]` | either `zed` or `zeditor` |
+| `match = "code*"` | `code`, `code-oss`, `code-insiders`, … |
+| `match = "*"` | every command: a catch-all default |
 
-In the table form `pattern` is required. The `type` field accepts `exact` (default), `glob`, or `regex`. The `target` field accepts `command` (default, matches against the command name only) or `full_command` (matches against the command name and all arguments joined with spaces). `target` is only available in the table form; the simple string form always targets the command name. When the `match` field is an array, the entries targeting the command name are alternatives — any one of them matching is enough — while the entries with `target = "full_command"` are additional conditions that must all hold. So `["git", "hg", { pattern = "\\bcommit\\b", type = "regex", target = "full_command" }]` means "`git` or `hg`, and `commit` somewhere on the command line". The specificity tier of the profile (see below) is that of the command-name entry that matched, or of the first full-command entry when there are no command-name entries. In an array, `"..."` splices the first parent profile's patterns at that position, so its command names become further alternatives — the same sentinel used for systemd property arrays (see [Array extension](#array-extension)).
-
-When multiple profiles match the same command, they are merged in order of increasing specificity: glob < regex < exact. Within each tier, the last match wins for scalar values.
-
-> **Tip — matching a subcommand precisely.** `{ pattern = "git commit*", type = "glob", target = "full_command" }` looks right but breaks whenever git options precede the subcommand — `git -c user.name=x commit -m "msg"` produces a full command of `git -c user.name=x commit -m msg`, which does not start with `git commit`. A more robust alternative splits the command-name check from the subcommand check using an array:
->
-> ```toml
-> match = ["git", { pattern = "\\bcommit\\b", type = "regex", target = "full_command" }]
-> ```
->
-> The `"git"` entry matches exactly the `git` binary (command name only). The regex entry then checks whether the word `commit` appears anywhere in the full command line, regardless of any flags that precede it. `\bcommit\b` uses word boundaries so it does not accidentally match similar words like `commitlint` or `committed`. Of course this can still erroneously match when the word `commit` appears in other contexts but security-wise it is better to err on the side of caution and assume the word `commit` is a command name.
+Every profile that matches is applied, in the order the profiles were written (see [Combining profiles](#combining-profiles)).
 
 ### Selecting profiles explicitly
 
@@ -845,6 +850,7 @@ When multiple profiles match the same command, they are merged in order of incre
 |------------|------------------|
 | `scudo --profile netblock -- curl https://example.com` | everything matching `curl`, then `netblock` |
 | `scudo --profile a,b -- curl https://example.com` | matches for `curl`, then `a`, then `b` |
+| `scudo --profile claude,npm,cargo -- zsh` | a shell with everything those three profiles allow, and their restrictions |
 | `scudo --no-match --profile netblock -- curl https://example.com` | only `netblock` |
 | `scudo --no-match -- curl https://example.com` | none — the command is executed directly, without `systemd-run` |
 | `scudo --no-match -p MemoryMax=1G -- curl https://example.com` | none, but `systemd-run` still runs with the explicit property |
@@ -858,26 +864,20 @@ scudo: profile 'snadboxed' not found
 
 Both flags belong to scudo itself, so they are only available through the explicit `scudo <command>` form. When scudo is invoked through a symlink or the FUSE shim, every argument belongs to the wrapped command.
 
-### Array extension
+### Combining profiles
 
-By default an array value replaces the one defined in the extended profile. Place `"..."` anywhere in an array to splice in the base profile's list at that position:
+Profiles come together in four ways — `extend`, matching the same command, `--profile`, and sharing a name across config files — and all four combine them the same way:
 
-```toml
-[my-curl]
-extend = "curl"
-exec = "/usr/bin/curl"
-systemd.ReadWritePaths = ["/home/user/downloads", "...", "/extra"]
-#                         ^ prepend               ^ base  ^ append
-```
+- **Lists accumulate.** Every array — in `match`, `extend`, `filesystem`, `network` and `systemd` — adds the entries it has to the ones already there, skipping duplicates. No profile can take away what another one added; for paths, see also [Filesystem access](#filesystem-access).
+- **Everything else is taken from the profile applied last**, when it says anything: `exec`, `confirm`, `log.level`, `network.default`, a scalar systemd property such as `MemoryMax`.
+- **`args` declarations are merged by name**, the last one applied winning.
 
-`"..."` may appear at most once per array.
+The order profiles are applied in:
 
-### Extending several profiles
+1. every profile that matches the command, in the order they were written: config files from the lowest priority to the highest, then by position in the file;
+2. the profiles named with `--profile`, in the order given.
 
-With more than one entry in `extend`, the whole inheritance graph is flattened into a
-single merge order before anything is merged: each profile is applied after every profile
-it extends, and a profile shared by several branches is applied only once. Lists therefore
-accumulate across sibling parents instead of one branch replacing the other's:
+Each one is preceded by the profiles it `extend`s, left to right, recursively. A profile is applied once even when several others extend it, so a base shared by two profiles does not undo what the first one added on top of it.
 
 ```toml
 [base]
@@ -885,36 +885,37 @@ systemd.BindPaths = ["/base"]
 
 [cargo]
 extend = "base"
-systemd.BindPaths = ["...", "$HOME/.cargo"]
+systemd.BindPaths = ["$HOME/.cargo"]
 
 [composer]
 extend = "base"
-systemd.BindPaths = ["...", "$HOME/.composer"]
+systemd.BindPaths = ["$HOME/.composer"]
 
 [dev]
 match = "dev"
-extend = ["cargo", "composer"]       # → /base, ~/.cargo, ~/.composer
-systemd.BindPaths = ["...", "$PWD"]  # → /base, ~/.cargo, ~/.composer, $PWD
+extend = ["cargo", "composer"]
+systemd.BindPaths = ["$PWD"]         # → /base, ~/.cargo, ~/.composer, $PWD
 ```
 
-`/base` is applied once even though both parents extend it. For scalar values the usual
-rule still holds: the rightmost parent wins over the ones before it, and the profile's own
-value wins over all of them.
+### Same-named profiles across files
 
-### Cross-file profile inheritance
-
-By default a profile in a higher-priority config file completely replaces any same-named profile in lower-priority files. To layer on top of it instead, include the profile's own name in `extend`:
+A profile defined again in a higher-priority config file **adds to** the one below it, by the rules above: its lists extend the inherited ones and its scalars win. A project's `.scudo.toml` can therefore give the system-wide `cargo` profile one more directory without restating it:
 
 ```toml
-# ~/.config/scudo/config.toml
-[curl]
-extend = ["curl", "sandboxed"]    # inherit system curl, then also apply sandboxed
-systemd.MemoryMax = "512M"        # override or add properties on top
+# /home/user/projects/myapp/.scudo.toml
+[cargo]
+filesystem.write = ["$SCUDO_CONFIG_DIR/target"]
 ```
 
-When scudo loads this file and finds an existing `[curl]` from `/etc/scudo/config.toml`, it renames the system profile to an internal key and rewrites the self-reference, so the resolution chain becomes: system curl → sandboxed → user curl. Without the self-reference, the system `[curl]` would be silently discarded.
+To replace the lower-priority profile instead, set `inherit = false`:
 
-If the lower-priority profile has `final = true`, it cannot be used as a base. The self-reference is silently dropped and the higher-priority profile stands on its own, but it still replaces the lower-priority profile.
+```toml
+[cargo]
+inherit = false
+match = "cargo"
+filesystem.read = ["/"]
+filesystem.write = ["$SCUDO_PROJECT_DIR"]
+```
 
 ### Environment variables
 
@@ -930,47 +931,59 @@ exec = "$SCUDO_CONFIG_DIR/wrapper.sh"
 systemd.BindReadOnlyPaths = ["$SCUDO_CONFIG_DIR/allowlist.txt"]
 ```
 
-The value is substituted when the config is loaded, before `$arg_*` and other `$VAR` expansion. When a profile inherits values via `extend`, each inherited value keeps the config dir of the file it was written in.
+The value is substituted when the config is loaded, before `$arg_*` and other `$VAR` expansion. When a profile inherits values via `extend` or from a same-named profile, each inherited value keeps the config dir of the file it was written in.
+
+#### `$SCUDO_PROJECT_DIR`
+
+`$SCUDO_PROJECT_DIR` expands to the project the command is run in: the closest directory, starting from the current one and going up, that contains a `.git` — a directory, or the file a worktree has instead. Outside a repository it is the current directory.
+
+```toml
+[claude]
+match = "claude"
+filesystem.write = ["$SCUDO_PROJECT_DIR"]
+```
 
 ### Command argument variables
 
 Profile values can also reference the arguments of the command being run. These variables all start with `$arg_` and are silently empty if the corresponding argument was not passed (unlike environment variables, which are an error when undefined). Empty strings produced by absent argument variables are filtered out from arrays.
 
-#### Named flag variables
+#### Flag variables
 
-Long options are detected automatically: `--foo-bar` becomes `$arg_foo_bar` (dashes converted to underscores). The value can be passed as `--foo-bar value` (space-separated) or `--foo-bar=value` (equals form).
+The `args` table names a variable and the flag(s) that fill it:
 
-Short options and custom variable names require an `arg_aliases` declaration:
+```toml
+[myagent]
+match = "myagent"
+args.add_dir = "--add-dir"                     # one flag
+args.target = ["-t", "--target-directory"]     # several spellings of it
+filesystem.read = ["$arg_add_dir"]
+filesystem.write = ["$arg_target"]
+```
+
+The value can be passed as `--add-dir value` or `--add-dir=value`, and every occurrence adds to the same variable: `myagent --add-dir a --add-dir b --add-dir=c` gives `$arg_add_dir` three values, which in a list become three entries.
+
+For a flag that takes every argument after it, up to the next one starting with `-`, use the table form with `greedy = true`:
+
+```toml
+[claude]
+match = "claude"
+args.add_dir = { flags = "--add-dir", greedy = true }
+filesystem.read = ["$arg_add_dir"]
+# claude --add-dir a b c  →  $arg_add_dir = ["a", "b", "c"]
+```
+
+A greedy flag cannot tell a value from an argument that happens to follow it: in `claude --add-dir a "fix the bug"` the prompt is taken as a directory too. Paths that do not exist are skipped, so the harm is limited to that.
+
+#### Positional variables
+
+Arguments that are neither flags nor the value of a declared flag are positional. Flags not declared in `args` never take a value, so declare every flag whose value could otherwise be mistaken for a positional:
 
 ```toml
 [install]
-arg_aliases = { target_directory = ["-t", "--target-directory"] }
-systemd.BindPaths = ["$HOME/.cache", "$arg_target_directory"]
+match = "install"
+args.target = ["-t", "--target-directory"]
+filesystem.write = ["$arg_1"]   # first positional argument
 ```
-
-Named flag variables **accumulate** across multiple occurrences — `--flag a --flag b` produces a two-element array that, when used in a `BindPaths` array, expands to two separate entries.
-
-If an `arg_aliases` entry should consume all consecutive non-flag arguments after the flag (instead of just one), use the extended form with `nargs = "+"`:
-
-```toml
-[rsync]
-arg_aliases = { include = { flags = ["-I", "--include"], nargs = "+" } }
-# --include a b c  →  $arg_include = ["a", "b", "c"]
-```
-
-#### Boolean flags and positional variables
-
-Flags listed in `arg_flags` are treated as boolean (they never consume the next argument). This is necessary to correctly identify positional arguments when boolean short options are present:
-
-```toml
-[mkdir]
-arg_flags = ["-p", "--parents", "-v", "--verbose"]
-systemd.BindPaths = ["$arg_1"]   # first positional argument
-```
-
-With this profile, `mkdir -p /my/dir` correctly sets `$arg_1 = /my/dir`.
-
-Positional variables:
 
 | Variable | Value |
 |----------|-------|
@@ -987,7 +1000,7 @@ When a named flag variable holds multiple values and appears inside a string tem
 
 ```toml
 [rsync]
-arg_aliases = { include = ["-I", "--include"] }
+args.include = ["-I", "--include"]
 systemd.BindReadOnlyPaths = ["/prefix/$arg_include"]
 # -I a -I b  →  ["/prefix/a", "/prefix/b"]
 ```
@@ -996,11 +1009,11 @@ Using more than one multi-value argument variable inside the same string templat
 
 ### Path canonicalization
 
-When a variable (`$arg_*` or `$VAR`) is used inside a systemd property that expects filesystem paths (such as `BindPaths`, `ReadWritePaths`, `WorkingDirectory`, etc.), its expanded value is automatically made absolute relative to `$PWD`. This handles the common case where the user passes a relative path on the command line:
+Entries of the `filesystem` lists are always made absolute. When a variable (`$arg_*` or `$VAR`) is used inside a systemd property that expects filesystem paths (such as `BindPaths`, `ReadWritePaths`, `WorkingDirectory`, etc.), its expanded value is automatically made absolute relative to `$PWD`. This handles the common case where the user passes a relative path on the command line:
 
 ```toml
 [rsync]
-arg_aliases = { include = ["-I", "--include"] }
+args.include = ["-I", "--include"]
 systemd.BindReadOnlyPaths = ["$arg_include"]
 # rsync -I ./src  →  BindReadOnlyPaths=/abs/cwd/src
 ```
