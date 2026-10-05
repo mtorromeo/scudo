@@ -81,9 +81,11 @@ impl Policy {
                         // the sockets are taken away, not the directory around
                         // them: /etc/resolv.conf is a symlink into it, and
                         // programs that cannot read it give up rather than fall
-                        // back.
+                        // back. Where resolved is not running the sockets are
+                        // not there to go around, and the `-` keeps systemd
+                        // from refusing to start the unit over their absence.
                         for socket in RESOLVED_SOCKETS {
-                            props.push(("InaccessiblePaths".to_owned(), (*socket).to_owned()));
+                            props.push(("InaccessiblePaths".to_owned(), format!("-{socket}")));
                         }
                     }
                 }
@@ -443,7 +445,7 @@ dest.allow = ["1.1.1.1"]"#,
         assert!(has_property(
             &props,
             "InaccessiblePaths",
-            "/run/systemd/resolve/io.systemd.Resolve"
+            "-/run/systemd/resolve/io.systemd.Resolve"
         ));
     }
 
@@ -455,7 +457,7 @@ dest.allow = ["1.1.1.1"]"#,
         assert!(!has_property(
             &props,
             "InaccessiblePaths",
-            "/run/systemd/resolve/io.systemd.Resolve"
+            "-/run/systemd/resolve/io.systemd.Resolve"
         ));
     }
 
