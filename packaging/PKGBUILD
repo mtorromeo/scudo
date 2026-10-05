@@ -1,7 +1,8 @@
 # Maintainer: Massimiliano Torromeo <mtorromeo@archlinux.org>
 
-pkgname=scudo
-pkgver=0.1.0
+pkgname=scudo-git
+_pkgname=scudo
+pkgver=0.1.0.r58.gf609838
 pkgrel=1
 pkgdesc='Run commands sandboxed via systemd-run with per-command resource and permission profiles'
 arch=('x86_64')
@@ -12,59 +13,65 @@ depends=('glibc' 'gcc-libs' 'systemd' 'fuse3')
 # rust ships no core for: the build script builds it from source with
 # -Z build-std, under RUSTC_BOOTSTRAP.
 makedepends=('rust' 'rust-src' 'cargo-binstall')
-# source=("https://github.com/mtorromeo/scudo/archive/refs/tags/v$pkgver/$pkgname-$pkgver.tar.gz")
-source=("$pkgname.tar.gz")
+provides=($_pkgname)
+conflicts=($_pkgname)
+options=('!debug')
+source=("$_pkgname::git+file://${startdir%/packaging}")
 sha256sums=('SKIP')
 
+pkgver() {
+  cd $_pkgname
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
 prepare() {
-    cd $pkgname
+  cd $_pkgname
+  [ ! -e target ] && [ -d ../target ] && ln -s ../target
+  which cargo
 
-    # arch's bpf-linker is linked against the system llvm, and llvm 22 rejects
-    # the calls to memset rustc emits; llvm 23 accepts them. The prebuilt
-    # binary bundles its own llvm 23, so use that until llvm-libs catches up.
-    cargo binstall --disable-telemetry --no-confirm \
-        --install-path "$srcdir/bin" bpf-linker
+  # arch's bpf-linker is linked against the system llvm, and llvm 22 rejects
+  # the calls to memset rustc emits; llvm 23 accepts them. The prebuilt
+  # binary bundles its own llvm 23, so use that until llvm-libs catches up.
+  cargo binstall --disable-telemetry --no-confirm \
+    --install-path "$srcdir/bin" bpf-linker
 
-    cargo fetch --locked
+  cargo fetch --locked
 }
 
 build() {
-    cd $pkgname
-
-    # Where prepare() put bpf-linker, for rustc to link the eBPF programs with.
-    export PATH="$srcdir/bin:$PATH"
-    RUSTFLAGS='-C link-args=-Wl,-z,shstk' cargo build --frozen --release
+  cd $_pkgname
+  export PATH="$srcdir/bin:$PATH"
+  RUSTFLAGS='-C link-args=-Wl,-z,shstk' cargo build --frozen --release
 }
 
 check() {
-    cd $pkgname
-
-    export PATH="$srcdir/bin:$PATH"
-    # The integration tests are #[ignore]d and stay that way here: they attach
-    # real eBPF programs, which needs the daemon running with its capabilities.
-    cargo test --frozen --release
+  cd $_pkgname
+  export PATH="$srcdir/bin:$PATH"
+  cargo test --frozen --release
 }
 
 package() {
-    cd $pkgname
+  cd $_pkgname
 
-    install -Dm0755 target/release/scudo "$pkgdir/usr/bin/scudo"
-    install -Dm0755 target/release/scudo-fuse "$pkgdir/usr/bin/scudo-fuse"
-    install -Dm0755 target/release/scudo-bpfd "$pkgdir/usr/bin/scudo-bpfd"
+  install -Dm0755 target/release/scudo "$pkgdir/usr/bin/scudo"
+  install -Dm0755 target/release/scudo-fuse "$pkgdir/usr/bin/scudo-fuse"
+  install -Dm0755 target/release/scudo-bpfd "$pkgdir/usr/bin/scudo-bpfd"
 
-    # scudo-bpfd exists precisely because a user service manager may not load BPF
-    # programs, so without the first two capabilities it can do nothing at all.
-    # cap_perfmon is only for reporting refused file accesses: drop it and the
-    # daemon still works, it just says nothing about what the filesystem
-    # restrictions turned away.
-    setcap cap_bpf,cap_net_admin,cap_perfmon=ep "$pkgdir/usr/bin/scudo-bpfd"
+  # scudo-bpfd exists precisely because a user service manager may not load BPF
+  # programs, so without the first two capabilities it can do nothing at all.
+  # cap_perfmon is only for reporting refused file accesses: drop it and the
+  # daemon still works, it just says nothing about what the filesystem
+  # restrictions turned away.
+  setcap cap_bpf,cap_net_admin,cap_perfmon=ep "$pkgdir/usr/bin/scudo-bpfd"
 
-    install -Dm0644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service \
-        -t "$pkgdir/usr/lib/systemd/user"
+  install -Dm0644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service \
+      -t "$pkgdir/usr/lib/systemd/user"
 
-    install -Dm0644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm0644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
 
-    # Both, since the crate is dual-licensed.
-    install -Dm0644 LICENSE-MIT LICENSE-APACHE \
-        -t "$pkgdir/usr/share/licenses/$pkgname"
+  # Both, since the crate is dual-licensed.
+  install -Dm0644 LICENSE-MIT LICENSE-APACHE \
+      -t "$pkgdir/usr/share/licenses/$pkgname"
 }

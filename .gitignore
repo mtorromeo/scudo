@@ -1,6 +1,10 @@
 .*
 *.tar.*
 *.tar
+*.log
 !.git*
 target/
 /shims
+/packaging/src
+/packaging/pkg
+/packaging/scudo
