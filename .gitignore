@@ -3,6 +3,7 @@
 *.tar
 *.log
 !.git*
+!.cargo
 target/
 /shims
 /packaging/src

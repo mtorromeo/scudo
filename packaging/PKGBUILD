@@ -2,7 +2,7 @@
 
 pkgname=scudo-git
 _pkgname=scudo
-pkgver=0.1.0.r58.gf609838
+pkgver=0.1.0.r59.ge0a023e
 pkgrel=1
 pkgdesc='Run commands sandboxed via systemd-run with per-command resource and permission profiles'
 arch=('x86_64')
@@ -12,7 +12,7 @@ depends=('glibc' 'gcc-libs' 'systemd' 'fuse3')
 # rust-src because the eBPF crate targets bpfel-unknown-none, a tier 3 target
 # rust ships no core for: the build script builds it from source with
 # -Z build-std, under RUSTC_BOOTSTRAP.
-makedepends=('rust' 'rust-src' 'cargo-binstall')
+makedepends=('rust' 'rust-src' 'cargo-binstall' 'mold')
 provides=($_pkgname)
 conflicts=($_pkgname)
 options=('!debug')
@@ -29,7 +29,6 @@ pkgver() {
 prepare() {
   cd $_pkgname
   [ ! -e target ] && [ -d ../target ] && ln -s ../target
-  which cargo
 
   # arch's bpf-linker is linked against the system llvm, and llvm 22 rejects
   # the calls to memset rustc emits; llvm 23 accepts them. The prebuilt
