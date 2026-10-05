@@ -9,7 +9,7 @@ use regex::Regex;
 use toml::Value;
 
 use crate::{
-    config::{ArgDecls, Profile, ValidatedConfigMap},
+    config::{ArgDecls, Fallback, Profile, ValidatedConfigMap, VarDecls},
     logging::{Level, LogConfig},
     policy::{
         Access, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides, NetworkPolicy,
@@ -35,8 +35,12 @@ pub struct ResolvedProfile {
 /// Declared flags are stored under their declared name, also without the prefix.
 type ArgVars = HashMap<String, Vec<String>>;
 
-/// The variable naming the project the command runs in.
-const PROJECT_DIR_VAR: &str = "SCUDO_PROJECT_DIR";
+/// What `$NAME` references can expand to beyond the environment.
+struct Vars {
+    args: ArgVars,
+    /// Lookup variables, the global ones overridden by the profiles'.
+    lookups: VarDecls,
+}
 
 /// Options controlling which profiles [`resolve_with`] applies.
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,6 +52,8 @@ pub struct ResolveOptions<'a> {
     pub no_match: bool,
     /// Network rules from the command line, applied after every profile.
     pub network: Option<&'a NetworkOverrides>,
+    /// Lookup variables from the `[scudo]` table; a profile's own win.
+    pub vars: Option<&'a VarDecls>,
 }
 
 /// Merge every profile that matches `command`, in definition order, and build
@@ -130,8 +136,13 @@ pub fn resolve_with(
         ));
     }
 
-    let arg_vars = parse_command_args(command_args, &merged.args);
-    build_args(merged, match_log, &arg_vars, overrides)
+    let mut lookups = opts.vars.cloned().unwrap_or_default();
+    lookups.extend(merged.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let vars = Vars {
+        args: parse_command_args(command_args, &merged.args),
+        lookups,
+    };
+    build_args(merged, match_log, &vars, overrides)
 }
 
 /// Look up explicitly requested profile names, preserving order and dropping duplicates.
@@ -254,21 +265,14 @@ fn parse_command_args(args: &[String], decls: &ArgDecls) -> ArgVars {
     vars
 }
 
-/// The project a command run from `start` belongs to: the closest directory,
-/// `start` included, that holds a `.git` — a directory, or the file a worktree
-/// has instead — and `start` itself when there is none.
+/// The closest directory, `start` included, that holds any of `names` — a file
+/// or a directory alike.
 #[must_use]
-pub fn find_project_dir(start: &Path) -> PathBuf {
+pub fn find_up(start: &Path, names: &[String]) -> Option<PathBuf> {
     start
         .ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(start)
-        .to_path_buf()
-}
-
-fn project_dir() -> Result<String> {
-    let cwd = std::env::current_dir().context("finding the current directory")?;
-    Ok(find_project_dir(&cwd).to_string_lossy().into_owned())
+        .find(|dir| names.iter().any(|name| dir.join(name).exists()))
+        .map(Path::to_path_buf)
 }
 
 /// Make a path absolute relative to the process's current directory.
@@ -321,19 +325,19 @@ fn is_path_property(key: &str) -> bool {
 fn build_args(
     profile: Profile,
     match_log: Vec<String>,
-    arg_vars: &ArgVars,
+    vars: &Vars,
     overrides: Option<&NetworkOverrides>,
 ) -> Result<ResolvedProfile> {
     let mut args = Vec::new();
 
-    for (key, val) in mount_properties(filesystem_entries(&profile.filesystem, arg_vars)?) {
+    for (key, val) in mount_properties(filesystem_entries(&profile.filesystem, vars)?) {
         args.push("-p".into());
         args.push(format_property(key, &val));
     }
 
     for (key, val) in &profile.systemd {
         let path_prop = is_path_property(key);
-        for str_val in value_to_strings(val, arg_vars, path_prop)? {
+        for str_val in value_to_strings(val, vars, path_prop)? {
             args.push("-p".into());
             args.push(format_property(key, &str_val));
         }
@@ -342,7 +346,7 @@ fn build_args(
     // The properties a policy needs are added by `policy::apply`, once it knows
     // the policy is actually being enforced: emitting them for a policy that
     // ends up degraded would restrict the command for no benefit.
-    let policies = build_policies(profile.network, &profile.filesystem, arg_vars, overrides)?;
+    let policies = build_policies(profile.network, &profile.filesystem, vars, overrides)?;
 
     let mut log = profile.log;
     // `verbose` predates the log table and asks for the same thing in fewer
@@ -351,7 +355,8 @@ fn build_args(
         log.level = Some(Level::Debug);
     }
     if let Some(path) = log.path {
-        log.path = Some(expand_env(&path)?);
+        // A lookup variable that was not found leaves no log file.
+        log.path = expand_vars(&path, vars, false)?.pop();
     }
 
     Ok(ResolvedProfile {
@@ -367,7 +372,7 @@ fn build_args(
 /// Expand the paths of the `filesystem` table, made absolute, each with the
 /// access it was listed under. An entry that expands to nothing — an absent
 /// `$arg_*` — is dropped.
-fn filesystem_entries(fs: &FilesystemConfig, arg_vars: &ArgVars) -> Result<Vec<(Access, PathBuf)>> {
+fn filesystem_entries(fs: &FilesystemConfig, vars: &Vars) -> Result<Vec<(Access, PathBuf)>> {
     let lists = [
         (Access::Write, &fs.write),
         (Access::Read, &fs.read),
@@ -377,7 +382,7 @@ fn filesystem_entries(fs: &FilesystemConfig, arg_vars: &ArgVars) -> Result<Vec<(
     let mut entries = Vec::new();
     for (access, list) in lists {
         for entry in list {
-            for path in expand_vars(entry, arg_vars, false)? {
+            for path in expand_vars(entry, vars, false)? {
                 if !path.is_empty() {
                     entries.push((access, PathBuf::from(make_absolute(&path))));
                 }
@@ -394,7 +399,7 @@ fn filesystem_entries(fs: &FilesystemConfig, arg_vars: &ArgVars) -> Result<Vec<(
 fn build_policies(
     network: Option<toml::Table>,
     filesystem: &FilesystemConfig,
-    arg_vars: &ArgVars,
+    vars: &Vars,
     overrides: Option<&NetworkOverrides>,
 ) -> Result<Vec<Policy>> {
     let mut policies = Vec::new();
@@ -403,7 +408,7 @@ fn build_policies(
     if let Some(network) = network {
         let mut table = toml::Table::new();
         for (key, val) in network {
-            if let Some(expanded) = expand_network_value(val, arg_vars, false)? {
+            if let Some(expanded) = expand_network_value(val, vars, false)? {
                 table.insert(key, expanded);
             }
         }
@@ -438,10 +443,10 @@ fn build_policies(
 /// element it appears in, and an element expanding to nothing is dropped.
 /// Anywhere but a list there is nothing to replicate, so a multi-valued
 /// expansion is an error rather than a silent truncation.
-fn expand_network_value(val: Value, arg_vars: &ArgVars, in_list: bool) -> Result<Option<Value>> {
+fn expand_network_value(val: Value, vars: &Vars, in_list: bool) -> Result<Option<Value>> {
     match val {
         Value::String(s) => {
-            let mut expanded = expand_vars(&s, arg_vars, false)?;
+            let mut expanded = expand_vars(&s, vars, false)?;
             expanded.retain(|e| !e.is_empty());
             match expanded.len() {
                 0 => Ok(None),
@@ -455,7 +460,7 @@ fn expand_network_value(val: Value, arg_vars: &ArgVars, in_list: bool) -> Result
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                match expand_network_value(item, arg_vars, true)? {
+                match expand_network_value(item, vars, true)? {
                     // A list element that itself expanded to a list is spliced in.
                     Some(Value::Array(nested)) => out.extend(nested),
                     Some(value) => out.push(value),
@@ -469,7 +474,7 @@ fn expand_network_value(val: Value, arg_vars: &ArgVars, in_list: bool) -> Result
             for (key, item) in items {
                 // Every list in the network table is written as one — `allow`,
                 // `deny` — so a table value is never itself a list context.
-                if let Some(value) = expand_network_value(item, arg_vars, false)? {
+                if let Some(value) = expand_network_value(item, vars, false)? {
                     out.insert(key, value);
                 }
             }
@@ -498,16 +503,16 @@ fn format_property(key: &str, val: &str) -> String {
 /// Booleans become "yes"/"no".
 /// Empty strings produced by missing `$arg_*` variables are filtered out from arrays.
 /// When `is_path` is `true`, variable expansions are made absolute using the process's CWD.
-fn value_to_strings(val: &Value, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>> {
+fn value_to_strings(val: &Value, vars: &Vars, is_path: bool) -> Result<Vec<String>> {
     match val {
-        Value::String(s) => expand_vars(s, arg_vars, is_path),
+        Value::String(s) => expand_vars(s, vars, is_path),
         Value::Boolean(b) => Ok(vec![if *b { "yes" } else { "no" }.to_owned()]),
         Value::Integer(n) => Ok(vec![n.to_string()]),
         Value::Float(f) => Ok(vec![f.to_string()]),
         Value::Array(arr) => {
             let mut result = Vec::new();
             for item in arr {
-                for s in value_to_strings(item, arg_vars, is_path)? {
+                for s in value_to_strings(item, vars, is_path)? {
                     if !s.is_empty() {
                         result.push(s);
                     }
@@ -525,14 +530,17 @@ fn value_to_strings(val: &Value, arg_vars: &ArgVars, is_path: bool) -> Result<Ve
 /// - `$arg_name` / `${arg_name}` look up `name` in `arg_vars` (silently empty if absent).
 ///   If the variable holds N > 1 values, the template is replicated N times (one per value).
 ///   Having more than one multi-value `$arg_*` reference in the same template is an error.
-/// - `$SCUDO_PROJECT_DIR` is the project the command runs in; see [`find_project_dir`].
+/// - A lookup variable is the closest directory holding what it looks for; see
+///   [`find_up`]. When there is none its fallback decides, and `skip` makes the
+///   whole of `s` expand to nothing.
 /// - All other `$VAR` references are resolved from the environment; missing vars are an error.
 /// - When `is_path` is `true`, every expanded variable value is made absolute using the
 ///   process's current directory. Only the variable expansion is canonicalized; literal
 ///   text in the template is left untouched.
 ///
-/// Returns a `Vec<String>` (usually one element; N elements when an array arg causes explosion).
-fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>> {
+/// Returns a `Vec<String>` (usually one element; N elements when an array arg causes
+/// explosion; none when a lookup variable is skipped).
+fn expand_vars(s: &str, vars: &Vars, is_path: bool) -> Result<Vec<String>> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)").expect("regex is valid")
@@ -551,7 +559,7 @@ fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>
         last_end = m.end();
 
         if let Some(arg_name) = name.strip_prefix("arg_") {
-            let values = arg_vars.get(arg_name).cloned().unwrap_or_default();
+            let values = vars.args.get(arg_name).cloned().unwrap_or_default();
             // Treat missing/empty arg var as a single empty-string expansion.
             let raw_vals: Vec<String> = if values.is_empty() {
                 vec![String::new()]
@@ -592,8 +600,18 @@ fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>
                 }
             }
         } else {
-            let raw = if name == PROJECT_DIR_VAR {
-                project_dir()?
+            let raw = if let Some(decl) = vars.lookups.get(name) {
+                let cwd = std::env::current_dir().context("finding the current directory")?;
+                match (find_up(&cwd, &decl.lookup), decl.fallback) {
+                    (Some(dir), _) => dir.to_string_lossy().into_owned(),
+                    (None, Fallback::Cwd) => cwd.to_string_lossy().into_owned(),
+                    (None, Fallback::Skip) => return Ok(Vec::new()),
+                    (None, Fallback::Error) => bail!(
+                        "variable '${name}': none of {} found in {} or above",
+                        decl.lookup.join(", "),
+                        cwd.display()
+                    ),
+                }
             } else {
                 std::env::var(name)
                     .with_context(|| format!("undefined environment variable '${name}'"))?
@@ -614,14 +632,6 @@ fn expand_vars(s: &str, arg_vars: &ArgVars, is_path: bool) -> Result<Vec<String>
     Ok(results)
 }
 
-/// Expand `$VAR` and `${VAR}` using the current process environment.
-/// Returns an error if a referenced variable is not set.
-/// Thin wrapper around `expand_vars` for callers that don't need arg vars.
-fn expand_env(s: &str) -> Result<String> {
-    let mut results = expand_vars(s, &ArgVars::new(), false)?;
-    Ok(results.pop().unwrap_or_default())
-}
-
 #[cfg(test)]
 #[expect(clippy::indexing_slicing)]
 mod tests {
@@ -632,6 +642,16 @@ mod tests {
             Action, Destination, LogLevel, OnUnavailable, PortRange, PortRule, Protocol,
         },
     };
+
+    /// Expand `$VAR` and `${VAR}` using the current process environment alone.
+    fn expand_env(s: &str) -> Result<String> {
+        let vars = Vars {
+            args: ArgVars::new(),
+            lookups: VarDecls::new(),
+        };
+        let mut results = expand_vars(s, &vars, false)?;
+        Ok(results.pop().unwrap_or_default())
+    }
 
     /// Build a config map through the real load pipeline, so that these tests
     /// exercise validation as well as merging.
@@ -682,7 +702,7 @@ mod tests {
         ResolveOptions {
             profiles,
             no_match,
-            network: None,
+            ..ResolveOptions::default()
         }
     }
 
@@ -1103,39 +1123,125 @@ mod tests {
     }
 
     #[test]
-    fn the_project_dir_is_the_closest_with_git() {
-        let root = std::env::temp_dir().join(format!("scudo-project-{}", std::process::id()));
-        let nested = root.join("repo/src/deep");
+    fn find_up_returns_the_closest_directory_holding_a_name() {
+        let root = std::env::temp_dir().join(format!("scudo-find-up-{}", std::process::id()));
+        let nested = root.join("repo/pkg/src/deep");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        std::fs::write(root.join("repo/pkg/package.json"), "{}").unwrap();
         std::fs::create_dir_all(root.join("worktree/sub")).unwrap();
         std::fs::write(root.join("worktree/.git"), "gitdir: elsewhere\n").unwrap();
-        std::fs::create_dir_all(root.join("plain/sub")).unwrap();
 
-        assert_eq!(find_project_dir(&nested), root.join("repo"));
-        assert_eq!(find_project_dir(&root.join("repo")), root.join("repo"));
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let git = names(&[".git"]);
+        assert_eq!(find_up(&nested, &git), Some(root.join("repo")));
+        assert_eq!(find_up(&root.join("repo"), &git), Some(root.join("repo")));
+        // A file counts as much as a directory: a worktree has a `.git` file.
         assert_eq!(
-            find_project_dir(&root.join("worktree/sub")),
-            root.join("worktree")
+            find_up(&root.join("worktree/sub"), &git),
+            Some(root.join("worktree"))
         );
-        // Nothing above it is a project (the temp dir is not in a repository):
-        // the directory itself is.
-        let plain = root.join("plain/sub");
-        if !std::env::temp_dir()
-            .ancestors()
-            .any(|d| d.join(".git").exists())
-        {
-            assert_eq!(find_project_dir(&plain), plain);
-        }
+        assert_eq!(
+            find_up(&nested, &names(&["package.json"])),
+            Some(root.join("repo/pkg"))
+        );
+        // Any of the names will do, and the closest directory wins.
+        assert_eq!(
+            find_up(&nested, &names(&[".git", "package.json"])),
+            Some(root.join("repo/pkg"))
+        );
+        assert_eq!(find_up(&nested, &names(&["scudo-no-such-marker"])), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Tests run from the crate root, which holds a `Cargo.toml`.
+    const LOOKUP_VARS: &str = r#"
+        [scudo-test]
+        match = "scudo-test"
+        vars.FOUND = { lookup = ["scudo-no-such-marker", "Cargo.toml"] }
+        vars.SKIPPED = { lookup = "scudo-no-such-marker" }
+        vars.CWD = { lookup = "scudo-no-such-marker", fallback = "cwd" }
+        vars.FAILED = { lookup = "scudo-no-such-marker", fallback = "error" }
+    "#;
+
+    fn lookup_args(extra: &str) -> Result<Vec<String>> {
+        let configs = configs_from_toml(&format!("{LOOKUP_VARS}\n{extra}"));
+        Ok(resolve(&configs, "scudo-test", &[])?.systemd_args)
+    }
+
     #[test]
-    fn the_project_dir_variable_expands() {
+    fn a_lookup_variable_is_the_directory_holding_its_marker() {
         let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_string_lossy();
+        let args =
+            lookup_args("systemd.ReadWritePaths = [\"$FOUND/target\", \"$SKIPPED/sub\", \"$CWD\"]")
+                .unwrap();
+        assert!(
+            has_arg(&args, &format!("ReadWritePaths={cwd}/target")),
+            "{args:?}"
+        );
+        assert!(has_arg(&args, &format!("ReadWritePaths={cwd}")), "{args:?}");
+        // Skipped means gone, not an empty prefix that leaves `/sub`.
+        assert!(!args.iter().any(|a| a.ends_with("/sub")), "{args:?}");
+    }
+
+    #[test]
+    fn a_skipped_lookup_variable_drops_a_scalar_property() {
+        let args = lookup_args("systemd.WorkingDirectory = \"$SKIPPED\"").unwrap();
+        assert!(
+            !args.iter().any(|a| a.starts_with("WorkingDirectory=")),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_lookup_variable_fails_only_when_referenced() {
+        lookup_args("").unwrap();
+        let err = lookup_args("systemd.ReadWritePaths = [\"$FAILED\"]").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("scudo-no-such-marker"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn profile_lookup_variables_override_global_ones_and_the_environment() {
+        // SAFETY: Setting an environment variable is safe here as it is only used for testing.
+        unsafe { std::env::set_var("SCUDO_TEST_LOOKUP", "/from/env") }
+        let configs = configs_from_toml(
+            r#"
+            [a]
+            match = "a"
+            vars.SCUDO_TEST_LOOKUP = { lookup = "Cargo.toml" }
+            systemd.ReadWritePaths = ["$SCUDO_TEST_LOOKUP", "$GLOBAL"]
+            "#,
+        );
+        let global: VarDecls = toml::from_str(
+            r#"
+            GLOBAL = { lookup = "scudo-no-such-marker", fallback = "cwd" }
+            SCUDO_TEST_LOOKUP = { lookup = "scudo-no-such-marker" }
+            "#,
+        )
+        .unwrap();
+        let args = resolve_with(
+            &configs,
+            "a",
+            &[],
+            ResolveOptions {
+                vars: Some(&global),
+                ..ResolveOptions::default()
+            },
+        )
+        .unwrap()
+        .systemd_args;
+        let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_string_lossy();
         assert_eq!(
-            expand_env("$SCUDO_PROJECT_DIR").unwrap(),
-            find_project_dir(&cwd).to_string_lossy()
+            args.iter()
+                .filter(|a| **a == format!("ReadWritePaths={cwd}"))
+                .count(),
+            2,
+            "{args:?}"
         );
     }
 

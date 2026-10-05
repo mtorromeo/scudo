@@ -74,6 +74,61 @@ impl ArgDecl {
     }
 }
 
+/// Maps a lookup variable's name to how it is found.
+pub type VarDecls = IndexMap<String, VarDecl>;
+
+/// A variable naming the closest directory, from the current one up, that
+/// holds one of `lookup`.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VarDecl {
+    /// File or directory names; the first directory holding any of them wins.
+    #[serde(deserialize_with = "one_or_many")]
+    pub lookup: Vec<String>,
+    #[serde(default)]
+    pub fallback: Fallback,
+}
+
+/// What a lookup variable is when no directory holds what it looks for.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Fallback {
+    /// Nothing: the value referencing it is dropped, as if never written.
+    #[default]
+    Skip,
+    /// The current directory.
+    Cwd,
+    /// The command does not run.
+    Error,
+}
+
+/// Check the names a `vars` table declares and what they look for, so a
+/// mistake is reported when the config is read.
+fn validate_vars(vars: &VarDecls) -> Result<()> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new("^[A-Za-z_][A-Za-z0-9_]*$").expect("regex is valid"));
+    for (name, decl) in vars {
+        if !re.is_match(name) || name.starts_with("arg_") || name == CONFIG_DIR_VAR {
+            bail!("vars: '{name}' is not a valid variable name");
+        }
+        if decl.lookup.is_empty() {
+            bail!("vars.{name}: lookup names nothing");
+        }
+        for entry in &decl.lookup {
+            let path = std::path::Path::new(entry);
+            if entry.is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                bail!("vars.{name}: '{entry}' must be a relative name inside a directory");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A profile as written in TOML. Systemd unit properties live in the `systemd`
 /// sub-table rather than at the top level, so every other key is one this struct
 /// knows about and a misspelled one is an error instead of a silently ignored
@@ -97,6 +152,9 @@ pub struct ProfileConfig {
     /// The `$arg_*` variables filled from the command's flags.
     #[serde(default)]
     pub args: ArgDecls,
+    /// Variables found by looking up the directory tree.
+    #[serde(default)]
+    pub vars: VarDecls,
     /// Network policy, kept in its raw form so that its lists can be merged
     /// before anything in them is expanded.
     #[serde(default)]
@@ -135,6 +193,9 @@ pub struct Settings {
     pub log: LogConfig,
     #[serde(default)]
     pub tui: TuiConfig,
+    /// Lookup variables every profile can reference.
+    #[serde(default)]
+    pub vars: VarDecls,
 }
 
 impl Settings {
@@ -142,9 +203,12 @@ impl Settings {
     /// the config files over each other in priority order.
     #[must_use]
     fn over(self, lower: Self) -> Self {
+        let mut vars = lower.vars;
+        vars.extend(self.vars);
         Settings {
             log: self.log.over(lower.log),
             tui: self.tui.over(lower.tui),
+            vars,
         }
     }
 }
@@ -169,6 +233,7 @@ pub struct Profile {
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
     pub args: ArgDecls,
+    pub vars: VarDecls,
     pub network: Option<toml::Table>,
     pub filesystem: FilesystemConfig,
     pub log: LogConfig,
@@ -190,6 +255,8 @@ impl Profile {
         self.confirm = other.confirm.or(self.confirm);
         self.args
             .extend(other.args.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.vars
+            .extend(other.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
         if let Some(network) = &other.network {
             merge_table(self.network.get_or_insert_default(), network);
         }
@@ -230,6 +297,7 @@ impl Profile {
         if let Some(table) = &config.network {
             validate_network(name, table)?;
         }
+        validate_vars(&config.vars).with_context(|| format!("profile '{name}'"))?;
         let patterns = config
             .r#match
             .iter()
@@ -245,6 +313,7 @@ impl Profile {
             verbose: config.verbose,
             confirm: config.confirm,
             args: config.args,
+            vars: config.vars,
             network: config.network,
             filesystem: config.filesystem,
             log: config.log,
@@ -446,6 +515,8 @@ fn split_settings(mut table: toml::Table, path: &std::path::Path) -> Result<(Con
             .with_context(|| format!("parsing [{SETTINGS_SECTION}] in {}", path.display()))?,
         None => Settings::default(),
     };
+    validate_vars(&settings.vars)
+        .with_context(|| format!("in [{SETTINGS_SECTION}] in {}", path.display()))?;
     let profiles = toml::Value::Table(table)
         .try_into::<ConfigMap>()
         .with_context(|| format!("parsing {}", path.display()))?;
@@ -595,6 +666,7 @@ mod tests {
                 prefix: Some("C-a".to_owned()),
                 scrollback: Some(30_000),
             },
+            ..Settings::default()
         };
         let higher = Settings {
             tui: TuiConfig {
@@ -729,6 +801,65 @@ mod tests {
         assert_eq!(args["many"].flags(), ["-m", "--many"]);
         assert!(!args["many"].is_greedy());
         assert!(args["greedy"].is_greedy());
+    }
+
+    #[test]
+    fn lookup_variables_are_declared_in_profiles_and_settings() {
+        let (profiles, settings) = split(
+            r#"
+            [scudo]
+            vars.GIT_ROOT = { lookup = ".git" }
+
+            [node]
+            vars.NODE_ROOT = { lookup = ["package.json", "deno.json"], fallback = "cwd" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(settings.vars["GIT_ROOT"].lookup, [".git"]);
+        assert_eq!(settings.vars["GIT_ROOT"].fallback, Fallback::Skip);
+        let node = &profiles["node"].vars["NODE_ROOT"];
+        assert_eq!(node.lookup, ["package.json", "deno.json"]);
+        assert_eq!(node.fallback, Fallback::Cwd);
+    }
+
+    #[test]
+    fn a_later_definition_of_a_lookup_variable_wins() {
+        let map = load(&[
+            "[a]\nvars.ROOT = { lookup = \".git\" }\n",
+            "[a]\nvars.ROOT = { lookup = \"Cargo.toml\", fallback = \"error\" }\n",
+        ]);
+        assert_eq!(map.0["a"].vars["ROOT"].lookup, ["Cargo.toml"]);
+        assert_eq!(map.0["a"].vars["ROOT"].fallback, Fallback::Error);
+
+        let (_, lower) =
+            split("[scudo]\nvars.A = { lookup = \"a\" }\nvars.B = { lookup = \"b\" }\n").unwrap();
+        let (_, higher) = split("[scudo]\nvars.B = { lookup = \"c\" }\n").unwrap();
+        let merged = higher.over(lower);
+        assert_eq!(merged.vars["A"].lookup, ["a"]);
+        assert_eq!(merged.vars["B"].lookup, ["c"]);
+    }
+
+    #[test]
+    fn invalid_lookup_variables_are_reported() {
+        for decl in [
+            "vars.arg_x = { lookup = \".git\" }",
+            "vars.SCUDO_CONFIG_DIR = { lookup = \".git\" }",
+            "vars.\"1X\" = { lookup = \".git\" }",
+            "vars.X = { lookup = [] }",
+            "vars.X = { lookup = \"\" }",
+            "vars.X = { lookup = \"/etc\" }",
+            "vars.X = { lookup = \"../up\" }",
+        ] {
+            let (profiles, _) = split(&format!("[a]\n{decl}\n")).unwrap();
+            ValidatedConfigMap::try_from(profiles).expect_err(decl);
+            split(&format!("[scudo]\n{decl}\n")).expect_err(decl);
+        }
+        for decl in [
+            "vars.X = { lookup = \".git\", fallbak = \"cwd\" }",
+            "vars.X = { lookup = \".git\", fallback = \"nope\" }",
+        ] {
+            split(&format!("[a]\n{decl}\n")).expect_err(decl);
+        }
     }
 
     #[test]

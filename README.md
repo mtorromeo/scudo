@@ -93,15 +93,17 @@ Profiles are loaded from the following paths in order, with later files taking p
 For the per-directory tier, scudo walks every ancestor of `$PWD` from the filesystem root down to the current directory, loading each `.scudo.toml` it finds. This lets a project directory override settings defined higher up the tree. For example, with `$PWD` set to `/home/user/projects/myapp`, the lookup order is `/.scudo.toml`, `/home/.scudo.toml`, `/home/user/.scudo.toml`, `/home/user/projects/.scudo.toml`, `/home/user/projects/myapp/.scudo.toml`.
 
 Every top-level section is a profile, with one exception: `[scudo]` holds settings that are
-about scudo itself rather than about a command — the [logging](#logging) defaults and the
-[terminal UI](#terminal-ui). It is merged key by key across the files above like everything
-else, and `scudo` is therefore not available as a profile name.
+about scudo itself rather than about a command — the [logging](#logging) defaults, the
+[terminal UI](#terminal-ui) and the [lookup variables](#lookup-variables) every profile can
+use. It is merged key by key across the files above like everything else, and `scudo` is
+therefore not available as a profile name.
 
 ```toml
 [scudo]
 log.level = "info"
 tui.prefix = "C-b"
 tui.scrollback = 20000
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 ```
 
 ### Trust confirmation for per-directory configs
@@ -133,6 +135,7 @@ Each TOML section defines a profile. The section name identifies the profile for
 | `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
 | `args` | table | Maps `$arg_*` variable names to the flag(s) that fill them; see [Command argument variables](#command-argument-variables) |
+| `vars` | table | Variables naming a directory found by looking up the tree; see [Lookup variables](#lookup-variables) |
 | `filesystem` | table | Which paths the command may write, read, not see or not touch; see [Filesystem access](#filesystem-access) |
 | `network` | table | Network policy; see [Network filtering](#network-filtering) |
 | `log` | table | Level and destination for scudo's own output; see [Logging](#logging) |
@@ -147,6 +150,10 @@ Any other key is a typo and scudo says so instead of ignoring it.
 ### Example
 
 ```toml
+# The project a command runs in: the closest directory holding a `.git`
+[scudo]
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+
 # Base profile — no `match`, so it is never matched directly, only used via extend
 [sandboxed]
 filesystem.read = ["/"]
@@ -170,7 +177,7 @@ match = "claude"
 extend = "sandboxed-home"
 args.add_dir = { flags = "--add-dir", greedy = true }
 filesystem.read = ["$HOME/.gitconfig", "$arg_add_dir"]
-filesystem.write = ["$SCUDO_PROJECT_DIR", "$HOME/.claude", "$HOME/.claude.json"]
+filesystem.write = ["$PROJECT_DIR", "$HOME/.claude", "$HOME/.claude.json"]
 network.dest.allow = ["*.anthropic.com"]
 
 # code: VS Code and its variants
@@ -185,14 +192,14 @@ filesystem.write = [
   "$HOME/.vscode-oss",
   "$HOME/.config/Code",
   "$HOME/.config/Code - OSS",
-  "$SCUDO_PROJECT_DIR",
+  "$PROJECT_DIR",
 ]
 
 # npm: the npm cache and config, and the project
 [npm]
 match = "npm"
 extend = "sandboxed-home"
-filesystem.write = ["$HOME/.npm", "$SCUDO_PROJECT_DIR"]
+filesystem.write = ["$HOME/.npm", "$PROJECT_DIR"]
 filesystem.read = ["$HOME/.npmrc"]
 
 [pnpm]
@@ -219,7 +226,7 @@ The `filesystem` table says what the command may do with a path, in four lists:
 hide = ["$HOME"]
 deny = ["/etc/shadow"]
 read = ["/", "$HOME/.gitconfig"]
-write = ["$SCUDO_PROJECT_DIR", "$HOME/.claude"]
+write = ["$PROJECT_DIR", "$HOME/.claude"]
 ```
 
 Writing the lists rather than the systemd properties is what lets profiles written without knowing about each other be combined:
@@ -914,7 +921,7 @@ To replace the lower-priority profile instead, set `inherit = false`:
 inherit = false
 match = "cargo"
 filesystem.read = ["/"]
-filesystem.write = ["$SCUDO_PROJECT_DIR"]
+filesystem.write = ["$PROJECT_DIR"]
 ```
 
 ### Environment variables
@@ -933,15 +940,30 @@ systemd.BindReadOnlyPaths = ["$SCUDO_CONFIG_DIR/allowlist.txt"]
 
 The value is substituted when the config is loaded, before `$arg_*` and other `$VAR` expansion. When a profile inherits values via `extend` or from a same-named profile, each inherited value keeps the config dir of the file it was written in.
 
-#### `$SCUDO_PROJECT_DIR`
+#### Lookup variables
 
-`$SCUDO_PROJECT_DIR` expands to the project the command is run in: the closest directory, starting from the current one and going up, that contains a `.git` — a directory, or the file a worktree has instead. Outside a repository it is the current directory.
+The `vars` table defines variables that name a directory, found by looking for a file or directory from the current directory up to `/`: the first directory holding it is the value. A command run anywhere inside a repository can thus be given the whole repository, or the package it is in:
 
 ```toml
-[claude]
-match = "claude"
-filesystem.write = ["$SCUDO_PROJECT_DIR"]
+[scudo]
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+
+[npm]
+match = "npm"
+vars.PACKAGE_DIR = { lookup = "package.json" }
+filesystem.write = ["$PACKAGE_DIR/node_modules", "$PROJECT_DIR/.git"]
 ```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `lookup` | string or array of strings | Name(s), relative to each directory, to look for; a file and a directory count alike (a worktree has a `.git` file). With several, the closest directory holding any of them wins. |
+| `fallback` | `"skip"`, `"cwd"` or `"error"` | What the variable is when no directory holds any of them (default `"skip"`) |
+
+- `skip`: the value that references the variable is dropped as if it was never written — a list loses that entry, a property or a key is left out. `"$PACKAGE_DIR/node_modules"` outside a package is gone, not `/node_modules`.
+- `cwd`: the current directory.
+- `error`: the command does not run. Only a variable some value actually references is looked up, so an unused one never fails.
+
+Variables in `[scudo]` are available to every profile; a profile's own `vars` add to them and win over a same-named one, and among profiles combined together the one applied last wins, as for `args`. A lookup variable takes precedence over an environment variable of the same name. Names follow the environment variable rules, and cannot start with `arg_` or be `SCUDO_CONFIG_DIR`.
 
 ### Command argument variables
 

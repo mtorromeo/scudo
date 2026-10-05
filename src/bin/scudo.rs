@@ -233,6 +233,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
             profiles: &args.profile,
             no_match: args.no_match,
             network: Some(&network),
+            vars: Some(&loaded.settings.vars),
         },
     )?;
 
