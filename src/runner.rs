@@ -221,17 +221,37 @@ fn shell_quote(s: &OsStr) -> String {
 /// `-d` would start the command in ours instead, overriding the one that was
 /// asked for, so it is left out when this holds.
 fn sets_working_directory(systemd_args: &[String]) -> bool {
-    let is_working_directory = |property: &str| property.starts_with("WorkingDirectory=");
-    let separate = systemd_args.windows(2).any(|pair| {
-        matches!(pair, [flag, property]
-            if matches!(flag.as_str(), "-p" | "--property") && is_working_directory(property))
-    });
-    separate
-        || systemd_args.iter().any(|arg| {
+    sets_property(systemd_args, "WorkingDirectory")
+}
+
+/// Whether `systemd_args` set the unit property `key`, in any of the forms
+/// `systemd-run` takes: `-p Key=…`, `--property Key=…`, `-pKey=…` or
+/// `--property=Key=…`.
+#[must_use]
+pub fn sets_property(systemd_args: &[String], key: &str) -> bool {
+    property_value(systemd_args, key).is_some()
+}
+
+/// The value `systemd_args` give the unit property `key`, in any of the forms
+/// [`sets_property`] recognises. When it is set more than once this is the last
+/// one, which is the one systemd keeps for a single-valued property.
+#[must_use]
+pub fn property_value<'a>(systemd_args: &'a [String], key: &str) -> Option<&'a str> {
+    let value_of = |property: &'a str| property.strip_prefix(key)?.strip_prefix('=');
+    let mut flagged = false;
+    let mut last = None;
+    for arg in systemd_args {
+        let value = if flagged {
+            value_of(arg)
+        } else {
             arg.strip_prefix("--property=")
                 .or_else(|| arg.strip_prefix("-p"))
-                .is_some_and(is_working_directory)
-        })
+                .and_then(value_of)
+        };
+        flagged = matches!(arg.as_str(), "-p" | "--property");
+        last = value.or(last);
+    }
+    last
 }
 
 #[cfg(test)]
@@ -284,6 +304,38 @@ mod tests {
     fn working_directory_in_another_value_keeps_same_dir() {
         let args = args_of(&["-p", "Environment=WorkingDirectory=/tmp"]);
         assert!(args.contains(&"-Pdt".to_owned()));
+    }
+
+    #[test]
+    fn a_property_is_found_in_every_form() {
+        let set = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+            sets_property(&args, "ProtectControlGroups")
+        };
+        assert!(set(&["-p", "ProtectControlGroups=no"]));
+        assert!(set(&["--property", "ProtectControlGroups=no"]));
+        assert!(set(&["-pProtectControlGroups=no"]));
+        assert!(set(&["--property=ProtectControlGroups=no"]));
+        assert!(!set(&["-p", "ProtectControlGroupsX=no"]));
+        assert!(!set(&["-p", "Environment=ProtectControlGroups=no"]));
+        assert!(!set(&[]));
+    }
+
+    #[test]
+    fn the_last_value_of_a_property_is_the_one_kept() {
+        let args: Vec<String> = [
+            "-p",
+            "ProtectControlGroups=no",
+            "--property=ProtectControlGroups=private",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(
+            property_value(&args, "ProtectControlGroups"),
+            Some("private")
+        );
+        assert_eq!(property_value(&args, "MemoryMax"), None);
     }
 
     #[test]

@@ -122,13 +122,17 @@ pub struct Applied {
 /// A policy that only denies is realised by systemd alone. Anything finer needs
 /// `scudo-bpfd`; when it cannot be reached the policy's `on_unavailable` decides
 /// whether to refuse, drop the network entirely, or run unfiltered.
-pub fn apply(policies: &[Policy]) -> Result<Applied> {
-    apply_with(policies, crate::bpfd::client::register)
+///
+/// `explicit` holds the arguments the profile itself produced: a property it
+/// sets outright is its own decision and is not overwritten here (see
+/// [`overridden`]).
+pub fn apply(policies: &[Policy], explicit: &[String]) -> Result<Applied> {
+    apply_with(explicit, policies, crate::bpfd::client::register)
 }
 
 /// The body of [`apply`], with the hand-off to the daemon injected so that the
 /// decisions around it can be tested without one running.
-fn apply_with<F>(policies: &[Policy], enforce: F) -> Result<Applied>
+fn apply_with<F>(explicit: &[String], policies: &[Policy], enforce: F) -> Result<Applied>
 where
     F: FnOnce(&[Policy]) -> Result<String>,
 {
@@ -171,7 +175,7 @@ where
         Ok(token) => {
             applied.token = Some(token);
             for policy in &to_enforce {
-                push_properties(&mut applied, &policy.required_properties());
+                push_required(&mut applied, policy, explicit);
             }
         }
         Err(err) => degrade(&mut applied, &to_enforce, &format!("{err:#}"))?,
@@ -194,10 +198,74 @@ fn push_property(applied: &mut Applied, key: &str, value: &str) {
     applied.systemd_args.push(arg);
 }
 
-fn push_properties(applied: &mut Applied, properties: &[(String, String)]) {
-    for (key, value) in properties {
-        push_property(applied, key, value);
+/// Add what `policy` needs to stay enforceable, short of anything the profile
+/// decided for itself — and say what that decision costs.
+fn push_required(applied: &mut Applied, policy: &Policy, explicit: &[String]) {
+    for (key, value) in policy.required_properties() {
+        if !overridden(explicit, &key) {
+            push_property(applied, &key, &value);
+            continue;
+        }
+        if still_confined(explicit, &key, policy.observes_only()) {
+            continue;
+        }
+        let warning = if policy.observes_only() {
+            format!("{key} is set by the profile; blocked accesses may go unreported")
+        } else {
+            format!(
+                "{key} is set by the profile; the command can leave its cgroup and walk \
+                 around the network policy"
+            )
+        };
+        if !applied.warnings.contains(&warning) {
+            applied.warnings.push(warning);
+        }
     }
+}
+
+/// Whether a property scudo would add is one the profile already decided.
+///
+/// Only single-valued properties are ever overwritten — systemd keeps the last
+/// one — so only those are left alone. Lists accumulate: adding to
+/// `InaccessiblePaths=` takes nothing away from the entries the profile wrote.
+#[must_use]
+pub fn overridden(explicit: &[String], key: &str) -> bool {
+    !accumulates(key) && crate::runner::sets_property(explicit, key)
+}
+
+/// Whether the value the profile chose for `key` keeps the command where scudo
+/// wanted it anyway, so overriding scudo's own value costs nothing worth a
+/// warning.
+///
+/// Only `ProtectControlGroups=` has values that qualify. `private` and `strict`
+/// put the unit in a cgroup namespace rooted at its own cgroup, and with the
+/// hierarchy mounted `nsdelegate` — as systemd mounts it — the kernel refuses
+/// every migration across that root: that confines it better than `yes`.
+/// `private` does leave the subtree writable, though, and a process moved into a
+/// sub-cgroup is still under every program attached above it but no longer in
+/// the one cgroup the filesystem monitor matches exactly. So it is enough for an
+/// enforced policy and not for one that only reports.
+#[must_use]
+pub fn still_confined(explicit: &[String], key: &str, observes_only: bool) -> bool {
+    if key != "ProtectControlGroups" {
+        return false;
+    }
+    let Some(value) = crate::runner::property_value(explicit, key) else {
+        return false;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "true" | "on" | "1" | "strict" => true,
+        "private" => !observes_only,
+        _ => false,
+    }
+}
+
+/// The properties scudo adds to that accumulate rather than replace.
+fn accumulates(key: &str) -> bool {
+    matches!(
+        key,
+        "InaccessiblePaths" | "BindPaths" | "Wants" | "After" | "Environment"
+    )
 }
 
 /// The varlink sockets `nss-resolve` uses to reach systemd-resolved.
@@ -291,7 +359,7 @@ mod tests {
     /// Denying everything needs no enforcer: systemd can do it on its own.
     #[test]
     fn deny_all_becomes_private_network() {
-        let applied = apply_with(&[policy("")], unavailable).unwrap();
+        let applied = apply_with(&[], &[policy("")], unavailable).unwrap();
         assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
         assert!(applied.warnings.is_empty());
         // Nobody asked to be told, so nothing was registered.
@@ -304,7 +372,7 @@ mod tests {
     #[test]
     fn a_watched_deny_all_keeps_the_namespace_and_gains_an_observer() {
         let mut seen: Vec<Policy> = Vec::new();
-        let applied = apply_with(&[policy(r#"log = "denied""#)], |policies| {
+        let applied = apply_with(&[], &[policy(r#"log = "denied""#)], |policies| {
             seen = policies.to_vec();
             Ok("token".to_owned())
         })
@@ -334,6 +402,7 @@ mod tests {
     #[test]
     fn a_watched_deny_all_still_runs_without_the_daemon() {
         let applied = apply_with(
+            &[],
             &[policy(
                 r#"log = "denied"
 on_unavailable = "fail""#,
@@ -360,6 +429,7 @@ on_unavailable = "fail""#,
     #[test]
     fn an_observer_does_not_soften_a_policy_that_asked_to_fail() {
         let err = apply_with(
+            &[],
             &[
                 policy(r#"log = "denied""#),
                 policy(
@@ -381,7 +451,7 @@ dest.allow = ["1.1.1.1"]"#,
     /// line, not two.
     #[test]
     fn properties_are_not_repeated() {
-        let applied = apply_with(&[policy(""), policy("")], unavailable).unwrap();
+        let applied = apply_with(&[], &[policy(""), policy("")], unavailable).unwrap();
         let repeats = applied
             .systemd_args
             .iter()
@@ -392,13 +462,15 @@ dest.allow = ["1.1.1.1"]"#,
 
     #[test]
     fn unenforceable_policy_fails_closed_by_default() {
-        let err = apply_with(&[policy(r#"dest.allow = ["1.1.1.1"]"#)], unavailable).unwrap_err();
+        let err =
+            apply_with(&[], &[policy(r#"dest.allow = ["1.1.1.1"]"#)], unavailable).unwrap_err();
         assert!(format!("{err:#}").contains("scudo-bpfd"));
     }
 
     #[test]
     fn no_network_degradation_drops_the_network() {
         let applied = apply_with(
+            &[],
             &[policy(
                 r#"on_unavailable = "no-network"
 dest.allow = ["1.1.1.1"]"#,
@@ -413,6 +485,7 @@ dest.allow = ["1.1.1.1"]"#,
     #[test]
     fn warn_degradation_runs_unfiltered() {
         let applied = apply_with(
+            &[],
             &[policy(
                 r#"on_unavailable = "warn"
 dest.allow = ["1.1.1.1"]"#,
@@ -465,10 +538,78 @@ dest.allow = ["1.1.1.1"]"#,
     /// gets the properties the policy depends on.
     #[test]
     fn an_enforced_policy_yields_a_token_and_its_properties() {
-        let applied = apply_with(&[policy(r#"dest.allow = ["1.1.1.1"]"#)], available).unwrap();
+        let applied = apply_with(&[], &[policy(r#"dest.allow = ["1.1.1.1"]"#)], available).unwrap();
         assert_eq!(applied.token.as_deref(), Some("token"));
         assert!(applied.warnings.is_empty());
         assert!(has_arg(&applied.systemd_args, "ProtectControlGroups=yes"));
+    }
+
+    fn explicit(args: &[&str]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
+
+    /// A property the profile set itself is its decision, and systemd keeps
+    /// the last one: appending ours would quietly take it back.
+    #[test]
+    fn a_property_the_profile_set_is_not_overwritten() {
+        let profile = explicit(&["-p", "ProtectControlGroups=no"]);
+        let applied = apply_with(
+            &profile,
+            &[policy(r#"dest.allow = ["1.1.1.1"]"#)],
+            available,
+        )
+        .unwrap();
+        assert!(!has_arg(&applied.systemd_args, "ProtectControlGroups=yes"));
+        assert_eq!(applied.warnings.len(), 1);
+    }
+
+    /// A cgroup namespace keeps the command in its cgroup as well as `yes`
+    /// does, so choosing one costs an enforced policy nothing to warn about —
+    /// but `private` lets it into sub-cgroups the file monitor does not see.
+    #[test]
+    fn a_cgroup_namespace_the_profile_chose_is_not_warned_about() {
+        let warnings = |value: &str, policy: Policy| {
+            let profile = explicit(&["-p", &format!("ProtectControlGroups={value}")]);
+            apply_with(&profile, &[policy], available).unwrap().warnings
+        };
+        let net = || policy(r#"dest.allow = ["1.1.1.1"]"#);
+        let fs = || {
+            Policy::Filesystem(FilesystemPolicy {
+                log: LogLevel::Denied,
+            })
+        };
+        assert_eq!(warnings("private", net()), Vec::<String>::new());
+        assert_eq!(warnings("strict", net()), Vec::<String>::new());
+        assert_eq!(warnings("strict", fs()), Vec::<String>::new());
+        assert_eq!(warnings("private", fs()).len(), 1);
+        assert_eq!(warnings("no", net()).len(), 1);
+    }
+
+    /// Lists accumulate, so a profile that hides paths of its own still gets
+    /// the ones the policy needs hidden.
+    #[test]
+    fn a_list_the_profile_set_is_still_added_to() {
+        let profile = explicit(&["-p", "InaccessiblePaths=/srv"]);
+        let applied = apply_with(
+            &profile,
+            &[policy(r#"dest.allow = ["api.github.com"]"#)],
+            available,
+        )
+        .unwrap();
+        assert!(has_arg(
+            &applied.systemd_args,
+            "InaccessiblePaths=-/run/systemd/resolve/io.systemd.Resolve"
+        ));
+        assert!(applied.warnings.is_empty());
+    }
+
+    /// `PrivateNetwork=yes` is not something the policy needs: it is the
+    /// policy. A profile saying `no` beside `deny all` does not open the network.
+    #[test]
+    fn deny_all_is_not_overridden_by_the_profile() {
+        let profile = explicit(&["-p", "PrivateNetwork=no"]);
+        let applied = apply_with(&profile, &[policy("")], unavailable).unwrap();
+        assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
     }
 
     /// The strictest `on_unavailable` wins: a profile that asked to fail closed
@@ -483,7 +624,7 @@ dest.allow = ["1.1.1.1"]"#,
             r#"on_unavailable = "no-network"
 dest.allow = ["2.2.2.2"]"#,
         );
-        let applied = apply_with(&[lenient, strict], unavailable).unwrap();
+        let applied = apply_with(&[], &[lenient, strict], unavailable).unwrap();
         assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
     }
 
@@ -492,6 +633,7 @@ dest.allow = ["2.2.2.2"]"#,
     #[test]
     fn degraded_policy_adds_no_support_properties() {
         let applied = apply_with(
+            &[],
             &[policy(
                 r#"on_unavailable = "warn"
 dest.allow = ["1.1.1.1", "example.com"]"#,

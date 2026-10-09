@@ -264,6 +264,12 @@ So every sandboxed command, unless its profile says otherwise, gets:
 | `InaccessiblePaths=-$XDG_RUNTIME_DIR/bus` | the session bus, which leads there too |
 | `ProtectControlGroups=yes` | moving by hand, through `cgroup.procs` |
 
+A property the profile sets itself is left alone: `systemd.ProtectControlGroups = false` stays
+`no`, with a warning that the sandbox can now be left. `private` and `strict` get no warning:
+they give the unit a cgroup namespace rooted at its own cgroup, and the kernel refuses every
+migration across that root. Lists such as `InaccessiblePaths=` are
+only ever added to, so a profile's own entries never stop these from being hidden.
+
 Plenty of programs want a session bus, for the keyring, notifications or portals. The `dbus`
 table gives them a filtered one instead:
 
@@ -516,7 +522,11 @@ narrow what is permitted, never widen it.
 Profiles with an enforced policy also get `ProtectControlGroups=yes`, which keeps the command
 from migrating out of the cgroup the programs are attached to, and one that needs the resolver
 loses systemd-resolved's varlink sockets, since a lookup made through `nss-resolve` would
-neither obey the allowlist nor teach the policy the address it resolved to.
+neither obey the allowlist nor teach the policy the address it resolved to. A profile that sets
+`ProtectControlGroups` itself keeps its own value, and is warned that the policy can then be
+walked around — unless the value is `private` or `strict`, which confine it at least as well.
+`private` still lets the command into sub-cgroups of its own: the network programs follow it
+there, the filesystem report does not, so a profile that only reports is warned about it.
 
 None of this holds if the command can leave its cgroup — by asking `systemd --user` for a
 sibling unit, for one, which has a network and no program of ours attached. Every sandbox is
@@ -679,7 +689,8 @@ opens it. Only x86-64 is implemented, since the syscall numbers are per-architec
 table guessed for another one would report the wrong calls rather than fail.
 
 Reporting is off unless asked for, and asking for it costs the command a registration with the
-daemon and a `ProtectControlGroups=yes` it would not otherwise have — the events are matched on
+daemon and a `ProtectControlGroups=yes` it would not otherwise have (unless the profile sets
+that property itself, which is then kept and warned about) — the events are matched on
 the cgroup they came from, and a command that can move itself out of that cgroup stops being
 reported. A daemon without `CAP_PERFMON` says so and the command runs anyway: not being able to
 watch something is never a reason not to run it.

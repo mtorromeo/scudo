@@ -329,7 +329,10 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         );
     }
 
-    let applied = scudo::policy::apply(&resolved.policies)?;
+    // What the profile set itself, taken before anything is added to it, so
+    // that what scudo adds is weighed against the profile alone.
+    let explicit = resolved.systemd_args.clone();
+    let applied = scudo::policy::apply(&resolved.policies, &explicit)?;
     #[cfg(feature = "tui")]
     let shim_token_present = applied.token.is_some();
     resolved.systemd_args.extend(applied.systemd_args);
@@ -364,6 +367,16 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         let properties: Vec<String> = bus
             .properties
             .iter()
+            .filter(|(key, _)| {
+                let overridden = scudo::policy::overridden(&explicit, key);
+                if overridden && !scudo::policy::still_confined(&explicit, key, false) {
+                    warnings.push(format!(
+                        "{key} is set by the profile; the command may be able to leave \
+                         its sandbox through the service manager"
+                    ));
+                }
+                !overridden
+            })
             .map(|(key, value)| format!("{key}={value}"))
             .filter(|property| !resolved.systemd_args.contains(property))
             .flat_map(|property| ["-p".to_owned(), property])
