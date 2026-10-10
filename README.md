@@ -341,6 +341,13 @@ could set, but its cgroup: the units of such sandboxes are named
 `scudo-sealed-<id>.service`, and only a process already free to run `systemd-run` or write
 to `cgroup.procs` could put itself in one.
 
+A profile that sets `systemd.ProtectControlGroups = "private"` (or `"strict"`), as rootless
+podman wants, hides that name: the unit gets a cgroup namespace of its own, in which its
+cgroup reads as `/`. So such sandboxes also have `/dev/null` mounted on
+`/run/user/<uid>/scudo/sealed`, and scudo takes a mount point there as the same sign. A file
+at that path proves nothing — only a mount does, and making one takes a mount namespace,
+which is as much freedom as writing to `cgroup.procs`.
+
 - In a sandbox that can reach the manager (`session = "allow"`, a filter that names it, or
   a bus on an abstract socket), scudo starts a sandbox of its own as before, and the inner
   profile applies.

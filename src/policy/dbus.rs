@@ -276,12 +276,15 @@ impl Proxy {
 pub fn prepare(config: &DbusConfig) -> Bus {
     let runtime_dir = runtime_dir();
     let upstream = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+    // SAFETY: getuid always succeeds and touches no memory.
+    let uid = unsafe { libc::getuid() };
     prepare_with(
         config,
         &runtime_dir,
         upstream.as_deref(),
         proxy_availability(),
         &new_id(),
+        uid,
     )
 }
 
@@ -292,6 +295,7 @@ fn prepare_with(
     upstream: Option<&str>,
     available: Result<(), String>,
     id: &str,
+    uid: u32,
 ) -> Bus {
     let mut bus = Bus::default();
     let session = config.session();
@@ -309,6 +313,14 @@ fn prepare_with(
     }
 
     let mut push = |key: &str, value: String| bus.properties.push((key.to_owned(), value));
+    if sealed {
+        // The unit's name is out of sight in a cgroup namespace of its own
+        // (`ProtectControlGroups = "private"`); a mount is visible either way.
+        push(
+            "BindReadOnlyPaths",
+            format!("-/dev/null:{}", crate::nested::marker_path(uid).display()),
+        );
+    }
     push("InaccessiblePaths", format!("-{runtime_dir}/systemd"));
     push("ProtectControlGroups", "yes".to_owned());
 
@@ -547,7 +559,7 @@ mod tests {
     }
 
     fn bus(src: &str) -> Bus {
-        prepare_with(&config(src), "/run/user/1", None, Ok(()), "7-a")
+        prepare_with(&config(src), "/run/user/1", None, Ok(()), "7-a", 1)
     }
 
     fn has(bus: &Bus, key: &str, value: &str) -> bool {
@@ -639,6 +651,7 @@ log = true"#);
             Some("unix:path=/elsewhere"),
             Ok(()),
             "7-a",
+            1,
         );
         assert_eq!(
             b.proxy.unwrap().args().first().map(String::as_str),
@@ -654,6 +667,7 @@ log = true"#);
             Some("unix:abstract=/tmp/dbus-x"),
             Ok(()),
             "7-a",
+            1,
         );
         assert!(b.warning.unwrap().contains("abstract"));
     }
@@ -666,6 +680,7 @@ log = true"#);
             None,
             Err("xdg-dbus-proxy is not installed".to_owned()),
             "7-a",
+            1,
         );
         assert!(b.proxy.is_none());
         assert!(has(&b, "InaccessiblePaths", "-/run/user/1/bus"));
@@ -722,8 +737,22 @@ talk = ["a.b", "c.d"]"#,
         );
     }
 
+    const MARKER: &str = "-/dev/null:/run/user/1/scudo/sealed";
+
+    /// Named after a sealed sandbox, and carrying the mount that says so
+    /// inside a cgroup namespace of its own.
     fn sealed(bus: &Bus) -> bool {
         bus.unit.as_deref() == Some("scudo-sealed-7-a.service")
+            && has(bus, "BindReadOnlyPaths", MARKER)
+    }
+
+    /// Neither of the two.
+    fn unmarked(bus: &Bus) -> bool {
+        bus.unit.is_none()
+            && !bus
+                .properties
+                .iter()
+                .any(|(_, value)| value.contains("scudo/sealed"))
     }
 
     #[test]
@@ -737,16 +766,14 @@ talk = ["a.b", "c.d"]"#,
             None,
             Err("missing".to_owned()),
             "7-a",
+            1,
         );
-        assert!(
-            b.unit.is_none(),
-            "a rule naming the manager is never sealed"
-        );
+        assert!(unmarked(&b), "a rule naming the manager is never sealed");
     }
 
     #[test]
     fn a_way_to_the_manager_leaves_the_sandbox_unmarked() {
-        assert!(bus(r#"session = "allow""#).unit.is_none());
+        assert!(unmarked(&bus(r#"session = "allow""#)));
         for src in [
             r#"talk = ["org.freedesktop.systemd1"]"#,
             r#"talk = ["org.freedesktop.*"]"#,
@@ -756,7 +783,7 @@ talk = ["a.b", "c.d"]"#,
             r#"call = ["org.freedesktop.systemd1=*"]"#,
             r#"broadcast = ["org.freedesktop.*=*"]"#,
         ] {
-            assert!(bus(src).unit.is_none(), "{src}");
+            assert!(unmarked(&bus(src)), "{src}");
         }
         // A lookalike is not the manager.
         assert!(sealed(&bus(r#"talk = ["org.freedesktop.systemd10"]"#)));
@@ -772,8 +799,9 @@ talk = ["a.b", "c.d"]"#,
                 Some("unix:abstract=/tmp/dbus-x"),
                 Ok(()),
                 "7-a",
+                1,
             );
-            assert!(b.unit.is_none(), "{src}");
+            assert!(unmarked(&b), "{src}");
         }
     }
 }
