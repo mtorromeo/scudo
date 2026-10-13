@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scudo — sandbox any command with systemd-run</title>
+<meta name="description" content="scudo wraps commands with systemd-run, applying resource limits, filesystem and network restrictions from per-command profiles.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 6v9c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V6z' fill='%23c2410c'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #faf8f5;
+  --surface: #ffffff;
+  --text: #1c1917;
+  --muted: #57534e;
+  --border: #e7e2dc;
+  --accent: #c2410c;
+  --accent-text: #ffffff;
+  --code-bg: #1c1917;
+  --code-text: #e7e5e4;
+  --code-comment: #a8a29e;
+  --code-key: #fdba74;
+  --code-str: #86efac;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12100e;
+    --surface: #1c1917;
+    --text: #f5f5f4;
+    --muted: #a8a29e;
+    --border: #2e2a27;
+    --accent: #fb923c;
+    --accent-text: #12100e;
+    --code-bg: #0b0a09;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, monospace; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+
+header.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; color: var(--text); text-decoration: none; }
+.brand svg { width: 26px; height: 26px; }
+nav a { color: var(--muted); text-decoration: none; margin-left: 20px; font-size: 15px; }
+nav a:hover { color: var(--text); }
+
+.hero > * { min-width: 0; }
+.steps > * { min-width: 0; }
+.hero { padding: 56px 0 40px; display: grid; gap: 40px; grid-template-columns: 1fr; }
+@media (min-width: 880px) { .hero { grid-template-columns: 1fr 1.05fr; align-items: center; } }
+.hero h1 { font-size: clamp(34px, 6vw, 52px); line-height: 1.1; margin: 0 0 18px; letter-spacing: -0.02em; }
+.hero h1 em { font-style: normal; color: var(--accent); }
+.hero p.lead { font-size: 19px; color: var(--muted); margin: 0 0 28px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.btn { display: inline-block; padding: 11px 20px; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--border); color: var(--text); background: var(--surface); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn:hover { filter: brightness(1.06); }
+
+pre.code {
+  margin: 0; padding: 20px 22px; border-radius: 12px; overflow-x: auto;
+  background: var(--code-bg); color: var(--code-text); font-size: 14px; line-height: 1.55;
+}
+pre.code .c { color: var(--code-comment); }
+pre.code .k { color: var(--code-key); }
+pre.code .s { color: var(--code-str); }
+pre.code .p { color: var(--code-comment); user-select: none; }
+
+section { padding: 40px 0; }
+section h2 { font-size: 26px; margin: 0 0 24px; letter-spacing: -0.01em; }
+.features { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.feature { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; }
+.feature h3 { margin: 0 0 8px; font-size: 17px; }
+.feature p { margin: 0; color: var(--muted); font-size: 15px; }
+.feature code { font-size: 13px; }
+
+.steps { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 880px) { .steps { grid-template-columns: 1fr 1fr; } }
+.steps h3 { font-size: 16px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+
+footer { border-top: 1px solid var(--border); padding: 28px 0 40px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 4 6v9c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V6z" fill="currentColor" style="color:var(--accent)"/></svg>
+      scudo
+    </a>
+    <nav>
+      <a href="docs/">Docs</a>
+      <a href="https://github.com/mtorromeo/scudo">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Sandbox any command,<br><em>without thinking about it.</em></h1>
+      <p class="lead">scudo wraps commands with <code>systemd-run</code>, applying resource limits,
+        filesystem, session bus and network restrictions from per-command profiles. Symlink it
+        under a command's name, or let the FUSE shim do it for every command on your
+        <code>PATH</code>.</p>
+      <div class="actions">
+        <a class="btn primary" href="docs/">Read the documentation</a>
+        <a class="btn" href="https://github.com/mtorromeo/scudo">View on GitHub</a>
+      </div>
+    </div>
+<pre class="code"><span class="c"># ~/.config/scudo/config.toml</span>
+<span class="k">[sandboxed]</span>
+filesystem.read = [<span class="s">"/"</span>]
+filesystem.write = [<span class="s">"/tmp"</span>, <span class="s">"$XDG_RUNTIME_DIR"</span>]
+filesystem.hide = [<span class="s">"$HOME"</span>]
+
+<span class="k">[cargo]</span>
+match = <span class="s">"cargo"</span>
+extend = <span class="s">"sandboxed"</span>
+filesystem.write = [<span class="s">"$HOME/.cargo"</span>, <span class="s">"$PWD"</span>]
+systemd.MemoryMax = <span class="s">"4G"</span>
+network.dest.allow = [<span class="s">"*.crates.io"</span>]
+network.ports.allow = [443]</pre>
+  </div>
+
+  <section>
+    <h2>What it does</h2>
+    <div class="features">
+      <div class="feature">
+        <h3>Profiles per command</h3>
+        <p>Match commands by exact name, glob or regex, layer profiles with <code>extend</code>,
+          and override them per directory with a <code>.scudo.toml</code> you are asked to trust first.</p>
+      </div>
+      <div class="feature">
+        <h3>Filesystem &amp; resources</h3>
+        <p>Read-only, writable and hidden paths, memory and CPU limits, capability drops: anything
+          a systemd unit can say, with no root and no container image.</p>
+      </div>
+      <div class="feature">
+        <h3>Network filtering</h3>
+        <p>Allow and deny destinations, hosts and ports with eBPF programs attached to the
+          command's cgroup. Naming a host is what lets it resolve.</p>
+      </div>
+      <div class="feature">
+        <h3>See what was blocked</h3>
+        <p>Refused connections, DNS lookups and hidden files are reported as they happen, or
+          side by side with the command in the <code>--tui</code> terminal UI.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How you run it</h2>
+    <div class="steps">
+      <div>
+        <h3>Explicitly</h3>
+<pre class="code"><span class="p">$ </span>scudo curl https://example.com
+<span class="p">$ </span>scudo --tui -- curl https://example.com/
+<span class="p">$ </span>scudo --allow-dest api.github.com cargo build</pre>
+      </div>
+      <div>
+        <h3>Transparently</h3>
+<pre class="code"><span class="p">$ </span>ln -s /usr/bin/scudo ~/.local/bin/curl
+<span class="p">$ </span>curl https://example.com  <span class="c"># sandboxed</span>
+
+<span class="c"># or for every command on PATH</span>
+<span class="p">$ </span>systemctl --user enable --now scudo-fuse</pre>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    scudo is licensed under Apache-2.0 or MIT, at your option. It requires Linux with systemd.
+    · <a href="docs/">Documentation</a> · <a href="https://github.com/mtorromeo/scudo">Source</a>
+  </footer>
+</div>
+</body>
+</html>

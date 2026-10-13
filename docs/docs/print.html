@@ -1,0 +1,1290 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>scudo</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Sandbox any command with systemd-run, using per-command profiles.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-385ba874.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-6adab0e6.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">scudo</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/mtorromeo/scudo" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="scudo"><a class="header" href="#scudo">scudo</a></h1>
+<p>scudo wraps commands with <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html"><code>systemd-run</code></a>, applying resource limits and sandboxing constraints defined in per-command profiles. It requires Linux with systemd.</p>
+<h2 id="license"><a class="header" href="#license">License</a></h2>
+<p>Licensed under either of <a href="https://github.com/mtorromeo/scudo/blob/main/LICENSE-APACHE">Apache License, Version 2.0</a> or <a href="https://github.com/mtorromeo/scudo/blob/main/LICENSE-MIT">MIT License</a>, at your option.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="usage"><a class="header" href="#usage">Usage</a></h1>
+<pre><code>Usage: scudo [OPTIONS] &lt;COMMAND&gt; [COMMAND_ARGS]...
+
+Arguments:
+  &lt;COMMAND&gt;          
+  [COMMAND_ARGS]...  
+
+Options:
+  -v, --verbose                         Enable verbose output. A shorthand for `--log-level debug`
+      --log-level &lt;LEVEL&gt;               How much to report: off, error, warn, info, debug or trace [env: SCUDO_LOG_LEVEL]
+      --log-target &lt;TARGET&gt;             Where to report it: stderr, file, syslog or journald (repeatable) [env: SCUDO_LOG_TARGET]
+      --log-file &lt;PATH&gt;                 Write the log to this file. Implies `--log-target file` [env: SCUDO_LOG_FILE]
+      --log-syslog-facility &lt;FACILITY&gt;  The syslog facility to log under. Only used by `--log-target syslog` [env: SCUDO_LOG_SYSLOG_FACILITY]
+      --confirm                         Confirm before running the command
+  -P, --property &lt;PROPERTY=VALUE&gt;       Set a property for the systemd-run command
+  -p, --profile &lt;NAME&gt;                  Apply the named profile, ignoring its match rules (repeatable, comma-separated)
+      --no-match                        Skip profile matching; apply only the profiles given with --profile
+      --allow-dest &lt;DEST&gt;               Allow a destination (address, CIDR, host or glob), even one a profile denies (repeatable, comma-separated)
+      --deny-dest &lt;DEST&gt;                Deny a destination, even one a profile allows (repeatable, comma-separated)
+      --allow-port &lt;PORT[/PROTO]&gt;       Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated)
+      --deny-port &lt;PORT[/PROTO]&gt;        Deny a port or range, optionally `/tcp` or `/udp`, even one a profile allows (repeatable, comma-separated)
+      --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
+      --tui-prefix &lt;KEY&gt;                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
+  -h, --help                            Print help
+  -V, --version                         Print version
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="symlinks-aliases-and-the-fuse-shim"><a class="header" href="#symlinks-aliases-and-the-fuse-shim">Symlinks, aliases and the FUSE shim</a></h1>
+<p><strong>Via symlink</strong> — scudo detects it is being called through a symlink and selects the matching profile automatically:</p>
+<pre><code>ln -s /usr/bin/scudo /usr/local/bin/curl
+curl https://example.com   # runs through scudo with the "curl" profile
+</code></pre>
+<p><strong>Via shell alias</strong> — a lighter alternative that requires no changes to the filesystem:</p>
+<pre><code class="language-bash">alias curl='scudo curl'
+alias wget='scudo wget'
+</code></pre>
+<p><strong>Via FUSE shim</strong> — a virtual filesystem that intercepts every command automatically, with no per-command setup:</p>
+<pre><code class="language-bash">scudo-fuse ~/.scudo/shims /usr/bin/scudo
+export PATH="$HOME/.scudo/shims:$PATH"
+</code></pre>
+<p><code>scudo-fuse</code> mounts a read-only virtual directory. Every executable found in <code>PATH</code> appears there as a symlink pointing to the target binary (<code>/usr/bin/scudo</code>). Commands not present in the real <code>PATH</code> remain invisible, so tab-completion and <code>ls</code> only show entries that actually exist. Placing the shims directory first in <code>PATH</code> causes any command with a matching profile to be dispatched through scudo automatically, with no aliases or individual symlinks needed.</p>
+<p>The shims directory itself is excluded from the PATH search used for the existence check, which prevents FUSE re-entrancy deadlocks when the shims directory is already in <code>PATH</code>.</p>
+<blockquote>
+<p><strong>Warning:</strong> When using the FUSE shim, avoid broad globs (<code>*</code>, <code>code*</code>) that match large numbers of commands in combination with <code>confirm = true</code> or <code>verbose = true</code>. Because the shim intercepts every command in your session — including those run by scripts, your shell itself, and every subprocess — an overly wide profile with interactive options will trigger a confirmation prompt or dump debug output for each of them, making the environment unusable. Reserve <code>confirm</code> and <code>verbose</code> for profiles that match a few commands by name, and validate broad profiles without those options first.</p>
+</blockquote>
+<p>By default the command search path is read from the <code>PATH</code> environment variable; pass <code>--path</code> / <code>-p</code> to override it:</p>
+<pre><code class="language-bash">scudo-fuse ~/.scudo/shims /usr/bin/scudo --path /usr/local/bin:/usr/bin:/bin
+</code></pre>
+<p><strong>Autostart with systemd (user service)</strong></p>
+<p>A ready-made unit file is included in the repository as <code>scudo-fuse.service</code>. It uses <code>RuntimeDirectory=scudo</code> so the shims directory is created automatically under <code>$XDG_RUNTIME_DIR</code> (e.g. <code>/run/user/1000/scudo/shims</code>).</p>
+<pre><code class="language-bash">cp scudo-fuse.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now scudo-fuse
+</code></pre>
+<p>Add the <code>PATH</code> export to your shell’s init file (<code>.bashrc</code>, <code>.zshrc</code>, …):</p>
+<pre><code class="language-bash">export PATH="${XDG_RUNTIME_DIR}/scudo/shims:$PATH"
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
+<p>Profiles are loaded from the following paths in order, with later files taking precedence over earlier ones:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Path</th><th>Scope</th></tr>
+</thead>
+<tbody>
+<tr><td><code>/etc/scudo/config.toml</code></td><td>system-wide</td></tr>
+<tr><td><code>$XDG_CONFIG_HOME/scudo/config.toml</code></td><td>per-user</td></tr>
+<tr><td><code>/.scudo.toml</code> … <code>$PWD/.scudo.toml</code></td><td>per-directory</td></tr>
+</tbody>
+</table>
+</div>
+<p>For the per-directory tier, scudo walks every ancestor of <code>$PWD</code> from the filesystem root down to the current directory, loading each <code>.scudo.toml</code> it finds. This lets a project directory override settings defined higher up the tree. For example, with <code>$PWD</code> set to <code>/home/user/projects/myapp</code>, the lookup order is <code>/.scudo.toml</code>, <code>/home/.scudo.toml</code>, <code>/home/user/.scudo.toml</code>, <code>/home/user/projects/.scudo.toml</code>, <code>/home/user/projects/myapp/.scudo.toml</code>.</p>
+<p>Every top-level section is a profile, with one exception: <code>[scudo]</code> holds settings that are
+about scudo itself rather than about a command — the <a href="#logging">logging</a> defaults, the
+<a href="#terminal-ui">terminal UI</a> and the <a href="#lookup-variables">lookup variables</a> every profile can
+use. It is merged key by key across the files above like everything else, and <code>scudo</code> is
+therefore not available as a profile name.</p>
+<pre><code class="language-toml">[scudo]
+log.level = "info"
+tui.prefix = "C-b"
+tui.scrollback = 20000
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="trust-confirmation-for-per-directory-configs"><a class="header" href="#trust-confirmation-for-per-directory-configs">Trust confirmation for per-directory configs</a></h1>
+<p>Because <code>.scudo.toml</code> files can be committed to a repository and may arrive from external sources, scudo requires explicit user approval before loading them. On first encounter scudo prints the full file contents and asks for confirmation. When a previously approved file changes, scudo shows a unified diff against the trusted version and asks again.</p>
+<pre><code>New config file: /home/user/projects/myapp/.scudo.toml
+
+  [curl]
+  PrivateNetwork = true
+  MemoryMax = "256M"
+
+Trust this config file? [y/N]
+</code></pre>
+<p>Approved files are recorded in <code>$XDG_CONFIG_HOME/scudo/trusted.toml</code>. Matching is done on the canonical absolute path and the exact file contents. If the user declines, scudo exits with an error rather than running the command without the intended sandboxing constraints.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="profiles"><a class="header" href="#profiles">Profiles</a></h1>
+<p>Each TOML section defines a profile. The section name identifies the profile for <code>extend</code> and <code>--profile</code>; it is not a match pattern.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>match</code></td><td>string or array of strings</td><td>Glob(s) matched against the command name; any one is enough. See <a href="#match-patterns">Match patterns</a>. Absent = the profile never matches a command on its own and is reachable only through <code>extend</code> or <code>--profile</code>.</td></tr>
+<tr><td><code>extend</code></td><td>string or array of strings</td><td>Profile(s) applied before this one, left to right; see <a href="#combining-profiles">Combining profiles</a></td></tr>
+<tr><td><code>inherit</code></td><td>bool</td><td>Whether this profile adds to a same-named profile from a lower-priority config file (<code>true</code>, the default) or replaces it (<code>false</code>); see <a href="#same-named-profiles-across-files">Same-named profiles across files</a></td></tr>
+<tr><td><code>exec</code></td><td>string</td><td>Absolute path of the binary to execute, bypassing PATH resolution</td></tr>
+<tr><td><code>verbose</code></td><td>bool</td><td>Shorthand for <code>log.level = "debug"</code>, which among other things prints the full <code>systemd-run</code> command before executing (default: <code>false</code>)</td></tr>
+<tr><td><code>confirm</code></td><td>bool</td><td>Prompt for confirmation before executing (default: <code>false</code>); silently skipped in non-interactive shells</td></tr>
+<tr><td><code>args</code></td><td>table</td><td>Maps <code>$arg_*</code> variable names to the flag(s) that fill them; see <a href="#command-argument-variables">Command argument variables</a></td></tr>
+<tr><td><code>vars</code></td><td>table</td><td>Variables naming a directory found by looking up the tree; see <a href="#lookup-variables">Lookup variables</a></td></tr>
+<tr><td><code>filesystem</code></td><td>table</td><td>Which paths the command may write, read, not see or not touch; see <a href="#filesystem-access">Filesystem access</a></td></tr>
+<tr><td><code>network</code></td><td>table</td><td>Network policy; see <a href="#network-filtering">Network filtering</a></td></tr>
+<tr><td><code>dbus</code></td><td>table</td><td>What the command gets of the session bus; see <a href="#session-bus">Session bus</a></td></tr>
+<tr><td><code>log</code></td><td>table</td><td>Level and destination for scudo’s own output; see <a href="#logging">Logging</a></td></tr>
+<tr><td><code>systemd</code></td><td>table</td><td>Unit properties passed to <code>systemd-run</code>; see below</td></tr>
+</tbody>
+</table>
+</div>
+<p>Every key of the <code>systemd</code> table is passed directly to <code>systemd-run</code> as <code>-p Key=value</code>. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (<code>true</code>/<code>false</code> → <code>yes</code>/<code>no</code>), integers, or arrays. Write it either as a sub-table header (<code>[curl.systemd]</code>) or with dotted keys (<code>systemd.MemoryMax = "256M"</code>).</p>
+<p>The command starts in the current directory, unless <code>WorkingDirectory</code> is set (in the table or with <code>-P</code>): then <code>systemd-run</code> is not given <code>-d</code> and the property decides.</p>
+<p>Any other key is a typo and scudo says so instead of ignoring it.</p>
+<h2 id="example"><a class="header" href="#example">Example</a></h2>
+<pre><code class="language-toml"># The project a command runs in: the closest directory holding a `.git`
+[scudo]
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+
+# Base profile — no `match`, so it is never matched directly, only used via extend
+[sandboxed]
+filesystem.read = ["/"]
+filesystem.write = ["/tmp", "$XDG_RUNTIME_DIR"]
+systemd.PrivateTmp = true
+
+[sandboxed-home]
+extend = "sandboxed"
+filesystem.hide = ["$HOME"]
+filesystem.write = ["$HOME/.cache"]
+
+# curl: extends the base sandbox
+[curl]
+match = "curl"
+extend = "sandboxed"
+systemd.MemoryMax = "256M"
+
+# claude: works on the project it is started in, plus any --add-dir
+[claude]
+match = "claude"
+extend = "sandboxed-home"
+args.add_dir = { flags = "--add-dir", greedy = true }
+filesystem.read = ["$HOME/.gitconfig", "$arg_add_dir"]
+filesystem.write = ["$PROJECT_DIR", "$HOME/.claude", "$HOME/.claude.json"]
+network.dest.allow = ["*.anthropic.com"]
+
+# code: VS Code and its variants
+[code]
+match = ["code", "code-oss", "codium", "vscode"]
+extend = "sandboxed-home"
+filesystem.write = [
+  "/proc",
+  "/dev/shm",
+  "/dev/dri",
+  "$HOME/.vscode",
+  "$HOME/.vscode-oss",
+  "$HOME/.config/Code",
+  "$HOME/.config/Code - OSS",
+  "$PROJECT_DIR",
+]
+# The launcher leaves the editor running and exits: keep the unit until it is gone.
+systemd.ExitType = "cgroup"
+dbus.talk = [
+  "org.freedesktop.secrets",
+  "org.freedesktop.Notifications",
+  "org.freedesktop.portal.*",
+]
+dbus.own = ["com.visualstudio.code.*"]
+
+# npm: the npm cache and config, and the project
+[npm]
+match = "npm"
+extend = "sandboxed-home"
+filesystem.write = ["$HOME/.npm", "$PROJECT_DIR"]
+filesystem.read = ["$HOME/.npmrc"]
+
+[pnpm]
+match = "pnpm"
+extend = "npm"
+filesystem.write = ["$HOME/.pnpm-store"]
+</code></pre>
+<p>Every list adds to the ones it inherits: <code>pnpm</code> can write <code>~/.npm</code>, the project and <code>~/.pnpm-store</code>, and read everything <code>sandboxed</code> lets it read.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="matching-and-combining-profiles"><a class="header" href="#matching-and-combining-profiles">Matching and combining profiles</a></h1>
+<h2 id="match-patterns"><a class="header" href="#match-patterns">Match patterns</a></h2>
+<p><code>match</code> holds one glob, or an array of them, compared against the name of the command — its last path component, so <code>/usr/bin/curl</code> is <code>curl</code>. Any one of them matching is enough.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Form</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td>absent</td><td>never match — base profile usable only via <code>extend</code> or <code>--profile</code></td></tr>
+<tr><td><code>match = "curl"</code></td><td><code>curl</code></td></tr>
+<tr><td><code>match = ["zed", "zeditor"]</code></td><td>either <code>zed</code> or <code>zeditor</code></td></tr>
+<tr><td><code>match = "code*"</code></td><td><code>code</code>, <code>code-oss</code>, <code>code-insiders</code>, …</td></tr>
+<tr><td><code>match = "*"</code></td><td>every command: a catch-all default</td></tr>
+</tbody>
+</table>
+</div>
+<p>Every profile that matches is applied, in the order the profiles were written (see <a href="#combining-profiles">Combining profiles</a>).</p>
+<h2 id="selecting-profiles-explicitly"><a class="header" href="#selecting-profiles-explicitly">Selecting profiles explicitly</a></h2>
+<p><code>--profile &lt;NAME&gt;</code> applies a profile by name, whatever its <code>match</code> field says — including base profiles that declare no <code>match</code> at all. It is repeatable and also accepts a comma-separated list. Named profiles are applied <em>after</em> the ones that matched, so they take precedence; among themselves they are applied in the order given on the command line, with the last one winning.</p>
+<p><code>--no-match</code> skips pattern matching altogether. Combined with <code>--profile</code> it means “use exactly these profiles and nothing else”; on its own it runs the command with no profile at all.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Invocation</th><th>Profiles applied</th></tr>
+</thead>
+<tbody>
+<tr><td><code>scudo --profile netblock -- curl https://example.com</code></td><td>everything matching <code>curl</code>, then <code>netblock</code></td></tr>
+<tr><td><code>scudo --profile a,b -- curl https://example.com</code></td><td>matches for <code>curl</code>, then <code>a</code>, then <code>b</code></td></tr>
+<tr><td><code>scudo --profile claude,npm,cargo -- zsh</code></td><td>a shell with everything those three profiles allow, and their restrictions</td></tr>
+<tr><td><code>scudo --no-match --profile netblock -- curl https://example.com</code></td><td>only <code>netblock</code></td></tr>
+<tr><td><code>scudo --no-match -- curl https://example.com</code></td><td>none — the command is executed directly, without <code>systemd-run</code></td></tr>
+<tr><td><code>scudo --no-match -p MemoryMax=1G -- curl https://example.com</code></td><td>none, but <code>systemd-run</code> still runs with the explicit property</td></tr>
+</tbody>
+</table>
+</div>
+<p>A profile that both matches and is named explicitly is applied only once, in its explicit position. An unknown profile name is a fatal error: scudo exits with status 1 without running the command, rather than running it with less sandboxing than was asked for.</p>
+<pre><code>$ scudo --profile snadboxed -- curl https://example.com
+scudo: profile 'snadboxed' not found
+</code></pre>
+<p>Both flags belong to scudo itself, so they are only available through the explicit <code>scudo &lt;command&gt;</code> form. When scudo is invoked through a symlink or the FUSE shim, every argument belongs to the wrapped command.</p>
+<h2 id="combining-profiles"><a class="header" href="#combining-profiles">Combining profiles</a></h2>
+<p>Profiles come together in four ways — <code>extend</code>, matching the same command, <code>--profile</code>, and sharing a name across config files — and all four combine them the same way:</p>
+<ul>
+<li><strong>Lists accumulate.</strong> Every array — in <code>match</code>, <code>extend</code>, <code>filesystem</code>, <code>network</code>, <code>dbus</code> and <code>systemd</code> — adds the entries it has to the ones already there, skipping duplicates. No profile can take away what another one added; for paths, see also <a href="#filesystem-access">Filesystem access</a>.</li>
+<li><strong>Everything else is taken from the profile applied last</strong>, when it says anything: <code>exec</code>, <code>confirm</code>, <code>log.level</code>, <code>network.default</code>, <code>dbus.session</code>, a scalar systemd property such as <code>MemoryMax</code>.</li>
+<li><strong><code>args</code> declarations are merged by name</strong>, the last one applied winning.</li>
+</ul>
+<p>The order profiles are applied in:</p>
+<ol>
+<li>every profile that matches the command, in the order they were written: config files from the lowest priority to the highest, then by position in the file;</li>
+<li>the profiles named with <code>--profile</code>, in the order given.</li>
+</ol>
+<p>Each one is preceded by the profiles it <code>extend</code>s, left to right, recursively. A profile is applied once even when several others extend it, so a base shared by two profiles does not undo what the first one added on top of it.</p>
+<pre><code class="language-toml">[base]
+systemd.BindPaths = ["/base"]
+
+[cargo]
+extend = "base"
+systemd.BindPaths = ["$HOME/.cargo"]
+
+[composer]
+extend = "base"
+systemd.BindPaths = ["$HOME/.composer"]
+
+[dev]
+match = "dev"
+extend = ["cargo", "composer"]
+systemd.BindPaths = ["$PWD"]         # → /base, ~/.cargo, ~/.composer, $PWD
+</code></pre>
+<h2 id="same-named-profiles-across-files"><a class="header" href="#same-named-profiles-across-files">Same-named profiles across files</a></h2>
+<p>A profile defined again in a higher-priority config file <strong>adds to</strong> the one below it, by the rules above: its lists extend the inherited ones and its scalars win. A project’s <code>.scudo.toml</code> can therefore give the system-wide <code>cargo</code> profile one more directory without restating it:</p>
+<pre><code class="language-toml"># /home/user/projects/myapp/.scudo.toml
+[cargo]
+filesystem.write = ["$SCUDO_CONFIG_DIR/target"]
+</code></pre>
+<p>To replace the lower-priority profile instead, set <code>inherit = false</code>:</p>
+<pre><code class="language-toml">[cargo]
+inherit = false
+match = "cargo"
+filesystem.read = ["/"]
+filesystem.write = ["$PROJECT_DIR"]
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="variables"><a class="header" href="#variables">Variables</a></h1>
+<h2 id="environment-variables"><a class="header" href="#environment-variables">Environment variables</a></h2>
+<p>String values (including array elements) support <code>$VAR</code> and <code>${VAR}</code> expansion using the environment of the calling process. A reference to an undefined variable is an error.</p>
+<h3 id="scudo_config_dir"><a class="header" href="#scudo_config_dir"><code>$SCUDO_CONFIG_DIR</code></a></h3>
+<p>Inside a profile, <code>$SCUDO_CONFIG_DIR</code> (also <code>${SCUDO_CONFIG_DIR}</code>) expands to the absolute path of the directory containing the config file that profile was defined in. This is resolved per file, so a profile in <code>/etc/scudo/config.toml</code> sees <code>/etc/scudo</code>, while one in a project’s <code>.scudo.toml</code> sees that project directory. It is handy for referencing files that live next to the config:</p>
+<pre><code class="language-toml">[myapp]
+exec = "$SCUDO_CONFIG_DIR/wrapper.sh"
+systemd.BindReadOnlyPaths = ["$SCUDO_CONFIG_DIR/allowlist.txt"]
+</code></pre>
+<p>The value is substituted when the config is loaded, before <code>$arg_*</code> and other <code>$VAR</code> expansion. When a profile inherits values via <code>extend</code> or from a same-named profile, each inherited value keeps the config dir of the file it was written in.</p>
+<h3 id="lookup-variables"><a class="header" href="#lookup-variables">Lookup variables</a></h3>
+<p>The <code>vars</code> table defines variables that name a directory, found by looking for a file or directory from the current directory up to <code>/</code>: the first directory holding it is the value. A command run anywhere inside a repository can thus be given the whole repository, or the package it is in:</p>
+<pre><code class="language-toml">[scudo]
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+
+[npm]
+match = "npm"
+vars.PACKAGE_DIR = { lookup = "package.json" }
+filesystem.write = ["$PACKAGE_DIR/node_modules", "$PROJECT_DIR/.git"]
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>lookup</code></td><td>string or array of strings</td><td>Name(s), relative to each directory, to look for; a file and a directory count alike (a worktree has a <code>.git</code> file). With several, the closest directory holding any of them wins.</td></tr>
+<tr><td><code>fallback</code></td><td><code>"skip"</code>, <code>"cwd"</code> or <code>"error"</code></td><td>What the variable is when no directory holds any of them (default <code>"skip"</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<ul>
+<li><code>skip</code>: the value that references the variable is dropped as if it was never written — a list loses that entry, a property or a key is left out. <code>"$PACKAGE_DIR/node_modules"</code> outside a package is gone, not <code>/node_modules</code>.</li>
+<li><code>cwd</code>: the current directory.</li>
+<li><code>error</code>: the command does not run. Only a variable some value actually references is looked up, so an unused one never fails.</li>
+</ul>
+<p>Variables in <code>[scudo]</code> are available to every profile; a profile’s own <code>vars</code> add to them and win over a same-named one, and among profiles combined together the one applied last wins, as for <code>args</code>. A lookup variable takes precedence over an environment variable of the same name. Names follow the environment variable rules, and cannot start with <code>arg_</code> or be <code>SCUDO_CONFIG_DIR</code>.</p>
+<h2 id="command-argument-variables"><a class="header" href="#command-argument-variables">Command argument variables</a></h2>
+<p>Profile values can also reference the arguments of the command being run. These variables all start with <code>$arg_</code> and are silently empty if the corresponding argument was not passed (unlike environment variables, which are an error when undefined). Empty strings produced by absent argument variables are filtered out from arrays.</p>
+<h3 id="flag-variables"><a class="header" href="#flag-variables">Flag variables</a></h3>
+<p>The <code>args</code> table names a variable and the flag(s) that fill it:</p>
+<pre><code class="language-toml">[myagent]
+match = "myagent"
+args.add_dir = "--add-dir"                     # one flag
+args.target = ["-t", "--target-directory"]     # several spellings of it
+filesystem.read = ["$arg_add_dir"]
+filesystem.write = ["$arg_target"]
+</code></pre>
+<p>The value can be passed as <code>--add-dir value</code> or <code>--add-dir=value</code>, and every occurrence adds to the same variable: <code>myagent --add-dir a --add-dir b --add-dir=c</code> gives <code>$arg_add_dir</code> three values, which in a list become three entries.</p>
+<p>For a flag that takes every argument after it, up to the next one starting with <code>-</code>, use the table form with <code>greedy = true</code>:</p>
+<pre><code class="language-toml">[claude]
+match = "claude"
+args.add_dir = { flags = "--add-dir", greedy = true }
+filesystem.read = ["$arg_add_dir"]
+# claude --add-dir a b c  →  $arg_add_dir = ["a", "b", "c"]
+</code></pre>
+<p>A greedy flag cannot tell a value from an argument that happens to follow it: in <code>claude --add-dir a "fix the bug"</code> the prompt is taken as a directory too. Paths that do not exist are skipped, so the harm is limited to that.</p>
+<h3 id="positional-variables"><a class="header" href="#positional-variables">Positional variables</a></h3>
+<p>Arguments that are neither flags nor the value of a declared flag are positional. Flags not declared in <code>args</code> never take a value, so declare every flag whose value could otherwise be mistaken for a positional:</p>
+<pre><code class="language-toml">[install]
+match = "install"
+args.target = ["-t", "--target-directory"]
+filesystem.write = ["$arg_1"]   # first positional argument
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Value</th></tr>
+</thead>
+<tbody>
+<tr><td><code>$arg_1</code></td><td>first positional argument</td></tr>
+<tr><td><code>$arg_2</code></td><td>second positional argument</td></tr>
+<tr><td><code>$arg_N</code></td><td>Nth positional argument</td></tr>
+<tr><td><code>$arg_rest</code></td><td>all positionals space-joined (like <code>$*</code>)</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>--</code> terminates option parsing; all subsequent arguments are treated as positional.</p>
+<h3 id="array-expansion-in-string-templates"><a class="header" href="#array-expansion-in-string-templates">Array expansion in string templates</a></h3>
+<p>When a named flag variable holds multiple values and appears inside a string template, the template is replicated once per value:</p>
+<pre><code class="language-toml">[rsync]
+args.include = ["-I", "--include"]
+systemd.BindReadOnlyPaths = ["/prefix/$arg_include"]
+# -I a -I b  →  ["/prefix/a", "/prefix/b"]
+</code></pre>
+<p>Using more than one multi-value argument variable inside the same string template is an error; use separate array entries instead.</p>
+<h2 id="default-values"><a class="header" href="#default-values">Default values</a></h2>
+<p><code>${NAME:-DEFAULT}</code> stands for <code>DEFAULT</code> when <code>NAME</code> is unset or empty, as in the shell. It works
+with every kind of variable, so a profile can give an optional argument a sensible fallback:</p>
+<pre><code class="language-toml">[ls]
+match = "ls"
+filesystem.read = ["${arg_1:-$PWD}"]                          # ls → $PWD, ls dir → dir
+
+[build]
+match = "build"
+args.out = "--out"
+filesystem.write = ["${arg_out:-${PROJECT_DIR:-$PWD}/out}"]   # the argument, else the project, else the current directory
+</code></pre>
+<p><code>DEFAULT</code> is itself a template — literal text, <code>$VAR</code>, or another <code>${…:-…}</code> to chain more
+fallbacks — and is expanded only when it is used: a <code>$VAR</code> that is undefined in an unused default
+is not an error. What counts as unset:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Unset when</th></tr>
+</thead>
+<tbody>
+<tr><td><code>$arg_*</code></td><td>the argument was not passed (or only with empty values)</td></tr>
+<tr><td><code>$VAR</code> from the environment</td><td>it is not defined, or is empty</td></tr>
+<tr><td><a href="#lookup-variables">lookup variable</a></td><td>nothing is found; its own <code>fallback</code> is then not consulted</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>${arg_1:-}</code> is the same as <code>$arg_1</code>.</p>
+<h2 id="path-canonicalization"><a class="header" href="#path-canonicalization">Path canonicalization</a></h2>
+<p>Entries of the <code>filesystem</code> lists are always made absolute. When a variable (<code>$arg_*</code> or <code>$VAR</code>) is used inside a systemd property that expects filesystem paths (such as <code>BindPaths</code>, <code>ReadWritePaths</code>, <code>WorkingDirectory</code>, etc.), its expanded value is automatically made absolute relative to <code>$PWD</code>. This handles the common case where the user passes a relative path on the command line:</p>
+<pre><code class="language-toml">[rsync]
+args.include = ["-I", "--include"]
+systemd.BindReadOnlyPaths = ["$arg_include"]
+# rsync -I ./src  →  BindReadOnlyPaths=/abs/cwd/src
+</code></pre>
+<p>Only the <strong>expanded variable value</strong> is canonicalized — literal text in the template is left untouched. This means systemd special prefix characters (<code>-</code>, <code>+</code>, <code>!</code>, <code>!!</code>) can be used freely in the literal part:</p>
+<pre><code class="language-toml">[app]
+systemd.ReadWritePaths = ["-$arg_1"]
+# ./relative  →  -/abs/cwd/relative   ('-' is literal, path is made absolute)
+</code></pre>
+<p>A <a href="#default-values">default value</a> taking a variable’s place counts as the variable’s value, literal text included: <code>${arg_1:-out}</code> becomes <code>/abs/cwd/out</code> when no argument is given.</p>
+<p>Absolute paths are passed through unchanged. Canonicalization is purely lexical (it does not require the path to exist).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="filesystem-access"><a class="header" href="#filesystem-access">Filesystem access</a></h1>
+<p>The <code>filesystem</code> table says what the command may do with a path, in four lists:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>List</th><th>Meaning</th><th>Becomes</th></tr>
+</thead>
+<tbody>
+<tr><td><code>write</code></td><td>read and write</td><td><code>ReadWritePaths=</code>, or <code>BindPaths=</code> inside a hidden directory</td></tr>
+<tr><td><code>read</code></td><td>read only</td><td><code>ReadOnlyPaths=</code>, or <code>BindReadOnlyPaths=</code> inside a hidden directory</td></tr>
+<tr><td><code>hide</code></td><td>replaced by an empty, throwaway directory</td><td><code>TemporaryFileSystem=</code></td></tr>
+<tr><td><code>deny</code></td><td>no access at all</td><td><code>InaccessiblePaths=</code></td></tr>
+</tbody>
+</table>
+</div>
+<pre><code class="language-toml">[claude.filesystem]
+hide = ["$HOME"]
+deny = ["/etc/shadow"]
+read = ["/", "$HOME/.gitconfig"]
+write = ["$PROJECT_DIR", "$HOME/.claude"]
+</code></pre>
+<p>Writing the lists rather than the systemd properties is what lets profiles written without knowing about each other be combined:</p>
+<ul>
+<li><strong>A path named more than once gets the most permissive access</strong> among them: <code>write</code> beats <code>read</code>, which beats <code>hide</code>, which beats <code>deny</code>. Which profile came first does not matter, so a profile that only reads a directory cannot take writing away from one that writes it.</li>
+<li><strong>What is granted inside a hidden directory is mounted back in.</strong> A path under a <code>TemporaryFileSystem=</code> is not there to be made read-only, so <code>read</code> and <code>write</code> turn into bind mounts there — even when the <code>hide</code> comes from a different profile than the grant.</li>
+</ul>
+<p>Every entry is made absolute against the current directory, and an entry that expands to nothing (an absent <code>$arg_*</code>) is dropped. Paths that do not exist are skipped rather than failing the command (they are passed with systemd’s <code>-</code> prefix): a tool’s config directory often does not exist yet.</p>
+<p>Properties written by hand in the <code>systemd</code> table are passed as they are, next to the ones generated here.</p>
+<h2 id="seeing-what-the-filesystem-restrictions-hid"><a class="header" href="#seeing-what-the-filesystem-restrictions-hid">Seeing what the filesystem restrictions hid</a></h2>
+<p><code>ReadOnlyPaths=</code>, <code>TemporaryFileSystem=</code>, <code>InaccessiblePaths=</code>, <code>ProtectHome=</code> and <code>PrivateTmp=</code>
+are applied by systemd, by rearranging the unit’s mount namespace. scudo has no part in the
+verdict and no hook that sees it: the command is handed an <code>ENOENT</code>, <code>EACCES</code> or <code>EROFS</code> with
+no way to say which path it was about, and a profile that is one <code>BindPaths=</code> short looks
+exactly like a program that is broken.</p>
+<p><code>filesystem.log = "denied"</code> on the profile — or <code>--verbose</code>, or <code>--tui</code> — asks <code>scudo-bpfd</code> to
+watch the syscalls that name a path and report the ones that come back with an error a sandbox
+could have caused:</p>
+<pre><code class="language-console">$ scudo --verbose --profile sandboxed-home -- bash -lc 'git status'
+scudo: warning: blocked open of /home/me/.bashrc (hidden by the sandbox)
+scudo: warning: blocked open of /home/me/.gitconfig (hidden by the sandbox)
+scudo: warning: blocked open of /etc/shadow (permission denied)
+</code></pre>
+<pre><code class="language-toml">[code]
+match = ["code"]
+filesystem.log = "denied"          # off (the default) | denied
+filesystem.hide = ["$HOME"]
+filesystem.write = ["$HOME/.config/Code"]
+</code></pre>
+<p><strong>Not every <code>ENOENT</code> is a refusal, and telling them apart is the point.</strong> A shell walking
+<code>$PATH</code>, a linker searching for a library, <code>node</code> resolving a module — all of them ask for
+dozens of files that were never anywhere, and the kernel answers them exactly as it answers a
+file the sandbox hid. So the daemon, which lives outside the unit’s mount namespace, simply
+goes and looks:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>What happened</th><th>How it reads</th></tr>
+</thead>
+<tbody>
+<tr><td>The path is there outside the sandbox</td><td><code>blocked open of … (hidden by the sandbox)</code>, a <code>warn</code></td></tr>
+<tr><td><code>EACCES</code>/<code>EPERM</code>, whatever is outside</td><td><code>blocked open of … (permission denied)</code>, a <code>warn</code></td></tr>
+<tr><td><code>EROFS</code>, whatever is outside</td><td><code>blocked mkdir of … (read-only)</code>, a <code>warn</code></td></tr>
+<tr><td>It was not there outside either</td><td><code>open of … failed: not there outside the sandbox either</code>, a <code>debug</code></td></tr>
+<tr><td>Could not be established</td><td><code>… cannot tell whether it exists outside</code>, an <code>info</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Nothing is thrown away — the level is what keeps a linker’s search out of an ordinary run. Raise
+the level to <code>debug</code> to see all of it, or in the <a href="#terminal-ui">terminal UI</a> press <code>^A m</code>, which
+shows the missing paths greyed beside the ones that were really taken away. On journald the
+path, operation, error and outside verdict are fields of their own:</p>
+<pre><code class="language-console">$ journalctl -t scudo F_OUTSIDE=present -o json | jq -r .F_PATH
+</code></pre>
+<p>Only calls that name a path are watched: <code>open</code>, <code>openat</code>, <code>openat2</code>, <code>creat</code>, <code>stat</code>, <code>lstat</code>,
+<code>newfstatat</code>, <code>statx</code>, <code>access</code>, <code>faccessat</code>, <code>faccessat2</code>, <code>readlink</code>, <code>readlinkat</code>, <code>execve</code>,
+<code>execveat</code>, <code>unlink</code>, <code>unlinkat</code>, <code>rmdir</code>, <code>mkdir</code>, <code>mkdirat</code>, <code>rename</code>, <code>renameat</code>,
+<code>renameat2</code>, <code>truncate</code> and <code>chdir</code>. One working on a file descriptor has already got past the
+sandbox: the open that produced the descriptor is the call that would have been refused.</p>
+<p>Unlike the network programs, which are loaded once per sandbox and attached to its cgroup,
+these sit on the machine’s <code>sys_enter</code> and <code>sys_exit</code> tracepoints, so one object is loaded for
+the whole daemon — on the first sandbox that asks, and unloaded with the last. The cgroups
+being watched live in a map the programs consult first, which is also what keeps a path
+belonging to any other process on the machine from ever leaving the kernel.</p>
+<p>They are <em>raw</em> tracepoints, attached by name through <code>bpf(2)</code>. A classic tracepoint per syscall
+would be the obvious shape, but attaching one means reading its id out of
+<code>&lt;tracefs&gt;/events/…/id</code>, and tracefs is <code>drwx------ root</code> on an ordinary system — no capability
+opens it. Only x86-64 is implemented, since the syscall numbers are per-architecture and a
+table guessed for another one would report the wrong calls rather than fail.</p>
+<p>Reporting is off unless asked for, and asking for it costs the command a registration with the
+daemon and a <code>ProtectControlGroups=yes</code> it would not otherwise have (unless the profile sets
+that property itself, which is then kept and warned about) — the events are matched on
+the cgroup they came from, and a command that can move itself out of that cgroup stops being
+reported. A daemon without <code>CAP_PERFMON</code> says so and the command runs anyway: not being able to
+watch something is never a reason not to run it.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="session-bus"><a class="header" href="#session-bus">Session bus</a></h1>
+<p>A command that can reach <code>systemd --user</code> can leave its sandbox: it only has to ask for a
+process to be started in a sibling unit, or for its own to be moved into one. Chromium and
+Electron do the latter on their own, to give themselves an <code>app-*.scope</code>. Out of the
+sandbox’s cgroup nothing bound to it applies any more — resource limits, IP filters, the
+<a href="#network-filtering">network policy</a> — and the unit around it ends while the command is still
+running, taking its <code>PrivateTmp=</code> with it.</p>
+<p>So every sandboxed command, unless its profile says otherwise, gets:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Property</th><th>Why</th></tr>
+</thead>
+<tbody>
+<tr><td><code>InaccessiblePaths=-$XDG_RUNTIME_DIR/systemd</code></td><td>the service manager’s private socket</td></tr>
+<tr><td><code>InaccessiblePaths=-$XDG_RUNTIME_DIR/bus</code></td><td>the session bus, which leads there too</td></tr>
+<tr><td><code>ProtectControlGroups=yes</code></td><td>moving by hand, through <code>cgroup.procs</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>A property the profile sets itself is left alone: <code>systemd.ProtectControlGroups = false</code> stays
+<code>no</code>, with a warning that the sandbox can now be left. <code>private</code> and <code>strict</code> get no warning:
+they give the unit a cgroup namespace rooted at its own cgroup, and the kernel refuses every
+migration across that root. Lists such as <code>InaccessiblePaths=</code> are
+only ever added to, so a profile’s own entries never stop these from being hidden.</p>
+<p>Plenty of programs want a session bus, for the keyring, notifications or portals. The <code>dbus</code>
+table gives them a filtered one instead:</p>
+<pre><code class="language-toml">[code.dbus]
+session = "filter"    # "deny" (default), "filter" or "allow"
+talk = ["org.freedesktop.secrets", "org.freedesktop.Notifications", "org.freedesktop.portal.*"]
+see = []              # names that may be seen, but not called
+own = ["com.visualstudio.code.*"]
+call = []             # "NAME=RULE": calls allowed on a name not talked to
+broadcast = []        # "NAME=RULE": broadcasts received from a name not talked to
+log = false           # log every message, to the proxy unit's journal
+</code></pre>
+<p>The lists are an allow-list: whatever they do not name, the command cannot see on the bus, so
+it cannot reach <code>org.freedesktop.systemd1</code> unless it is named. Naming anything implies
+<code>session = "filter"</code>. Names may end in <code>.*</code>, which also matches the name itself; that is the
+only wildcard there is. The options and their rules are
+<a href="https://man.archlinux.org/man/xdg-dbus-proxy.1"><code>xdg-dbus-proxy</code>’s</a>, which does the
+filtering. <code>session = "allow"</code> takes none of the three properties above away and leaves the
+bus as it is, and with it the way out.</p>
+<p>A name let through is let through entirely, whatever it can do on the command’s behalf. Some
+services start processes outside the sandbox when asked, <code>org.freedesktop.portal.*</code> included
+(opening a link launches the browser, for instance), so name what the command needs and
+nothing more.</p>
+<h2 id="how-the-filter-works"><a class="header" href="#how-the-filter-works">How the filter works</a></h2>
+<p>The proxy runs as a unit of its own, <code>scudo-dbus@&lt;id&gt;.service</code>, so that it can reach the real
+bus that the sandbox cannot. The sandbox <code>Wants=</code> it and starts <code>After=</code> it is listening; its
+socket is bind-mounted over <code>$XDG_RUNTIME_DIR/bus</code>, where every client already looks, and the
+directory holding the other sandboxes’ proxies is made inaccessible. Nothing needs the proxy
+once the sandbox is gone (<code>StopWhenUnneeded=yes</code>), so systemd stops it. A proxy that fails to
+start fails the sandbox as well: the bind mount has nothing to mount.</p>
+<p>It needs <code>xdg-dbus-proxy</code>, and the <code>scudo-dbus@.service</code> template installed as a user unit:</p>
+<pre><code class="language-bash">sudo install -Dm644 scudo-dbus@.service -t /usr/lib/systemd/user
+systemctl --user daemon-reload
+</code></pre>
+<p>Without either, a profile that asked for a filter gets no bus at all, and a warning.</p>
+<p>A bus listening on an abstract socket (<code>unix:abstract=</code>) is not a file, and no mount can hide
+it: scudo warns when it finds one, and only <code>PrivateNetwork=yes</code> keeps the command from it.</p>
+<h2 id="programs-that-detach"><a class="header" href="#programs-that-detach">Programs that detach</a></h2>
+<p>Some launchers, VS Code’s included, start the real program in the background and exit. The
+unit ends with its main process, and systemd kills what is left in it. Now that the program
+cannot move itself to a unit of its own, add <code>systemd.ExitType = "cgroup"</code>: the unit then
+lasts until the last process in it is gone, and <code>scudo</code> waits that long too.</p>
+<h2 id="nested-calls"><a class="header" href="#nested-calls">Nested calls</a></h2>
+<p>A sandboxed command that runs another one scudo wraps — <code>make</code> running <code>cargo</code> through a
+shim, say — starts scudo again, inside the sandbox. When that sandbox cannot reach
+<code>systemd --user</code> (the bus denied, or filtered without anything that lets
+<code>org.freedesktop.systemd1</code> through), no new sandbox can be started from it, so the inner
+scudo runs the command directly instead, without reading any config: it stays in the
+sandbox it was started from, under that sandbox’s restrictions and not the inner profile’s.</p>
+<p>This grants nothing the command did not already have: the outer sandbox could have run the
+binary itself. What matters is that a scudo running <em>outside</em> any sandbox can never be made
+to do the same, so the sign it looks for is not something the environment or a config file
+could set, but its cgroup: the units of such sandboxes are named
+<code>scudo-sealed-&lt;id&gt;.service</code>, and only a process already free to run <code>systemd-run</code> or write
+to <code>cgroup.procs</code> could put itself in one.</p>
+<p>A profile that sets <code>systemd.ProtectControlGroups = "private"</code> (or <code>"strict"</code>), as rootless
+podman wants, hides that name: the unit gets a cgroup namespace of its own, in which its
+cgroup reads as <code>/</code>. So such sandboxes also have <code>/dev/null</code> mounted on
+<code>/run/user/&lt;uid&gt;/scudo/sealed</code>, and scudo takes a mount point there as the same sign. A file
+at that path proves nothing — only a mount does, and making one takes a mount namespace,
+which is as much freedom as writing to <code>cgroup.procs</code>.</p>
+<ul>
+<li>In a sandbox that can reach the manager (<code>session = "allow"</code>, a filter that names it, or
+a bus on an abstract socket), scudo starts a sandbox of its own as before, and the inner
+profile applies.</li>
+<li>Restrictions asked for on the command line (<code>--profile</code>, <code>-P</code>, <code>--allow-dest</code>,
+<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>) and <code>--tui</code> cannot be had
+inside, so they fail the command rather than being dropped. <code>--confirm</code> still asks.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="network-filtering"><a class="header" href="#network-filtering">Network filtering</a></h1>
+<p><code>PrivateNetwork = true</code> is all-or-nothing. The <code>[profile.network]</code> table asks for something
+finer: deny everything by default and allow only what the command actually needs.</p>
+<pre><code class="language-toml">[cargo]
+match = "cargo"
+extend = "sandboxed-home"
+
+[cargo.network]
+default = "deny"            # "deny" (default) or "allow"
+inbound = "deny"            # "deny" (default) or "allow"
+on_unavailable = "fail"     # "fail" (default), "no-network", or "warn"
+log = "off"                 # "off" (default) or "denied"; "denied" is watchable
+                            # even when the policy denies everything
+
+dest = { allow = ["10.0.0.0/8", "*.crates.io"], deny = ["10.1.2.0/24"] }
+ports = { allow = [443, "53/udp"], deny = [22] }
+</code></pre>
+<h2 id="the-two-dimensions"><a class="header" href="#the-two-dimensions">The two dimensions</a></h2>
+<p><strong><code>dest</code> and <code>ports</code> are independent sources of permission, not filters that narrow one
+another.</strong> A packet is judged by:</p>
+<pre><code class="language-text">if the destination is denied  or the port is denied   -&gt;  deny
+if the destination is allowed or the port is allowed  -&gt;  allow
+otherwise                                             -&gt;  the default
+</code></pre>
+<p>Three things follow, and the second one is the one to read twice:</p>
+<ul>
+<li><strong>An empty <code>allow</code> list grants nothing, not everything.</strong> A dimension with nothing in it
+abstains and the other one decides.</li>
+<li><strong><code>ports.allow</code> opens those ports at <em>every</em> address</strong>, including ones <code>dest</code> never mentions.
+It widens; it does not narrow. There is no way to say “port 443, but only on this host” —
+that is the price of dropping the per-rule port, and it is what lets the whole policy be two
+map lookups instead of a scan.</li>
+<li><strong><code>ports.deny</code> is what narrows</strong>, and it revokes everywhere — including at an address
+<code>dest.allow</code> names.</li>
+</ul>
+<p>Traffic with no port of its own — ICMP, raw sockets — needs no special case: the port dimension
+abstains on both sides and the destination decides alone.</p>
+<h2 id="destinations"><a class="header" href="#destinations">Destinations</a></h2>
+<p>A <code>dest</code> entry is a bare string:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Form</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td>CIDR</td><td><code>"10.0.0.0/8"</code>, <code>"2606:4700::/32"</code></td></tr>
+<tr><td>Address</td><td><code>"1.1.1.1"</code>, <code>"2606:4700::1"</code></td></tr>
+<tr><td>Host or glob</td><td><code>"api.github.com"</code>, <code>"*.crates.io"</code></td></tr>
+<tr><td>Symbolic name</td><td><code>"any"</code>, <code>"localhost"</code>, <code>"link-local"</code>, <code>"multicast"</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>IPv6 addresses are written plainly — there is no port to tell them apart from, so they need no
+brackets. Hosts accept <code>*</code> and <code>?</code> globs, and <code>*</code> crosses dots: <code>*.crates.io</code> covers
+<code>a.b.crates.io</code> but not the bare <code>crates.io</code>. A symbolic name is systemd’s, and expands to its
+IPv4 <em>and</em> IPv6 networks.</p>
+<h2 id="ports"><a class="header" href="#ports">Ports</a></h2>
+<p>A <code>ports</code> entry is a number, or a string holding a range, either of them optionally narrowed to
+one protocol with a <code>/tcp</code> or <code>/udp</code> suffix:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Form</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td>Port</td><td><code>443</code></td></tr>
+<tr><td>Range</td><td><code>"8000-8100"</code></td></tr>
+<tr><td>Port and protocol</td><td><code>"53/udp"</code></td></tr>
+<tr><td>Range and protocol</td><td><code>"8000-8100/tcp"</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>A port written without a protocol covers TCP and UDP both.</p>
+<h2 id="order-does-not-matter"><a class="header" href="#order-does-not-matter">Order does not matter</a></h2>
+<p>Every entry of a list carries the same verdict, so which one matches cannot change the outcome,
+and <code>deny</code> beating <code>allow</code> is a property of how the two are consulted rather than of where
+rules sit. That makes merging two profiles’ lists a plain union: commutative, idempotent, and
+impossible to get wrong by reordering. Entries take <code>$VAR</code> and <code>$arg_*</code> expansions like any
+other profile value, and each of the four lists adds to the one it inherits.</p>
+<h2 id="from-the-command-line"><a class="header" href="#from-the-command-line">From the command line</a></h2>
+<p><code>--allow-dest</code>, <code>--deny-dest</code>, <code>--allow-port</code> and <code>--deny-port</code> change the rules for one run,
+without touching the config. They take the same values as <code>dest</code> and <code>ports</code>, are repeatable
+and accept comma-separated lists:</p>
+<pre><code>scudo --allow-dest api.github.com,10.0.0.0/8 --allow-port 53/udp --deny-port 22 cargo build
+</code></pre>
+<p>They are applied after every profile, those selected with <code>--profile</code> included, and they
+<strong>move</strong> an entry rather than only adding it: <code>--allow-dest X</code> takes <code>X</code> out of <code>dest.deny</code> and
+puts it in <code>dest.allow</code>, and <code>--deny-dest X</code> does the opposite. Without that, allowing something a
+profile denied would change nothing, since a deny always wins. Entries are compared once
+normalised — <code>localhost</code> stands for both of its networks, host names ignore case — and a port
+is only the same rule with the same range and protocol, so <code>--deny-port 443</code> leaves an allowed
+<code>443/tcp</code> alone. Allowing and denying the same entry at once is an error.</p>
+<p>When no profile has a <code>network</code> table, the flags make a policy of their own. If any of them
+allows something, it denies everything else, as <code>network = { ... }</code> would; if they only deny,
+everything else stays allowed. Either way the other settings keep their defaults — the service
+manager stays out of reach and <code>on_unavailable</code> is <code>"fail"</code>. When a profile does have a policy,
+its <code>default</code> and <code>inbound</code> are left as they are.</p>
+<p>Denying everything (<code>network = {}</code>) is realised with <code>PrivateNetwork=yes</code> and needs nothing
+else — unless it also asks to be told what it turned away, which attaches an observer beside it;
+see <a href="#seeing-what-was-blocked">Seeing what was blocked</a>. Anything finer needs the <code>scudo-bpfd</code> helper, which attaches eBPF programs to the
+command’s cgroup; systemd’s own <code>IPAddressAllow=</code> and <code>SocketBindAllow=</code> are silently ignored
+in user units, since <code>systemd --user</code> may not load BPF programs.</p>
+<h2 id="names"><a class="header" href="#names">Names</a></h2>
+<p><strong>Naming a host in <code>dest</code> is what allows that domain to be resolved</strong>, and the DNS allowlist is
+nothing more than the set of names the destination lists mention. <code>scudo-bpfd</code> answers the
+sandbox’s DNS itself: the eBPF programs redirect every query to a resolver bound to loopback for
+that one sandbox, which refuses names no rule mentions, forwards the rest to the system’s
+nameservers, and records the <code>A</code> and <code>AAAA</code> addresses it hands back. From that moment those
+addresses are covered by the list that named the host, as <code>/32</code> and <code>/128</code> prefixes like any
+other. Both UDP and TCP queries are served, and a truncated answer is retried over TCP.</p>
+<p>The redirect happens before any check, so a policy whose port lists never mention 53 still
+resolves names — and, for the same reason, <code>ports.deny = [53]</code> does not take that away: the
+query never reaches the port rules, because it never reaches port 53. What decides which names
+may be looked up is the set of names the destination rules mention, and nothing else. A policy
+that names no host gets no resolver at all, and then port 53 is judged like any other port.</p>
+<p>Three things follow from this design, and all three are deliberate:</p>
+<ul>
+<li><strong>The rule is matched against the question, not the CNAME chain</strong>, so a rule for
+<code>api.github.com</code> covers whatever that name ends up resolving to.</li>
+<li><strong>A name in <code>dest.deny</code> still resolves.</strong> That is how its addresses become known, so the rule
+keeps them out of reach even for a program that had the address hardcoded. Since the deny
+side is consulted first, the connection fails either way.</li>
+<li><strong>A name no rule mentions is refused — unless refusing it would buy nothing.</strong> With
+<code>default = "allow"</code>, with a destination covering the whole address space (<code>any</code>,
+<code>0.0.0.0/0</code>), or with any <code>ports.allow</code> at all — each of these already lets the command reach
+an address it never named, so refusing the lookup would only break it.</li>
+</ul>
+<p>Addresses learnt this way expire with the record’s TTL, clamped to between 30 seconds and an
+hour — a zero TTL would otherwise expire the address before the program managed to connect.
+Expiry is a <em>removal</em>: the resolver takes the prefix back out, and the programs carry no expiry
+check of their own. That is not an oversight. A prefix that had expired but was still present
+would keep covering the shorter prefixes underneath it, with no way to fall back to the
+next-longest match — so a stale <code>/32</code> in the deny trie would read as “no match” and let traffic
+through. With removal alone, a sweep that runs late merely leaves an entry doing what it was
+already doing for another half second, which errs the safe way in both directions.</p>
+<p>A DNS-over-HTTPS or DNS-over-TLS resolver bypasses this entirely, but not the address rules:
+its server has to be in the allowlist like anything else.</p>
+<h2 id="how-it-is-enforced"><a class="header" href="#how-it-is-enforced">How it is enforced</a></h2>
+<p><code>scudo-bpfd</code> attaches four <code>cgroup/sock_addr</code> programs (<code>connect4</code>, <code>connect6</code>, <code>sendmsg4</code>,
+<code>sendmsg6</code>) so a blocked destination fails with a clean <code>EPERM</code> at <code>connect()</code> rather than
+timing out, plus a <code>cgroup_skb</code> egress program as a backstop — the only layer that also covers
+raw sockets, ICMP and anything that is neither TCP nor UDP. With <code>inbound = "deny"</code> an ingress
+program matches the <em>source</em> address, and the source port, against the same two lists, the way
+<code>IPAddressAllow=</code> does, so replies from an allowed peer still arrive. <code>recvmsg4</code> and <code>recvmsg6</code>
+put the source of a redirected DNS reply back to the nameserver the query was sent to — the
+address is remembered per socket, keyed by its cookie, when the query is redirected — so a stub
+resolver on an unconnected socket, which checks that the answer came from the server it asked,
+does not throw it away.</p>
+<p>Programs are attached as BPF links, which stack: the kernel combines the verdicts of every
+program on a cgroup with a logical AND, so a second policy on the same cgroup can only ever
+narrow what is permitted, never widen it.</p>
+<p>Profiles with an enforced policy also get <code>ProtectControlGroups=yes</code>, which keeps the command
+from migrating out of the cgroup the programs are attached to, and one that needs the resolver
+loses systemd-resolved’s varlink sockets, since a lookup made through <code>nss-resolve</code> would
+neither obey the allowlist nor teach the policy the address it resolved to. A profile that sets
+<code>ProtectControlGroups</code> itself keeps its own value, and is warned that the policy can then be
+walked around — unless the value is <code>private</code> or <code>strict</code>, which confine it at least as well.
+<code>private</code> still lets the command into sub-cgroups of its own: the network programs follow it
+there, the filesystem report does not, so a profile that only reports is warned about it.</p>
+<p>None of this holds if the command can leave its cgroup — by asking <code>systemd --user</code> for a
+sibling unit, for one, which has a network and no program of ours attached. Every sandbox is
+kept in its cgroup whether it has a network policy or not; see <a href="#session-bus">Session bus</a>.</p>
+<h2 id="installing-the-helper"><a class="header" href="#installing-the-helper">Installing the helper</a></h2>
+<pre><code class="language-bash">sudo install -m755 target/release/scudo-bpfd /usr/bin/scudo-bpfd
+sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
+systemctl --user enable --now scudo-bpfd.socket
+</code></pre>
+<p>The daemon holds <code>CAP_BPF</code> and <code>CAP_NET_ADMIN</code> as file capabilities, so anyone on the system
+can execute it. <code>CAP_PERFMON</code> is a third it can do without: it is needed only to load the
+tracepoint programs behind <a href="#seeing-what-the-filesystem-restrictions-hid">file access reporting</a>,
+and a daemon started without it does everything else and says so when that one thing is asked
+for. What keeps that harmless is that it offers exactly one operation — <em>add</em>
+restrictions to a cgroup the caller already owns — and no way to remove them: policies are
+detached only when the cgroup itself disappears. It refuses any cgroup outside the calling
+user’s own systemd subtree, which it establishes from <code>SO_PEERCRED</code> rather than from anything
+the caller says.</p>
+<p>Registration happens in two steps for a reason. <code>scudo</code> registers the policy and gets a
+single-use token; the command is then started as <code>scudo --bpf-shim &lt;token&gt; -- &lt;command&gt;</code>, and
+that shim — running inside the unit, in the final cgroup — claims the token and only then
+execs the real command. The cgroup does not exist before the unit starts, so registering
+earlier is impossible, and attaching afterwards would leave a window in which the command runs
+unfiltered.</p>
+<p><strong>When the policy cannot be enforced</strong> — the helper is not installed, lacks its capabilities,
+or the kernel does not support it — <code>on_unavailable</code> decides what happens:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Value</th><th>Behaviour</th></tr>
+</thead>
+<tbody>
+<tr><td><code>fail</code> (default)</td><td>The command does not run.</td></tr>
+<tr><td><code>no-network</code></td><td>The command runs with no network at all.</td></tr>
+<tr><td><code>warn</code></td><td>A warning is printed and the command runs unfiltered.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The default is fail-closed: a profile that asks for a network policy never silently runs
+without one.</p>
+<h2 id="seeing-what-was-blocked"><a class="header" href="#seeing-what-was-blocked">Seeing what was blocked</a></h2>
+<p>A denied connection reaches the command as a bare <code>EPERM</code>, and a denied packet as nothing at
+all, so a policy that is one rule too tight looks like a program that is simply broken.
+<code>--verbose</code>, or <code>log = "denied"</code> on the profile, turns every refusal into a line on stderr:</p>
+<pre><code class="language-console">$ scudo --verbose -- curl -sS https://example.com/
+scudo: warning: blocked DNS lookup of example.com (no rule names it)
+scudo: warning: blocked connect to 1.1.1.1:443/tcp
+scudo: curl: blocked example.com (2x), 1.1.1.1:443 (7x) [5 repeats suppressed]
+</code></pre>
+<p>Mixed into the command’s own output, those lines are easy to lose; the
+<a href="#terminal-ui">terminal UI</a> puts them in a panel of their own instead:</p>
+<pre><code class="language-console">$ scudo --tui -- curl -sS https://example.com/
+</code></pre>
+<p>Each refusal is a <code>warn</code> event and the closing summary an <code>info</code> one, so they follow whatever
+<a href="#logging">logging</a> is configured. On journald they carry the address, port, stage and
+transport as fields of their own, which is what makes them filterable there:</p>
+<pre><code class="language-console">$ journalctl -t scudo F_STAGE=connect -o json | jq -r '.F_ADDR + ":" + .F_PORT'
+</code></pre>
+<p>Refused DNS lookups are on the same stream, and usually come first: naming a host in a rule is
+also what permits resolving it, so a missing rule shows up as a name that will not resolve long
+before any address is reached.</p>
+<p>Reporting is off unless asked for. It costs a ring buffer per sandbox and a small process to
+read it, and with it off the emit sites are folded out of the eBPF programs entirely, so a
+sandbox nobody is watching pays nothing. Repeats of the same refusal within a few seconds are
+collapsed into one line — a denied connection is retried, and one <code>curl</code> would otherwise fill
+the screen — and the closing summary counts every attempt, including the ones that were never
+printed.</p>
+<p>A policy that denies everything is realised by taking the network away rather than by attaching
+anything, so on its own it has nothing to report from. Asking to be told is what changes that:
+an <em>observer</em> is attached beside the empty namespace, allowing <code>localhost</code> and denying the rest
+— which is exactly what that namespace already permits, so nothing is enforced that was not
+enforced before and loopback keeps working without reporting itself. The cgroup hooks are not
+scoped to a network namespace, which is what lets them see refusals inside one.</p>
+<p>The observer is reporting and nothing else, so losing it costs only the reporting: if
+<code>scudo-bpfd</code> cannot be reached, <code>on_unavailable</code> does <strong>not</strong> apply — the command runs, with the
+network still taken away, and a warning says the refusals will not be named. <code>scudo-bpfd</code> is
+needed to <em>watch</em> a deny-all policy; it is never needed to <em>enforce</em> one.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="logging"><a class="header" href="#logging">Logging</a></h1>
+<p>Everything scudo says about itself — warnings, the resolution trace, what a sandbox refused —
+goes through one leveled logger. Both the level and the destination come from a <code>log</code> table on
+the profile:</p>
+<pre><code class="language-toml">[curl]
+match = "curl"
+log.level = "debug"                  # off, error, warn, info, debug, trace
+log.target = "file"                  # stderr, file, syslog, journald
+log.path = "$SCUDO_CONFIG_DIR/scudo.log"
+log.syslog_facility = "user"         # only read by target = "syslog"
+</code></pre>
+<p><code>log.target</code> takes one target or a list of them, and a message goes to all of them. Naming a
+<code>log.path</code> and no target selects the file, since there is nothing else the path could be for.
+The default is <code>warn</code> on stderr — exactly the set of messages scudo printed before it had
+levels at all.</p>
+<p>Defaults for every command go in the reserved <code>[scudo]</code> section:</p>
+<pre><code class="language-toml">[scudo]
+log.level = "info"
+log.target = "journald"
+</code></pre>
+<p>It sits <strong>under</strong> the profiles rather than over them, which is what makes it a default: a
+profile can be quieter than it as well as louder — unlike <code>verbose</code>, which only ever adds. A
+profile matching everything says the same thing and is still perfectly good:</p>
+<pre><code class="language-toml">[default]
+match = "*"
+log.level = "info"
+</code></pre>
+<p>Between two profiles the ordinary order applies (the one written later wins, and <code>--profile</code>
+above all; see <a href="#combining-profiles">Combining profiles</a>), so write the catch-all first. <code>verbose = true</code> is still accepted and means <code>log.level = "debug"</code>; a level
+written out next to it wins, being the more specific of the two.</p>
+<p>The command line overrides the profiles:</p>
+<pre><code class="language-console">$ scudo --log-level debug -- curl https://example.com/
+$ scudo --log-file /tmp/scudo.log -- npm install
+$ scudo --log-target syslog,stderr -- rsync -a src/ dst/
+</code></pre>
+<p><code>-v</code>/<code>--verbose</code> raises the floor to <code>debug</code> rather than setting it, so it cannot quieten a
+<code>--log-level trace</code> written beside it. Each flag also reads an environment variable
+(<code>SCUDO_LOG_LEVEL</code>, <code>SCUDO_LOG_TARGET</code>, <code>SCUDO_LOG_FILE</code>, <code>SCUDO_LOG_SYSLOG_FACILITY</code>).</p>
+<p>Anything scudo emits while it is still reading the config obeys the command line and the
+environment, not the config — the setting is not known yet. Use <code>--log-level</code> or
+<code>SCUDO_LOG_LEVEL</code> to see that part of a run.</p>
+<p>Stderr keeps the shape it always had (<code>scudo: warning: …</code>), with the event’s fields appended
+only at <code>debug</code> and below; a file adds a timestamp and the level; syslog and journald receive
+the fields as fields. The confirmation prompt and the trust diff are <strong>not</strong> logs: they are
+interactive output and always go to stderr, whatever the destination.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="terminal-ui"><a class="header" href="#terminal-ui">Terminal UI</a></h1>
+<p><code>--tui</code> runs the command inside scudo rather than in place of it: a full terminal on the left,
+and on the right a live list of what the sandbox turned away.</p>
+<pre><code class="language-console">$ scudo --tui -- curl https://example.com/
+$ scudo --tui -- bash
+</code></pre>
+<pre><code>                                     │▌ BLOCKED               3 │
+ $ curl https://ads.example/         │ ● ads.example      2x    │
+ curl: (6) Could not resolve host    │ ● 1.1.1.1:443      1x    │
+ $                                   │ □ /usr/lib/libz.so 9x    │
+                                     │                          │
+                                     │  RECENT                  │
+                                     │   1s ● blocked DNS for a…│
+                                     │   4s ■ blocked open of /…│
+ ^A  ? for help                        terminal │ blocked 3
+</code></pre>
+<p>The command’s terminal is the only part of the screen left unpainted, so what shows through
+it is the host terminal’s own background; everything else — the panel, its two headings, the
+status bar — carries scudo’s own dark theme.</p>
+<p>Every line carries a mark, and the mark answers two questions at once. Its <strong>shape</strong> says
+which half of the sandbox the line came from — a round <code>●</code> for the network, a square <code>■</code> for
+the filesystem — and its <strong>colour</strong> says whether the sandbox is the reason: the warm tint for
+something it refused, the dim one for a path that was not there outside it either, which is
+hidden until <code>^A m</code> asks for it. Both the glyphs and the two tints are part of the theme, so
+they hold their meaning on a 256-colour terminal and on a sixteen-colour one.</p>
+<p>The headings sit above their lists rather than in them, so they stay put while the lists
+scroll, and each list has a scrollbar down its right edge once there is more of it than there
+is room.</p>
+<p>The left panel is a terminal in full: colours, resizing, scrollback, the mouse, and job
+control. A shell runs in it as it would anywhere, <code>Ctrl-C</code> and <code>Ctrl-Z</code> included — in this
+mode they are bytes for the command, not signals for scudo.</p>
+<p>Piping works, and means what it means everywhere else:</p>
+<pre><code class="language-console">$ cat Cargo.toml | scudo --tui -- less
+</code></pre>
+<p>When scudo’s own standard input is not a terminal it belongs to the command, which reads it
+instead of the panel’s terminal — a pipe is meant for the command, and handing it an empty
+terminal in its place would make the same command line mean two different things inside and
+outside the UI. Only what the command <em>writes</em> is drawn in the panel.</p>
+<p>Two consequences, both of them the ones the mode already has outside the UI. <code>systemd-run</code>
+falls back from <code>--pty</code> to <code>--pipe</code> when it is not given a terminal on all three descriptors,
+so a command with something piped into it has no controlling terminal of its own: it is not
+told when the panel is resized, and the keys pressed in the UI reach it only if it opens a
+terminal for itself, as <code>less</code> does. And a command given nothing to read gets nothing:
+<code>scudo --tui -- bash &lt; /dev/null</code> ends at once rather than opening a shell.</p>
+<p>Asking for the UI also turns denial reporting on for the run, the same way <code>--verbose</code> does;
+without it the right panel would have nothing to show. When there is nothing to report the
+panel says which of the reasons applies — no network policy, a policy that took the network
+away entirely, or a sandbox that could not be watched — rather than sitting empty.</p>
+<p>The mode is only available when scudo is invoked by its own name. Called through a symlink or
+the FUSE shim, everything after the command name belongs to the command, so <code>--tui</code> is passed
+straight through to it.</p>
+<h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
+<p>Every key goes to the command except the prefix, <code>Ctrl-A</code> by default, which introduces one of
+scudo’s own:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>^A q</code></td><td>leave, stopping the command if it is still running</td></tr>
+<tr><td><code>^A ^A</code></td><td>send <code>Ctrl-A</code> to the command</td></tr>
+<tr><td><code>^A Tab</code></td><td>move between the terminal and the panel’s two lists</td></tr>
+<tr><td><code>^A PgUp</code></td><td>read the scrollback — arrows, <code>PgUp</code>/<code>PgDn</code>, <code>Home</code>/<code>End</code>, <code>Esc</code> to return</td></tr>
+<tr><td><code>^A r</code></td><td>set how wide the panel is — arrows by one, <code>h</code>/<code>l</code> by five, <code>=</code> back to automatic, <code>Esc</code> to return</td></tr>
+<tr><td><code>^A w</code></td><td>show or hide the panel</td></tr>
+<tr><td><code>^A s</code></td><td>show or hide what scudo decided: the profiles that matched and the command line it built</td></tr>
+<tr><td><code>^A m</code></td><td>show or hide paths that were missing outside the sandbox too — see <a href="#seeing-what-the-filesystem-restrictions-hid">file access reporting</a></td></tr>
+<tr><td><code>^A /</code></td><td>keep only the lines matching a pattern</td></tr>
+<tr><td><code>^A \</code></td><td>the same, keeping out what matches instead</td></tr>
+<tr><td><code>^A n</code></td><td>the network only, or everything again</td></tr>
+<tr><td><code>^A f</code></td><td>the filesystem only, or everything again</td></tr>
+<tr><td><code>^A ?</code></td><td>the list above</td></tr>
+</tbody>
+</table>
+</div>
+<p>With one of the panel’s lists focused, the arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code> move that
+list instead of reaching the command; every other key still reaches it, so the focus never
+swallows what was typed. The tally is read from the top down and the running list from its
+newest line back, and each stops at its own last line.</p>
+<h2 id="narrowing-the-panel"><a class="header" href="#narrowing-the-panel">Narrowing the panel</a></h2>
+<p>A build or a package manager names thousands of paths, and the handful worth looking at go
+under. Two ways of cutting the panel down, which can be used together:</p>
+<p><code>^A /</code> opens a field for a <strong>regular expression</strong> — the same engine the profile matchers use —
+and keeps only the lines that match it; <code>^A \</code> opens the same field on the other side, keeping
+out what matches instead. The pattern applies as it is typed: <code>Tab</code> turns it round without
+retyping it, <code>Ctrl-U</code> clears it, <code>Enter</code> keeps it and gives the keyboard back, and <code>Esc</code>
+leaves the field putting back whatever was in force before it was opened. Case is ignored
+unless the pattern says otherwise with <code>(?-i)</code>. A pattern is unfinished for most of the time
+it is being written, so while it does not compile nothing is narrowed by it and the status bar
+says why, in red, rather than emptying the lists at every intermediate keystroke.</p>
+<p><code>^A n</code> and <code>^A f</code> cut the panel to the network or to the filesystem alone; the same key again
+puts everything back. The heading of each list shows what is in force — <code>[net] /usr</code> — so a
+panel that is narrow because it was asked to be never looks like a panel with nothing in it.</p>
+<p>Both are <strong>views and only views</strong>. What is on screen has no bearing on the line printed when
+the UI closes, or on the <code>blocked N</code> count in the status bar: those are statements about the
+run, and a run does not change because of what was being looked at while it happened.</p>
+<p>Change the prefix with <code>tui.prefix</code> in <code>[scudo]</code> or with <code>--tui-prefix</code>; it is written as
+<code>C-a</code>, <code>M-x</code> or <code>F12</code>, and must carry a modifier, since a bare character would be taken away
+from the command with no way to type it.</p>
+<p>Programs that ask the terminal about itself get an answer. scudo is the terminal here, so it
+answers what it can: what kind of terminal it is, whether it is working, where the cursor is,
+and — from the terminal it is itself drawing on, asked once when the UI starts — what colour
+the foreground, background and cursor are. Anything else goes unanswered, as on any terminal
+that does not implement it; the device-attributes reply is what tells a program to stop waiting
+for the rest. Without this a program like <code>bat</code>, which asks about the background colour to
+choose a light or dark theme, waits out its own timeout — a full second — on every run.</p>
+<p>The mouse is handed to the program in the terminal only while that program asks for it, so
+selecting and copying with the mouse keeps working everywhere else — at the cost of taking
+whole screen rows, panel included, since scudo is drawing one screen.</p>
+<p>When the command exits the UI stays up, and stays usable: the scrollback still scrolls, the
+lists still scroll, the panel can still be shown, hidden and resized, and <code>^A ?</code> still opens
+the help. Only the keys that were bytes for the command change hands — with nothing left to
+type at, the plain arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code> read the scrollback without a mode
+being asked for first, <code>Tab</code> moves between the terminal and the panel’s lists, and <code>q</code>, <code>Esc</code>
+or <code>^d</code> close. scudo exits with the command’s own code, and the closing summary of what was
+blocked is printed to stderr once the terminal has been given back, so it lands in the
+scrollback you keep.</p>
+<h2 id="how-wide-the-panel-is"><a class="header" href="#how-wide-the-panel-is">How wide the panel is</a></h2>
+<p>By default the panel takes a quarter of the screen, never narrower than 34 columns and never
+wider than 60 — past that it has all the room its contents can use, and the rest would be
+taken from the terminal for nothing. On a 120-column window that is the same 34 columns it
+always was; on a 240-column one it is 60.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>screen</th><th>panel</th></tr>
+</thead>
+<tbody>
+<tr><td>100</td><td>34</td></tr>
+<tr><td>160</td><td>40</td></tr>
+<tr><td>200</td><td>50</td></tr>
+<tr><td>240 and wider</td><td>60</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>^A r</code> sets it by hand. The keys move the <strong>edge</strong> between the two panels, not the panel’s
+width, so <code>←</code> and <code>h</code> widen the panel that sits to the right of that edge and <code>→</code> and <code>l</code>
+narrow it; the arrows move it a column at a time and the letters five at a time. The command
+inside is told about its new size as it happens, so a full-screen program redraws itself while
+you are still moving the edge.</p>
+<p>A width set this way is <strong>remembered</strong>, in <code>$XDG_CONFIG_HOME/scudo/state.toml</code>, and applies to
+the next run. It also stops following the screen: resizing the window no longer moves it.
+<code>=</code> in the resize mode puts it back to automatic, and that too is remembered.</p>
+<p>That file is state, not configuration — scudo writes it, and nothing in it was typed by hand.
+There is deliberately no <code>panel_width</code> in <code>[scudo.tui]</code>: two sources for one width could only
+ever differ in order to disagree, and a config that still names it will say so rather than be
+quietly ignored.</p>
+<p>The panel is dropped altogether when the window is too narrow to leave the terminal 40
+columns: a shell wrapping into nonsense costs more than the panel shows.</p>
+<h2 id="settings"><a class="header" href="#settings">Settings</a></h2>
+<pre><code class="language-toml">[scudo]
+tui.prefix = "C-b"          # default "C-a"
+tui.scrollback = 20000      # default 10000 lines
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="building"><a class="header" href="#building">Building</a></h1>
+<pre><code>cargo build --release
+</code></pre>
+<p>The stable toolchain is enough. The eBPF programs additionally need its <code>rust-src</code> component, since
+<code>core</code> is built from source for their tier 3 target, and <code>bpf-linker</code>:</p>
+<pre><code>rustup component add rust-src --toolchain stable
+cargo install bpf-linker
+</code></pre>
+<p>Two features are on by default and can be dropped:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Feature</th><th>Drops</th></tr>
+</thead>
+<tbody>
+<tr><td><code>bpf</code></td><td><code>scudo-bpfd</code> and the eBPF programs, along with the <code>rust-src</code> component and <code>bpf-linker</code> needed to build them. scudo still talks to a daemon that is installed.</td></tr>
+<tr><td><code>tui</code></td><td><code>--tui</code> and the terminal UI. A config naming <code>[scudo.tui]</code> still parses, so one shared with a full build is not rejected.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>cargo build --release --no-default-features --features bpf
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-09f2665d.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-609e4cb8.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
