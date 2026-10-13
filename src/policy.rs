@@ -264,7 +264,12 @@ pub fn still_confined(explicit: &[String], key: &str, observes_only: bool) -> bo
 fn accumulates(key: &str) -> bool {
     matches!(
         key,
-        "InaccessiblePaths" | "BindPaths" | "Wants" | "After" | "Environment"
+        "InaccessiblePaths"
+            | "BindPaths"
+            | "BindReadOnlyPaths"
+            | "Wants"
+            | "After"
+            | "Environment"
     )
 }
 
@@ -610,6 +615,16 @@ dest.allow = ["1.1.1.1"]"#,
         let profile = explicit(&["-p", "PrivateNetwork=no"]);
         let applied = apply_with(&profile, &[policy("")], unavailable).unwrap();
         assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
+    }
+
+    /// A list the profile writes to is added to, not taken over: the sealed
+    /// marker is a `BindReadOnlyPaths=` entry, and a profile binding files of
+    /// its own must not lose it.
+    #[test]
+    fn list_properties_are_never_overridden() {
+        let profile = explicit(&["-p", "BindReadOnlyPaths=/etc/hosts"]);
+        assert!(!overridden(&profile, "BindReadOnlyPaths"));
+        assert!(!overridden(&profile, "InaccessiblePaths"));
     }
 
     /// The strictest `on_unavailable` wins: a profile that asked to fail closed

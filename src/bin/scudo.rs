@@ -371,8 +371,8 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
                 let overridden = scudo::policy::overridden(&explicit, key);
                 if overridden && !scudo::policy::still_confined(&explicit, key, false) {
                     warnings.push(format!(
-                        "{key} is set by the profile; the command may be able to leave \
-                         its sandbox through the service manager"
+                        "{key} is set by the profile, so the command can move itself \
+                         out of its cgroup and leave the sandbox"
                     ));
                 }
                 !overridden
