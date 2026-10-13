@@ -264,12 +264,7 @@ pub fn still_confined(explicit: &[String], key: &str, observes_only: bool) -> bo
 fn accumulates(key: &str) -> bool {
     matches!(
         key,
-        "InaccessiblePaths"
-            | "BindPaths"
-            | "BindReadOnlyPaths"
-            | "Wants"
-            | "After"
-            | "Environment"
+        "InaccessiblePaths" | "BindPaths" | "BindReadOnlyPaths" | "Wants" | "After" | "Environment"
     )
 }
 
@@ -615,6 +610,41 @@ dest.allow = ["1.1.1.1"]"#,
         let profile = explicit(&["-p", "PrivateNetwork=no"]);
         let applied = apply_with(&profile, &[policy("")], unavailable).unwrap();
         assert!(has_arg(&applied.systemd_args, "PrivateNetwork=yes"));
+    }
+
+    /// The properties scudo adds that hold a single value: the profile's own
+    /// setting replaces scudo's, which is the point of leaving them out of
+    /// [`accumulates`].
+    const SINGLE_VALUED: &[&str] = &["ProtectControlGroups"];
+
+    /// Every property scudo adds is either a list, which [`accumulates`] has to
+    /// name, or one of [`SINGLE_VALUED`]. A list missing from `accumulates` is
+    /// dropped whenever the profile writes to it as well, and the warning
+    /// that comes with it describes a different property.
+    pub(super) fn assert_classified(key: &str) {
+        assert!(
+            accumulates(key) ^ SINGLE_VALUED.contains(&key),
+            "{key} is added by scudo but is in neither accumulates() nor SINGLE_VALUED"
+        );
+    }
+
+    #[test]
+    fn every_required_property_is_classified() {
+        let policies = [
+            policy(r#"dest.allow = ["1.1.1.1", "example.com"]"#),
+            Policy::Filesystem(FilesystemPolicy {
+                log: LogLevel::Denied,
+            }),
+        ];
+        let keys: Vec<String> = policies
+            .iter()
+            .flat_map(Policy::required_properties)
+            .map(|(key, _)| key)
+            .collect();
+        assert_ne!(keys.len(), 0);
+        for key in &keys {
+            assert_classified(key);
+        }
     }
 
     /// A list the profile writes to is added to, not taken over: the sealed

@@ -70,6 +70,7 @@ pub_use = "allow"
 pub_with_shorthand = "allow"
 question_mark_used = "allow"
 restriction = { level = "warn", priority = -2 }
+rest_pattern_accessible_field = "allow"
 self_named_module_files = "allow"
 shadow_reuse = "allow"
 # core::io is unstable and alloc adds nothing to a std binary.

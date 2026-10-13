@@ -755,6 +755,29 @@ talk = ["a.b", "c.d"]"#,
                 .any(|(_, value)| value.contains("scudo/sealed"))
     }
 
+    /// Each shape the bus can take adds a different set of properties, and
+    /// every one of them has to be classified for a profile writing the same
+    /// key not to lose it.
+    #[test]
+    fn every_bus_property_is_classified() {
+        let buses = [
+            bus(""),
+            bus(r#"talk = ["a.b"]"#),
+            bus(r#"talk = ["org.freedesktop.systemd1"]"#),
+            prepare_with(
+                &config(r#"talk = ["a.b"]"#),
+                "/run/user/1",
+                None,
+                Err("missing".to_owned()),
+                "7-a",
+                1,
+            ),
+        ];
+        for (key, _) in buses.iter().flat_map(|b| &b.properties) {
+            crate::policy::tests::assert_classified(key);
+        }
+    }
+
     #[test]
     fn a_closed_bus_marks_the_sandbox_sealed() {
         assert!(sealed(&bus("")));
