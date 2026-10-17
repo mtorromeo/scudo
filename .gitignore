@@ -10,3 +10,4 @@ target/
 /packaging/pkg
 /packaging/scudo
 /gh-pages/
+/dist

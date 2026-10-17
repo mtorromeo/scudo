@@ -45,8 +45,9 @@ your system as it is, inside a transient systemd unit that is told what it may s
 
 ## Quick start
 
-Build and install (the [documentation](https://mtorromeo.github.io/scudo/docs/building.html)
-lists the toolchain requirements and optional features):
+Download a static x86-64 build from the [releases](https://github.com/mtorromeo/scudo/releases),
+or build and install it (the [documentation](https://mtorromeo.github.io/scudo/docs/installation.html)
+covers both, with the toolchain requirements and optional features):
 
 ```bash
 cargo build --release
