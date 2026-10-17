@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-29954e1f.js";
+            window.path_to_searchindex_js = "searchindex-a9232d5f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -297,7 +297,7 @@ run from.</p>
 </thead>
 <tbody>
 <tr><td>What it confines</td><td>the commands already on your system</td><td>applications packaged as Flatpaks</td><td>whatever command line you write for it</td><td>the commands already on your system</td></tr>
-<tr><td>Configured by</td><td>per-command profiles, matched by name</td><td>the app’s manifest, plus overrides</td><td>flags on each invocation</td><td>per-program profiles</td></tr>
+<tr><td>Configured by</td><td>per-command profiles, matched by name, and per-directory <code>.scudo.toml</code> files</td><td>the app’s manifest, plus overrides</td><td>flags on each invocation</td><td>per-program profiles</td></tr>
 <tr><td>Privileges</td><td>none; an optional helper with file capabilities for network filtering</td><td>none (it uses bubblewrap)</td><td>none</td><td>a setuid-root binary</td></tr>
 <tr><td>Network</td><td>per host, address and port, DNS answered only for named hosts</td><td>all or nothing</td><td>all or nothing</td><td>all or nothing, or a firewall inside a network namespace of its own</td></tr>
 <tr><td>Resource limits</td><td>anything a systemd unit can set</td><td>none of its own</td><td>none</td><td>rlimits</td></tr>
@@ -330,6 +330,11 @@ software. The differences are in how it gets there and what it aims at:</p>
 <li><strong>Privileges.</strong> Firejail is setuid root, so every sandbox starts from a root process that
 parses user input. scudo runs entirely as you. Its one privileged part, the network helper,
 holds two file capabilities and can only ever add restrictions to a cgroup you already own.</li>
+<li><strong>Per-directory profiles.</strong> Firejail’s profiles belong to the program and are the same
+wherever it runs. scudo also reads the <code>.scudo.toml</code> files in the directory the command is
+started in and in each of its parents, so each project can carry its own profiles — or add
+to the global ones — next to its code: one checkout’s <code>cargo</code> may reach only its registry and hold 4G, another’s a private
+mirror. A project file applies only once you have <a href="configuration/trust.html">trusted</a> it.</li>
 <li><strong>The network.</strong> Filtering by host name, with DNS refused for every name the rules do not
 mention, works on the command’s own cgroup. It needs no network namespace, bridge or
 firewall setup.</li>

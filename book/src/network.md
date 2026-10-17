@@ -236,6 +236,10 @@ sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
 ```
 
+The daemon is socket-activated, so **`scudo-bpfd.socket` must be enabled and active in
+`systemctl --user`** (`systemctl --user status scudo-bpfd.socket` tells): without it scudo
+cannot reach `scudo-bpfd`, and every policy that needs it is handled by `on_unavailable`.
+
 The daemon holds `CAP_BPF` and `CAP_NET_ADMIN` as file capabilities, so anyone on the system
 can execute it. `CAP_PERFMON` is a third it can do without: it is needed only to load the
 tracepoint programs behind [file access reporting](filesystem.md#seeing-what-the-filesystem-restrictions-hid),
@@ -299,7 +303,7 @@ unfiltered.
 </svg>
 
 **When the policy cannot be enforced** — the helper is not installed, lacks its capabilities,
-or the kernel does not support it — `on_unavailable` decides what happens:
+`scudo-bpfd.socket` is not active in `systemctl --user`, or the kernel does not support it — `on_unavailable` decides what happens:
 
 | Value | Behaviour |
 |-------|-----------|

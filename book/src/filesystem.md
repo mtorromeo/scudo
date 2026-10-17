@@ -36,7 +36,9 @@ exactly like a program that is broken.
 
 `filesystem.log = "denied"` on the profile — or `--verbose`, or `--tui` — asks `scudo-bpfd` to
 watch the syscalls that name a path and report the ones that come back with an error a sandbox
-could have caused. With `sandbox` from the
+could have caused. That needs the daemon reachable, with `scudo-bpfd.socket` enabled and active
+in `systemctl --user` (see [Installation](installation.md#enabling-scudo-bpfd)); without it the
+restrictions still apply, and only the report is lost. With `sandbox` from the
 [recommended configuration](configuration/recommended.md#recommended-configuration):
 
 ```console

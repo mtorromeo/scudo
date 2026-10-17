@@ -1,7 +1,9 @@
 # Terminal UI
 
 `--tui` runs the command inside scudo rather than in place of it: a full terminal on the left,
-and on the right a live list of what the sandbox turned away.
+and on the right a live list of what the sandbox turned away. That list comes from
+`scudo-bpfd`, so it stays empty unless `scudo-bpfd.socket` is enabled and active in
+`systemctl --user` (see [Installation](installation.md#enabling-scudo-bpfd)).
 
 ```console
 $ scudo --tui -- curl https://example.com/

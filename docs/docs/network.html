@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-29954e1f.js";
+            window.path_to_searchindex_js = "searchindex-a9232d5f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -394,6 +394,9 @@ kept in its cgroup whether it has a network policy or not; see <a href="session-
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
 </code></pre>
+<p>The daemon is socket-activated, so <strong><code>scudo-bpfd.socket</code> must be enabled and active in
+<code>systemctl --user</code></strong> (<code>systemctl --user status scudo-bpfd.socket</code> tells): without it scudo
+cannot reach <code>scudo-bpfd</code>, and every policy that needs it is handled by <code>on_unavailable</code>.</p>
 <p>The daemon holds <code>CAP_BPF</code> and <code>CAP_NET_ADMIN</code> as file capabilities, so anyone on the system
 can execute it. <code>CAP_PERFMON</code> is a third it can do without: it is needed only to load the
 tracepoint programs behind <a href="filesystem.html#seeing-what-the-filesystem-restrictions-hid">file access reporting</a>,
@@ -454,7 +457,7 @@ unfiltered.</p>
 <text x="720" y="524" text-anchor="middle">prints to stderr</text>
 </svg>
 <p><strong>When the policy cannot be enforced</strong> — the helper is not installed, lacks its capabilities,
-or the kernel does not support it — <code>on_unavailable</code> decides what happens:</p>
+<code>scudo-bpfd.socket</code> is not active in <code>systemctl --user</code>, or the kernel does not support it — <code>on_unavailable</code> decides what happens:</p>
 <div class="table-wrapper">
 <table>
 <thead>

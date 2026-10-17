@@ -108,7 +108,7 @@ run from.
 | | scudo | Flatpak | bubblewrap | Firejail |
 |---|---|---|---|---|
 | What it confines | the commands already on your system | applications packaged as Flatpaks | whatever command line you write for it | the commands already on your system |
-| Configured by | per-command profiles, matched by name | the app's manifest, plus overrides | flags on each invocation | per-program profiles |
+| Configured by | per-command profiles, matched by name, and per-directory `.scudo.toml` files | the app's manifest, plus overrides | flags on each invocation | per-program profiles |
 | Privileges | none; an optional helper with file capabilities for network filtering | none (it uses bubblewrap) | none | a setuid-root binary |
 | Network | per host, address and port, DNS answered only for named hosts | all or nothing | all or nothing | all or nothing, or a firewall inside a network namespace of its own |
 | Resource limits | anything a systemd unit can set | none of its own | none | rlimits |
@@ -138,6 +138,11 @@ software. The differences are in how it gets there and what it aims at:
 - **Privileges.** Firejail is setuid root, so every sandbox starts from a root process that
   parses user input. scudo runs entirely as you. Its one privileged part, the network helper,
   holds two file capabilities and can only ever add restrictions to a cgroup you already own.
+- **Per-directory profiles.** Firejail's profiles belong to the program and are the same
+  wherever it runs. scudo also reads the `.scudo.toml` files in the directory the command is
+  started in and in each of its parents, so each project can carry its own profiles — or add
+  to the global ones — next to its code: one checkout's `cargo` may reach only its registry and hold 4G, another's a private
+  mirror. A project file applies only once you have [trusted](configuration/trust.md) it.
 - **The network.** Filtering by host name, with DNS refused for every name the rules do not
   mention, works on the command's own cgroup. It needs no network namespace, bridge or
   firewall setup.

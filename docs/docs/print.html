@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-29954e1f.js";
+            window.path_to_searchindex_js = "searchindex-a9232d5f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -295,7 +295,7 @@ run from.</p>
 </thead>
 <tbody>
 <tr><td>What it confines</td><td>the commands already on your system</td><td>applications packaged as Flatpaks</td><td>whatever command line you write for it</td><td>the commands already on your system</td></tr>
-<tr><td>Configured by</td><td>per-command profiles, matched by name</td><td>the app’s manifest, plus overrides</td><td>flags on each invocation</td><td>per-program profiles</td></tr>
+<tr><td>Configured by</td><td>per-command profiles, matched by name, and per-directory <code>.scudo.toml</code> files</td><td>the app’s manifest, plus overrides</td><td>flags on each invocation</td><td>per-program profiles</td></tr>
 <tr><td>Privileges</td><td>none; an optional helper with file capabilities for network filtering</td><td>none (it uses bubblewrap)</td><td>none</td><td>a setuid-root binary</td></tr>
 <tr><td>Network</td><td>per host, address and port, DNS answered only for named hosts</td><td>all or nothing</td><td>all or nothing</td><td>all or nothing, or a firewall inside a network namespace of its own</td></tr>
 <tr><td>Resource limits</td><td>anything a systemd unit can set</td><td>none of its own</td><td>none</td><td>rlimits</td></tr>
@@ -328,6 +328,11 @@ software. The differences are in how it gets there and what it aims at:</p>
 <li><strong>Privileges.</strong> Firejail is setuid root, so every sandbox starts from a root process that
 parses user input. scudo runs entirely as you. Its one privileged part, the network helper,
 holds two file capabilities and can only ever add restrictions to a cgroup you already own.</li>
+<li><strong>Per-directory profiles.</strong> Firejail’s profiles belong to the program and are the same
+wherever it runs. scudo also reads the <code>.scudo.toml</code> files in the directory the command is
+started in and in each of its parents, so each project can carry its own profiles — or add
+to the global ones — next to its code: one checkout’s <code>cargo</code> may reach only its registry and hold 4G, another’s a private
+mirror. A project file applies only once you have <a href="#trust-confirmation-for-per-directory-configs">trusted</a> it.</li>
 <li><strong>The network.</strong> Filtering by host name, with DNS refused for every name the rules do not
 mention, works on the command’s own cgroup. It needs no network namespace, bridge or
 firewall setup.</li>
@@ -353,7 +358,8 @@ little more:</p>
 <ul>
 <li><code>fuse3</code> for the <a href="#symlinks-aliases-and-the-fuse-shim">FUSE shim</a>;</li>
 <li><code>xdg-dbus-proxy</code> for the <a href="#session-bus">session bus</a> filter;</li>
-<li>a kernel with cgroup eBPF support, and <code>scudo-bpfd</code> with its file capabilities, for
+<li>a kernel with cgroup eBPF support, and <code>scudo-bpfd</code> with its file capabilities and its
+<code>scudo-bpfd.socket</code> user unit enabled and active, for
 <a href="#network-filtering">network filtering</a> and for reporting refused file accesses.</li>
 </ul>
 <h2 id="prebuilt-binaries"><a class="header" href="#prebuilt-binaries">Prebuilt binaries</a></h2>
@@ -373,6 +379,22 @@ sudo install -m644 systemd/* /usr/lib/systemd/user/
 for reporting refused file accesses:</p>
 <pre><code class="language-bash">sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
+</code></pre>
+<h3 id="enabling-scudo-bpfd"><a class="header" href="#enabling-scudo-bpfd">Enabling <code>scudo-bpfd</code></a></h3>
+<p><code>scudo-bpfd</code> is socket-activated: <code>systemd --user</code> listens on <code>$XDG_RUNTIME_DIR/scudo/bpfd.sock</code>
+and starts the daemon on the first connection. <strong><code>scudo-bpfd.socket</code> has to be enabled and
+active in <code>systemctl --user</code></strong>, or nothing that depends on the daemon works:</p>
+<ul>
+<li>network policies finer than denying everything — destinations, ports, host names and the
+DNS allowlist;</li>
+<li>reports of refused connections and DNS lookups, including for a deny-all policy;</li>
+<li>reports of refused file accesses (<code>filesystem.log = "denied"</code>, <code>--verbose</code>);</li>
+<li>the live list beside the command in <a href="#terminal-ui"><code>--tui</code></a>.</li>
+</ul>
+<p>With the socket down, a policy that needs the daemon falls to
+<a href="#network-filtering"><code>on_unavailable</code></a> — by default the command does not run — and
+the reports are lost, with a warning saying so. To check:</p>
+<pre><code class="language-bash">systemctl --user status scudo-bpfd.socket
 </code></pre>
 <p>Every release also has a <code>.sha256</code> file beside the archive, to check it with
 <code>sha256sum -c</code>.</p>
@@ -403,7 +425,10 @@ cargo install bpf-linker
 sudo install -m644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service scudo-dbus@.service \
     /usr/lib/systemd/user/
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
+systemctl --user enable --now scudo-bpfd.socket
 </code></pre>
+<p>As with the prebuilt binaries, the socket <a href="#enabling-scudo-bpfd">must be enabled</a> for network
+filtering and reporting.</p>
 <h3 id="static-binaries"><a class="header" href="#static-binaries">Static binaries</a></h3>
 <p>The release archives are built by <code>packaging/build-static.sh</code>, in an AlmaLinux 8 container.
 The same build can be run locally with podman or docker:</p>
@@ -1167,7 +1192,9 @@ no way to say which path it was about, and a profile that is one <code>BindPaths
 exactly like a program that is broken.</p>
 <p><code>filesystem.log = "denied"</code> on the profile — or <code>--verbose</code>, or <code>--tui</code> — asks <code>scudo-bpfd</code> to
 watch the syscalls that name a path and report the ones that come back with an error a sandbox
-could have caused. With <code>sandbox</code> from the
+could have caused. That needs the daemon reachable, with <code>scudo-bpfd.socket</code> enabled and active
+in <code>systemctl --user</code> (see <a href="#enabling-scudo-bpfd">Installation</a>); without it the
+restrictions still apply, and only the report is lost. With <code>sandbox</code> from the
 <a href="#recommended-configuration">recommended configuration</a>:</p>
 <pre><code class="language-console">$ scudo --verbose --profile sandbox -- bash -lc 'git status'
 scudo: warning: blocked open of /home/me/.bashrc (hidden by the sandbox)
@@ -1754,6 +1781,9 @@ kept in its cgroup whether it has a network policy or not; see <a href="#session
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
 </code></pre>
+<p>The daemon is socket-activated, so <strong><code>scudo-bpfd.socket</code> must be enabled and active in
+<code>systemctl --user</code></strong> (<code>systemctl --user status scudo-bpfd.socket</code> tells): without it scudo
+cannot reach <code>scudo-bpfd</code>, and every policy that needs it is handled by <code>on_unavailable</code>.</p>
 <p>The daemon holds <code>CAP_BPF</code> and <code>CAP_NET_ADMIN</code> as file capabilities, so anyone on the system
 can execute it. <code>CAP_PERFMON</code> is a third it can do without: it is needed only to load the
 tracepoint programs behind <a href="#seeing-what-the-filesystem-restrictions-hid">file access reporting</a>,
@@ -1814,7 +1844,7 @@ unfiltered.</p>
 <text x="720" y="524" text-anchor="middle">prints to stderr</text>
 </svg>
 <p><strong>When the policy cannot be enforced</strong> — the helper is not installed, lacks its capabilities,
-or the kernel does not support it — <code>on_unavailable</code> decides what happens:</p>
+<code>scudo-bpfd.socket</code> is not active in <code>systemctl --user</code>, or the kernel does not support it — <code>on_unavailable</code> decides what happens:</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -1915,7 +1945,9 @@ interactive output and always go to stderr, whatever the destination.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="terminal-ui"><a class="header" href="#terminal-ui">Terminal UI</a></h1>
 <p><code>--tui</code> runs the command inside scudo rather than in place of it: a full terminal on the left,
-and on the right a live list of what the sandbox turned away.</p>
+and on the right a live list of what the sandbox turned away. That list comes from
+<code>scudo-bpfd</code>, so it stays empty unless <code>scudo-bpfd.socket</code> is enabled and active in
+<code>systemctl --user</code> (see <a href="#enabling-scudo-bpfd">Installation</a>).</p>
 <pre><code class="language-console">$ scudo --tui -- curl https://example.com/
 $ scudo --tui -- bash
 </code></pre>

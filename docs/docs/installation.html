@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-29954e1f.js";
+            window.path_to_searchindex_js = "searchindex-a9232d5f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -188,7 +188,8 @@ little more:</p>
 <ul>
 <li><code>fuse3</code> for the <a href="dispatch.html#symlinks-aliases-and-the-fuse-shim">FUSE shim</a>;</li>
 <li><code>xdg-dbus-proxy</code> for the <a href="session-bus.html#session-bus">session bus</a> filter;</li>
-<li>a kernel with cgroup eBPF support, and <code>scudo-bpfd</code> with its file capabilities, for
+<li>a kernel with cgroup eBPF support, and <code>scudo-bpfd</code> with its file capabilities and its
+<code>scudo-bpfd.socket</code> user unit enabled and active, for
 <a href="network.html#network-filtering">network filtering</a> and for reporting refused file accesses.</li>
 </ul>
 <h2 id="prebuilt-binaries"><a class="header" href="#prebuilt-binaries">Prebuilt binaries</a></h2>
@@ -208,6 +209,22 @@ sudo install -m644 systemd/* /usr/lib/systemd/user/
 for reporting refused file accesses:</p>
 <pre><code class="language-bash">sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
+</code></pre>
+<h3 id="enabling-scudo-bpfd"><a class="header" href="#enabling-scudo-bpfd">Enabling <code>scudo-bpfd</code></a></h3>
+<p><code>scudo-bpfd</code> is socket-activated: <code>systemd --user</code> listens on <code>$XDG_RUNTIME_DIR/scudo/bpfd.sock</code>
+and starts the daemon on the first connection. <strong><code>scudo-bpfd.socket</code> has to be enabled and
+active in <code>systemctl --user</code></strong>, or nothing that depends on the daemon works:</p>
+<ul>
+<li>network policies finer than denying everything — destinations, ports, host names and the
+DNS allowlist;</li>
+<li>reports of refused connections and DNS lookups, including for a deny-all policy;</li>
+<li>reports of refused file accesses (<code>filesystem.log = "denied"</code>, <code>--verbose</code>);</li>
+<li>the live list beside the command in <a href="tui.html#terminal-ui"><code>--tui</code></a>.</li>
+</ul>
+<p>With the socket down, a policy that needs the daemon falls to
+<a href="network.html#network-filtering"><code>on_unavailable</code></a> — by default the command does not run — and
+the reports are lost, with a warning saying so. To check:</p>
+<pre><code class="language-bash">systemctl --user status scudo-bpfd.socket
 </code></pre>
 <p>Every release also has a <code>.sha256</code> file beside the archive, to check it with
 <code>sha256sum -c</code>.</p>
@@ -238,7 +255,10 @@ cargo install bpf-linker
 sudo install -m644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service scudo-dbus@.service \
     /usr/lib/systemd/user/
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
+systemctl --user enable --now scudo-bpfd.socket
 </code></pre>
+<p>As with the prebuilt binaries, the socket <a href="#enabling-scudo-bpfd">must be enabled</a> for network
+filtering and reporting.</p>
 <h3 id="static-binaries"><a class="header" href="#static-binaries">Static binaries</a></h3>
 <p>The release archives are built by <code>packaging/build-static.sh</code>, in an AlmaLinux 8 container.
 The same build can be run locally with podman or docker:</p>

@@ -5,7 +5,8 @@ little more:
 
 - `fuse3` for the [FUSE shim](dispatch.md#symlinks-aliases-and-the-fuse-shim);
 - `xdg-dbus-proxy` for the [session bus](session-bus.md#session-bus) filter;
-- a kernel with cgroup eBPF support, and `scudo-bpfd` with its file capabilities, for
+- a kernel with cgroup eBPF support, and `scudo-bpfd` with its file capabilities and its
+  `scudo-bpfd.socket` user unit enabled and active, for
   [network filtering](network.md#network-filtering) and for reporting refused file accesses.
 
 ## Prebuilt binaries
@@ -32,6 +33,26 @@ for reporting refused file accesses:
 ```bash
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
+```
+
+### Enabling `scudo-bpfd`
+
+`scudo-bpfd` is socket-activated: `systemd --user` listens on `$XDG_RUNTIME_DIR/scudo/bpfd.sock`
+and starts the daemon on the first connection. **`scudo-bpfd.socket` has to be enabled and
+active in `systemctl --user`**, or nothing that depends on the daemon works:
+
+- network policies finer than denying everything — destinations, ports, host names and the
+  DNS allowlist;
+- reports of refused connections and DNS lookups, including for a deny-all policy;
+- reports of refused file accesses (`filesystem.log = "denied"`, `--verbose`);
+- the live list beside the command in [`--tui`](tui.md#terminal-ui).
+
+With the socket down, a policy that needs the daemon falls to
+[`on_unavailable`](network.md#network-filtering) — by default the command does not run — and
+the reports are lost, with a warning saying so. To check:
+
+```bash
+systemctl --user status scudo-bpfd.socket
 ```
 
 Every release also has a `.sha256` file beside the archive, to check it with
@@ -69,7 +90,11 @@ sudo install -m755 target/release/scudo target/release/scudo-fuse target/release
 sudo install -m644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service scudo-dbus@.service \
     /usr/lib/systemd/user/
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
+systemctl --user enable --now scudo-bpfd.socket
 ```
+
+As with the prebuilt binaries, the socket [must be enabled](#enabling-scudo-bpfd) for network
+filtering and reporting.
 
 ### Static binaries
 
