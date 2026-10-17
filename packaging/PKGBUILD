@@ -70,6 +70,9 @@ package() {
       -t "$pkgdir/usr/lib/systemd/user"
 
   install -Dm0644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
+  # A starting point to copy to ~/.config/scudo, not a system-wide default:
+  # /etc/scudo/config.toml would be merged into every user's profiles.
+  install -Dm0644 examples/config.toml -t "$pkgdir/usr/share/doc/$pkgname/examples"
 
   # Both, since the crate is dual-licensed.
   install -Dm0644 LICENSE-MIT LICENSE-APACHE \

@@ -828,6 +828,17 @@ mod tests {
         assert_eq!(profiles.len(), 1);
     }
 
+    /// The configuration shipped as a starting point has to be one scudo accepts,
+    /// `delegate = true` included, or the first thing a new user copies is an error.
+    #[test]
+    fn the_example_config_loads() {
+        let (profiles, _) =
+            split(include_str!("../examples/config.toml")).expect("the example parses");
+        let map = ValidatedConfigMap::try_from(profiles).expect("the example validates");
+        assert!(map.is_delegable("npm"));
+        assert!(!map.is_delegable("agents"));
+    }
+
     /// A typo in the reserved table has to be an error, or the setting silently
     /// does nothing and the fault shows up as behaviour rather than a message.
     #[test]

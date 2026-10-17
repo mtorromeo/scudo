@@ -56,21 +56,27 @@ sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
 ```
 
-Write a profile in `~/.config/scudo/config.toml`:
+Start from the recommended configuration in [`examples/config.toml`](examples/config.toml):
+base profiles that hide `$HOME` and the session's sockets, profiles for the common package
+managers, and one for AI coding agents that runs those in sandboxes of their own.
+
+```bash
+mkdir -p ~/.config/scudo
+cp examples/config.toml ~/.config/scudo/config.toml
+```
+
+It is a starting point, not a guarantee: you are responsible for the configuration you choose
+to use, and for judging whether it protects what you need it to in your own case. Read it,
+adapt it, and check what a command can still reach before relying on it.
+
+A project can add to its profiles in a `.scudo.toml` of its own (you are asked to trust it
+first). Here cargo also gets a memory limit, and no network beyond its registry:
 
 ```toml
-[sandboxed]
-filesystem.read = ["/"]
-filesystem.write = ["/tmp", "$XDG_RUNTIME_DIR"]
-filesystem.hide = ["$HOME"]
-
+# .scudo.toml in the project
 [cargo]
-match = "cargo"
-extend = "sandboxed"
-filesystem.write = ["$HOME/.cargo", "$PWD"]
 systemd.MemoryMax = "4G"
 network.dest.allow = ["*.crates.io"]
-network.ports.allow = [443]
 ```
 
 And run the command through scudo:
