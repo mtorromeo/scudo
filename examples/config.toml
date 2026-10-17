@@ -106,8 +106,9 @@ extend = "supply-chain"
 match = ["npm", "npx"]
 filesystem.write = ["$HOME/.npm"]
 
-# Explicit only: `scudo -p npm-publish -- npm publish`, which needs the token.
 [npm-publish]
+match = ['/^npm publish( |$)/']
+delegable = false
 filesystem.read = ["$HOME/.npmrc"]
 
 [pnpm]
@@ -166,22 +167,15 @@ filesystem.write = [
 ]
 filesystem.deny = ["$HOME/.cargo/credentials", "$HOME/.cargo/credentials.toml"]
 
-# `cargo install` and `cargo binstall` (with or without a `+toolchain`), and
-# `cargo-binstall` run directly: what installing needs on top of [cargo].
+# `cargo install`, `cargo install-update` and `cargo binstall` (with or without a `+toolchain`),
+# and `cargo-binstall`/`cargo-install-update` run directly: what installing needs on top of [cargo].
 # Not delegable, though it extends a profile that is: a sandbox that delegates
 # `cargo` must not get to install into ~/.cargo/bin, outside of it, by asking.
 [cargo-install]
 extend = "cargo"
-match = ['/^cargo( \+\S+)? b?install( |$)/', "cargo-binstall"]
+match = ['/^cargo( \+\S+ |[ -])?(b?install|install-update)( |$)/']
 delegable = false
-filesystem.write = [
-  "$HOME/.cargo/bin",
-  "$HOME/.cargo/.crates.toml",
-  "$HOME/.cargo/.crates2.json",
-  "$HOME/.cargo/binary-cache",
-  "$HOME/.cargo/binstall",
-  "$HOME/.cargo/binstall.toml",
-]
+filesystem.write = ["$HOME/.cargo"]
 
 # ── Others ──────────────────────────────────────────────────────────────────
 # COMPOSER_HOME is ~/.config/composer; its vendor/bin is on PATH, so it is
