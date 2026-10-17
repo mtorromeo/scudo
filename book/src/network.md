@@ -257,6 +257,10 @@ execs the real command. The cgroup does not exist before the unit starts, so reg
 earlier is impossible, and attaching afterwards would leave a window in which the command runs
 unfiltered.
 
+Since the shim reaches the daemon from inside the unit, scudo bind-mounts the daemon's socket
+there, read-only, whenever a policy needs it. A profile that hides `$XDG_RUNTIME_DIR` does not
+have to give it back, and nothing inside can replace it.
+
 <svg class="diagram" viewBox="0 0 820 560" role="img" aria-labelledby="dg-bpfd-title">
 <title id="dg-bpfd-title">How a sandbox with a network policy starts: scudo registers the policy and gets a token, the shim inside the unit claims it, and only then the command runs</title>
 <defs><marker id="dg-bpfd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0 10 5 0 10z"/></marker></defs>

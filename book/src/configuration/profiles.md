@@ -38,7 +38,7 @@ vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 
 # Base profiles — no `match`, so they are never matched directly, only used via extend
 [sandbox]
-filesystem.read = ["/", "$XDG_RUNTIME_DIR/scudo/bpfd.sock", "$XDG_RUNTIME_DIR/scudo/shims"]
+filesystem.read = ["/", "$XDG_RUNTIME_DIR/scudo/shims"]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
 filesystem.write = ["/tmp", "$HOME/.cache"]
 systemd.PrivateTmp = true

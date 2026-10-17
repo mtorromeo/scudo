@@ -44,18 +44,18 @@ vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 # write $XDG_RUNTIME_DIR here or in a profile everything extends: the most
 # permissive access wins, and nothing would be hidden.
 #
-# Only two things of scudo's own come back, both read-only: the daemon that
-# enforces network policies, and the FUSE shim, so that commands run from
-# inside are still wrapped. Never give back the whole $XDG_RUNTIME_DIR/scudo:
-# it also holds the session bus proxies of other sandboxes, and written to, the
-# daemon's socket could be replaced.
+# Only one thing of scudo's own comes back, read-only: the FUSE shim, so that
+# commands run from inside are still wrapped. The sockets scudo itself needs
+# in there — the daemon's, when a policy needs it, and the broker's, when the
+# sandbox delegates — are mounted by scudo on its own. Never give back the
+# whole $XDG_RUNTIME_DIR/scudo: it also holds the session bus proxies and the
+# brokers of other sandboxes.
 [sandbox]
 systemd.WorkingDirectory = "/"
 systemd.PrivateTmp = true
 filesystem.read = [
   "/",
   "$HOME/.local/bin",
-  "$XDG_RUNTIME_DIR/scudo/bpfd.sock",
   "$XDG_RUNTIME_DIR/scudo/shims",
 ]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]

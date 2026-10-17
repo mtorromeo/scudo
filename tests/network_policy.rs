@@ -131,6 +131,20 @@ fn allowed_destination_is_reachable() {
     assert_eq!(probe(&network, sink.port), CURL_EMPTY_REPLY);
 }
 
+/// The shim claims the policy from inside the unit, through a socket the
+/// profile never gave back: scudo puts it there on its own.
+#[test]
+#[ignore = "needs scudo-bpfd with CAP_BPF"]
+fn a_hidden_runtime_dir_still_reaches_the_daemon() {
+    let sink = Sink::spawn();
+    let network = format!(
+        "filesystem.read = [\"/\"]\nfilesystem.hide = [\"$XDG_RUNTIME_DIR\"]\n\
+         network.dest.allow = [\"127.0.0.1\"]\nnetwork.ports.allow = [{}]\n",
+        sink.port
+    );
+    assert_eq!(probe(&network, sink.port), CURL_EMPTY_REPLY);
+}
+
 #[test]
 #[ignore = "needs scudo-bpfd with CAP_BPF"]
 fn destination_outside_the_allowlist_is_blocked() {

@@ -40,6 +40,7 @@ cargo make release [VERSION]
 - **The eBPF programs are loop-free, including the emit path** (reserve, write, submit, per-CPU drop counter). Destinations are LPM tries (deny/allow × v4/v6), ports are bitmaps, so policy size has no cap.
 - Denial reporting is switched by rewriting the `LOG_DENIALS` `.rodata` global (same trick as `PORTS_DENY_SET`), so when off the verifier drops the emit sites.
 - Naming a host is what allows resolving it. DNS is redirected to a per-sandbox resolver that inserts answers as full-length prefixes. Expiry removes them; the programs carry no expiry check (a stale `/32` would shadow shorter prefixes). Removal skips prefixes the config declared outright.
+- The shim attaches from inside the unit, so whenever the daemon holds a token `policy::apply` bind-mounts its socket read-only into the unit; profiles never list it.
 - `scudo` and the shim both exec away, so `scudo --bpf-watch <token>` reports denials. The event bus exists from registration, before attachment.
 
 ## Filesystem reporting (`src/bpfd/fsmon.rs`)

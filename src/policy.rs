@@ -9,6 +9,8 @@ pub mod dbus;
 pub mod filesystem;
 pub mod network;
 
+use std::path::Path;
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -127,7 +129,23 @@ pub struct Applied {
 /// sets outright is its own decision and is not overwritten here (see
 /// [`overridden`]).
 pub fn apply(policies: &[Policy], explicit: &[String]) -> Result<Applied> {
-    apply_with(explicit, policies, crate::bpfd::client::register)
+    let mut applied = apply_with(explicit, policies, crate::bpfd::client::register)?;
+    if applied.token.is_some() {
+        let socket = crate::bpfd::protocol::socket_path()?;
+        reach_daemon(&mut applied, &socket);
+    }
+    Ok(applied)
+}
+
+/// Put the daemon's socket in the sandbox, where the shim looks for it.
+///
+/// The shim claims the token from inside the unit, so a profile that hides
+/// `$XDG_RUNTIME_DIR` would otherwise have to know to give the socket back.
+/// Read-only, so that it cannot be replaced from inside; connecting needs no
+/// write access. A profile that denies the socket outright still wins: systemd
+/// drops every mount below an inaccessible path, and the shim fails closed.
+fn reach_daemon(applied: &mut Applied, socket: &Path) {
+    push_property(applied, "BindReadOnlyPaths", &socket.display().to_string());
 }
 
 /// The body of [`apply`], with the hand-off to the daemon injected so that the
@@ -542,6 +560,20 @@ dest.allow = ["1.1.1.1"]"#,
         assert_eq!(applied.token.as_deref(), Some("token"));
         assert!(applied.warnings.is_empty());
         assert!(has_arg(&applied.systemd_args, "ProtectControlGroups=yes"));
+    }
+
+    /// The shim inside the unit has to reach the daemon even when the profile
+    /// hides the runtime directory, and must not be able to replace its socket.
+    #[test]
+    fn the_daemon_socket_is_bound_read_only() {
+        let mut applied = Applied::default();
+        let socket = Path::new("/run/user/1000/scudo/bpfd.sock");
+        reach_daemon(&mut applied, socket);
+        reach_daemon(&mut applied, socket);
+        assert_eq!(
+            applied.systemd_args,
+            ["-p", "BindReadOnlyPaths=/run/user/1000/scudo/bpfd.sock"]
+        );
     }
 
     fn explicit(args: &[&str]) -> Vec<String> {

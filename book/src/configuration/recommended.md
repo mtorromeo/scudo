@@ -57,11 +57,12 @@ Several pages of this documentation build their examples on these profiles.
   needs, which is usually its cache and its configuration.
 - **The session's sockets are hidden with it, in the base every profile extends.** `ssh-agent`, `gpg-agent`, the keyring and the
   container sockets let a program act as you without reading a single secret, and connecting to
-  a socket needs no write access, so a read-only runtime directory is not enough. Only two
-  entries of scudo's own come back, read-only: `bpfd.sock`, so that network policies can be
-  enforced, and `shims`, so that a command started inside is still wrapped. Do not give back
-  the whole `$XDG_RUNTIME_DIR/scudo`: it also holds the session bus proxies of other sandboxes,
-  and writing to it would let a command replace the daemon's socket.
+  a socket needs no write access, so a read-only runtime directory is not enough. Only one
+  entry of scudo's own comes back, read-only: `shims`, so that a command started inside is
+  still wrapped. The sockets scudo needs in there — `scudo-bpfd`'s when a policy needs the
+  daemon, the broker's when the sandbox [delegates](../delegation.md#delegating-commands) — it
+  mounts by itself, read-only. Do not give back the whole `$XDG_RUNTIME_DIR/scudo`: it also
+  holds the session bus proxies and the brokers of other sandboxes.
 - **`.git` is read-only for build and install tools.** Hooks, `core.hooksPath` and
   `core.fsmonitor` are run by git outside any sandbox, so a writable `.git` is a way out. The
   agent, which commits, gets it back.
