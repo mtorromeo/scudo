@@ -70,3 +70,43 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md \
             || gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  # The documentation describes what main does, which is not what is released
+  # until it is tagged; so the site is only rebuilt here, from the tag. The
+  # landing page and everything else on gh-pages are left alone.
+  docs:
+    name: Publish the documentation
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      MDBOOK_VERSION: v0.5.4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+
+      - name: Install mdbook
+        run: |
+          curl -sSfL "https://github.com/rust-lang/mdBook/releases/download/$MDBOOK_VERSION/mdbook-$MDBOOK_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" mdbook
+          echo "$RUNNER_TEMP" >>"$GITHUB_PATH"
+
+      - name: Build
+        run: mdbook build book
+
+      - name: Push to gh-pages
+        run: |
+          rsync -a --delete target/book/ site/docs/docs/
+          cd site
+          git add -A docs/docs
+          if git diff --cached --quiet; then
+            echo "the documentation is unchanged"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet --message "docs: publish the documentation of $GITHUB_REF_NAME"
+          git push origin gh-pages

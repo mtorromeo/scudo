@@ -246,6 +246,20 @@ git tag --annotate "$tag" --message "scudo $version"
 echo "tagged $tag; publish it with: git push --atomic origin HEAD $tag"
 '''
 
+# The documentation is published by the release workflow when a version is
+# tagged, never from here: book/ follows main, which is ahead of the release.
+[tasks.docs]
+description = "Build the documentation into target/book"
+category = "Development"
+command = "mdbook"
+args = ["build", "book"]
+
+[tasks.docs-serve]
+description = "Serve the documentation locally, rebuilding it on change"
+category = "Development"
+command = "mdbook"
+args = ["serve", "book"]
+
 [tasks.archive-source]
 description = "Archive the source code"
 category = "Development"

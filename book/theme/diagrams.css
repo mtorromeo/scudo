@@ -1,0 +1,41 @@
+/* Diagrams are inline SVG drawn with the theme's own colours, so that they
+   read the same in every theme the reader picks. */
+.diagram {
+    display: block;
+    width: 100%;
+    max-width: 820px;
+    height: auto;
+    margin: 1.75em auto;
+}
+.diagram text {
+    fill: var(--fg);
+    font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 13px;
+}
+.diagram .title { font-weight: 600; }
+.diagram .mono { font-family: var(--mono-font); font-size: 12px; }
+.diagram .muted { fill-opacity: 0.62; font-size: 12px; }
+.diagram .num { fill: var(--links); font-weight: 700; }
+.diagram .box {
+    fill: var(--quote-bg);
+    stroke: var(--fg);
+    stroke-opacity: 0.32;
+    stroke-width: 1.2;
+}
+.diagram .box.key { stroke: var(--links); stroke-opacity: 1; stroke-width: 1.6; }
+.diagram .zone {
+    fill: var(--fg);
+    fill-opacity: 0.025;
+    stroke: var(--fg);
+    stroke-opacity: 0.45;
+    stroke-width: 1.2;
+    stroke-dasharray: 6 4;
+}
+.diagram .lane { stroke: var(--fg); stroke-opacity: 0.25; stroke-dasharray: 3 4; }
+.diagram .flow { stroke: var(--links); stroke-width: 1.6; fill: none; }
+.diagram .flow.back { stroke-dasharray: 5 4; }
+/* A refusal is drawn in the text colour, dotted: the accent is already
+   orange, and a warning colour beside it would not tell them apart. */
+.diagram .flow.deny { stroke: var(--fg); stroke-opacity: 0.6; stroke-dasharray: 2 4; stroke-linecap: round; }
+.diagram .head { fill: var(--links); }
+.diagram .head.deny { fill: var(--fg); fill-opacity: 0.6; }

@@ -1,0 +1,27 @@
+[book]
+title = "scudo"
+description = "Sandbox any command with systemd-run, using per-command profiles."
+authors = ["Massimiliano Torromeo"]
+language = "en"
+src = "src"
+
+# Published to the gh-pages branch, under docs/docs/, by the release workflow
+# when a version is tagged: what is on main may describe what is not released.
+[build]
+build-dir = "../target/book"
+create-missing = false
+
+[output.html]
+site-url = "/scudo/docs/"
+git-repository-url = "https://github.com/mtorromeo/scudo"
+edit-url-template = "https://github.com/mtorromeo/scudo/edit/main/book/src/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["theme/scudo.css", "theme/diagrams.css"]
+
+[output.html.search]
+enable = true
+
+# The building instructions used to be a page of their own.
+[output.html.redirect]
+"/building.html" = "installation.html#building"
