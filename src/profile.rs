@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use toml::Value;
 
 use crate::{
-    config::{ArgDecls, Fallback, Profile, ValidatedConfigMap, VarDecls},
+    config::{ArgDecls, Fallback, Profile, ValidatedConfigMap, VarDecls, command_line},
     logging::{Level, LogConfig},
     policy::{
         Access, DbusConfig, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides,
@@ -102,11 +102,12 @@ pub fn resolve_with(
     let mut requested: Vec<(&str, String)> = Vec::new();
     let mut matched: Vec<String> = Vec::new();
     if !opts.no_match {
+        let line = command_line(&name, command_args);
         for (profile_name, profile) in &configs.0 {
             if selected.contains(&profile_name.as_str()) {
                 continue;
             }
-            if let Some(pattern) = profile.patterns.iter().find(|p| p.matches(&name)) {
+            if let Some(pattern) = profile.patterns.iter().find(|p| p.matches(&name, &line)) {
                 matched.push(profile_name.clone());
                 requested.push((
                     profile_name,
@@ -959,6 +960,37 @@ mod tests {
             &systemd_args(src, "/usr/bin/curl", &[]),
             "MemoryMax=1G"
         ));
+    }
+
+    /// A pattern holding a space is compared with the command line, the name
+    /// followed by the arguments; `/…/` is a regex, unanchored.
+    #[test]
+    fn match_reaches_the_command_line_and_takes_regexes() {
+        let src = r#"
+            [push]
+            match = ["git push*", '/^npm( \S+)* (-g|--global)( |$)/']
+            systemd.MemoryMax = "1G"
+
+            [python]
+            match = "/^python3?$/"
+            systemd.CPUQuota = "10%"
+        "#;
+        assert!(has_arg(
+            &systemd_args(src, "/usr/bin/git", &["push", "origin"]),
+            "MemoryMax=1G"
+        ));
+        assert!(systemd_args(src, "git", &["status"]).is_empty());
+        assert!(has_arg(
+            &systemd_args(src, "npm", &["install", "-g", "x"]),
+            "MemoryMax=1G"
+        ));
+        assert!(has_arg(
+            &systemd_args(src, "npm", &["--global", "install", "x"]),
+            "MemoryMax=1G"
+        ));
+        assert!(systemd_args(src, "npm", &["install", "x"]).is_empty());
+        assert!(has_arg(&systemd_args(src, "python3", &["-c", "1"]), "CPUQuota=10%"));
+        assert!(systemd_args(src, "python3x", &[]).is_empty());
     }
 
     /// The section name is an identifier, not a pattern: without `match` the

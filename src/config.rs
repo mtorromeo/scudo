@@ -1,7 +1,6 @@
 use std::{env::VarError, path::PathBuf, sync::OnceLock};
 
 use anyhow::{Context as _, Result, bail};
-use glob::Pattern;
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de};
@@ -188,8 +187,9 @@ fn validate_vars(vars: &VarDecls) -> Result<()> {
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
-    /// Globs on the command name; any one of them matching is enough. Empty:
-    /// the profile is reachable only through `extend` or `--profile`.
+    /// Patterns on the command, see [`CommandPattern`]; any one of them
+    /// matching is enough. Empty: the profile is reachable only through
+    /// `extend` or `--profile`.
     #[serde(rename = "match", default, deserialize_with = "one_or_many")]
     pub r#match: Vec<String>,
     /// Profiles applied before this one.
@@ -209,6 +209,10 @@ pub struct ProfileConfig {
     /// Whether this profile adds to a same-named one from a lower-priority
     /// config file (the default) or replaces it.
     pub inherit: Option<bool>,
+    /// Fields that replace, rather than add to, what a same-named profile from
+    /// a lower-priority config file says.
+    #[serde(default)]
+    pub replace: Vec<Replace>,
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
@@ -241,7 +245,96 @@ pub struct ProfileConfig {
     pub systemd: toml::Table,
 }
 
+/// A field `replace` can name.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Replace {
+    Match,
+}
+
 pub type ConfigMap = IndexMap<String, ProfileConfig>;
+
+/// One `match` entry.
+///
+/// `"/re/flags"` is a regular expression, unanchored as in sed, with flags
+/// among `imsxU`; anything else is a glob on the whole text. A pattern holding
+/// a space is compared with the command line (the name, then the arguments
+/// joined by single spaces, see [`command_line`]), any other with the name
+/// alone.
+#[derive(Debug, Clone)]
+pub struct CommandPattern {
+    source: String,
+    kind: PatternKind,
+    whole_line: bool,
+}
+
+#[derive(Debug, Clone)]
+enum PatternKind {
+    Glob(glob::Pattern),
+    Regex(Regex),
+}
+
+impl CommandPattern {
+    /// # Errors
+    ///
+    /// An invalid glob or regex, or an unknown regex flag.
+    pub fn new(source: &str) -> Result<Self> {
+        let regex = source
+            .strip_prefix('/')
+            .and_then(|rest| rest.rsplit_once('/'));
+        let kind = match regex {
+            Some((body, flags)) => {
+                if let Some(flag) = flags.chars().find(|c| !"imsxU".contains(*c)) {
+                    bail!("unknown regex flag '{flag}'");
+                }
+                let re = if flags.is_empty() {
+                    body.to_owned()
+                } else {
+                    format!("(?{flags}){body}")
+                };
+                PatternKind::Regex(Regex::new(&re)?)
+            }
+            None => PatternKind::Glob(glob::Pattern::new(source)?),
+        };
+        Ok(CommandPattern {
+            source: source.to_owned(),
+            kind,
+            whole_line: source.contains(' '),
+        })
+    }
+
+    /// Whether the command `name`, run as `line`, is matched.
+    #[must_use]
+    pub fn matches(&self, name: &str, line: &str) -> bool {
+        let text = if self.whole_line { line } else { name };
+        match &self.kind {
+            PatternKind::Glob(glob) => glob.matches(text),
+            PatternKind::Regex(re) => re.is_match(text),
+        }
+    }
+
+    /// The pattern as written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+}
+
+impl PartialEq for CommandPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+/// What a pattern on the command line is compared with: the command's name and
+/// its arguments, joined by single spaces.
+#[must_use]
+pub fn command_line(name: &str, args: &[String]) -> String {
+    core::iter::once(name)
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// The name of the reserved table, which is therefore not a profile name.
 pub const SETTINGS_SECTION: &str = "scudo";
@@ -294,7 +387,7 @@ pub struct Loaded {
 /// files: see [`Profile::merge`].
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
-    pub patterns: Vec<Pattern>,
+    pub patterns: Vec<CommandPattern>,
     pub extend: Vec<String>,
     pub delegate: Delegate,
     pub delegable: Option<bool>,
@@ -385,7 +478,7 @@ impl Profile {
             .r#match
             .iter()
             .map(|p| {
-                Pattern::new(p)
+                CommandPattern::new(p)
                     .with_context(|| format!("profile '{name}': invalid match pattern '{p}'"))
             })
             .collect::<Result<_>>()?;
@@ -461,9 +554,15 @@ impl ValidatedConfigMap {
     fn layer(&mut self, configs: ConfigMap) -> Result<()> {
         for (name, config) in configs {
             let inherit = config.inherit.unwrap_or(true);
+            let replace_match = config.replace.contains(&Replace::Match);
             let profile = Profile::validate(&name, config)?;
             match self.0.get_mut(&name) {
-                Some(existing) if inherit => existing.merge(&profile),
+                Some(existing) if inherit => {
+                    if replace_match {
+                        existing.patterns.clear();
+                    }
+                    existing.merge(&profile);
+                }
                 _ => {
                     self.0.insert(name, profile);
                 }
@@ -909,7 +1008,45 @@ mod tests {
     fn match_takes_one_glob_or_several() {
         let map = load(&["[a]\nmatch = \"curl\"\n[b]\nmatch = [\"zed\", \"code*\"]\n"]);
         assert_eq!(map.0["a"].patterns.len(), 1);
-        assert!(map.0["b"].patterns.iter().any(|p| p.matches("code-oss")));
+        assert!(map.0["b"].patterns.iter().any(|p| p.matches("code-oss", "code-oss")));
+    }
+
+    #[test]
+    fn a_pattern_says_what_it_is_and_what_it_matches() {
+        let line = |p: &str, name: &str, line: &str| {
+            CommandPattern::new(p).unwrap().matches(name, line)
+        };
+        // A glob without a space: the name alone, whole.
+        assert!(line("git", "git", "git push"));
+        assert!(!line("git", "gitk", "gitk"));
+        // With a space: the command line.
+        assert!(line("git push*", "git", "git push origin"));
+        assert!(!line("git push*", "git", "git status"));
+        // A regex, unanchored, on the name unless it holds a space.
+        assert!(line("/it/", "git", "nothing"));
+        assert!(!line("/^it/", "git", "it"));
+        assert!(line("/^git push /", "git", "git push origin"));
+        // Flags as in sed.
+        assert!(line("/^GIT$/i", "git", ""));
+        assert!(!line("/^GIT$/", "git", ""));
+        // The last slash closes it.
+        assert!(line(r"/a\/b/", "a/b", ""));
+    }
+
+    #[test]
+    fn an_unknown_regex_flag_is_an_error() {
+        let err = profile_error("[a]\nmatch = \"/usr/bin\"\n");
+        assert!(err.contains("unknown regex flag 'b'"), "{err}");
+        assert!(profile_error("[a]\nmatch = \"/(/\"\n").contains("invalid match pattern"));
+    }
+
+    #[test]
+    fn the_command_line_is_the_name_and_the_arguments() {
+        assert_eq!(command_line("git", &[]), "git");
+        assert_eq!(
+            command_line("git", &["commit".to_owned(), "-m a b".to_owned()]),
+            "git commit -m a b"
+        );
     }
 
     #[test]
@@ -970,6 +1107,28 @@ mod tests {
         assert!(cargo.patterns.is_empty());
         assert_eq!(cargo.confirm, None);
         assert_eq!(cargo.filesystem.read, ["/b"]);
+    }
+
+    /// `replace = ["match"]` takes the patterns from this file alone, and
+    /// still adds to everything else.
+    #[test]
+    fn replace_match_drops_the_inherited_patterns() {
+        let map = load(&[
+            "[cargo]\nmatch = [\"cargo\", \"rustc\"]\nfilesystem.read = [\"/a\"]\n",
+            "[cargo]\nreplace = [\"match\"]\nmatch = \"cargo\"\nfilesystem.read = [\"/b\"]\n",
+        ]);
+        let cargo = &map.0["cargo"];
+        let patterns: Vec<&str> = cargo.patterns.iter().map(CommandPattern::as_str).collect();
+        assert_eq!(patterns, ["cargo"]);
+        assert_eq!(cargo.filesystem.read, ["/a", "/b"]);
+
+        let map = load(&["[a]\nmatch = \"a\"\n", "[a]\nreplace = [\"match\"]\n"]);
+        assert!(map.0["a"].patterns.is_empty(), "nothing left to match");
+    }
+
+    #[test]
+    fn replace_names_known_fields_only() {
+        split("[a]\nreplace = [\"filesystem\"]\n").expect_err("not replaceable");
     }
 
     /// Configs written for the old rules say so, rather than silently

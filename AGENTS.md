@@ -27,8 +27,8 @@ cargo make release [VERSION]
 ## Config and profiles
 
 - Search order, first match wins: `$PWD/.scudo.toml`, `$XDG_CONFIG_HOME/scudo/config.toml`, `/etc/scudo/config.toml`.
-- Each TOML section is a profile; `[scudo]` is reserved for scudo's own settings (`[scudo.log]`, `[scudo.tui]`) and a profile key there is an error. Section names serve only `extend` and `--profile`; only `match` (`{ pattern, type = "exact"|"glob"|"regex" }`) matches commands. A profile without `match` is a base for `extend`.
-- Precedence: glob < regex < exact < `--profile`.
+- Each TOML section is a profile; `[scudo]` is reserved for scudo's own settings (`[scudo.log]`, `[scudo.tui]`) and a profile key there is an error. Section names serve only `extend` and `--profile`; only `match` matches commands (`config::CommandPattern`: `/re/flags` is an unanchored regex, anything else a glob; a space in the pattern compares it with `name arg…` instead of the name). A profile without `match` is a base for `extend`.
+- Matched profiles apply in definition order, then `--profile` in command-line order. `extend` never carries `match`; a same-named profile adds to its patterns unless it says `replace = ["match"]`.
 - Resolution flattens the whole `extend` graph into one merge order (each profile after its bases, shared bases applied once) and merges each profile once. Merging branches separately would resolve `"..."` early and make one branch's list replace its sibling's.
 - Unit properties live only in the `systemd` sub-table, so every other key is known and an unknown one is rejected as a typo. `network` is kept as raw TOML (for `"..."` splicing); `log` is parsed at load time and merged field by field with `.or()`.
 - Single-valued properties a profile sets are never overwritten by what scudo adds (only warned about); lists are appended to.
@@ -79,7 +79,7 @@ cargo make release [VERSION]
 
 - `delegate` picks target profiles that are `delegable` and have a `match`; the opt-in is on the target. `--delegate`/`--no-delegate` are refused inside a sandbox.
 - The broker runs the same binary outside with `--delegated <id>`, so everything goes through `run()`; keep logic out of the broker.
-- The request widens nothing: only the command name selects profiles; only peers in the caller's unit are served; cwd and every path in `ResolvedProfile::derived` must be the same inode outside and under a root the caller can write. A delegated run never prompts (untrusted `.scudo.toml` and `confirm` are errors) and always ends sandboxed.
+- The request widens nothing: only the command line selects profiles (through `match`); only peers in the caller's unit are served; cwd and every path in `ResolvedProfile::derived` must be the same inode outside and under a root the caller can write. A delegated run never prompts (untrusted `.scudo.toml` and `confirm` are errors) and always ends sandboxed.
 - Fail closed: an unresponsive broker is an error.
 - Stop by unit name (`systemctl --user stop`/`kill`); `SIGWINCH` goes to `systemd-run`.
 - Command and watcher output go to the requester's stderr (`runner::Options::stderr`); scudo's own logs stay on the broker's.

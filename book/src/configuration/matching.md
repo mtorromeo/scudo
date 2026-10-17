@@ -2,7 +2,13 @@
 
 ## Match patterns
 
-`match` holds one glob, or an array of them, compared against the name of the command — its last path component, so `/usr/bin/curl` is `curl`. Any one of them matching is enough.
+`match` holds one pattern, or an array of them. Any one of them matching is enough.
+
+- A pattern written `/…/` is a regular expression ([`regex` syntax](https://docs.rs/regex/latest/regex/#syntax)), optionally followed by flags as in sed: `i` (case-insensitive), `m` (multi-line), `s` (`.` matches newlines), `x` (verbose), `U` (swap greedy and lazy). It is not anchored: it matches anywhere unless it says `^…$`. The last `/` closes it, so a `/` inside needs no escaping, and an unknown flag is an error. Write regexes in single quotes, as TOML literal strings, so that backslashes reach the regex as written (`"\S"` is not a valid TOML string).
+- Any other pattern is a glob, which has to match the whole text.
+- A pattern holding a space is compared with the **command line**: the command's name, then its arguments, joined by single spaces (no quoting). Any other pattern is compared with the **name** alone.
+
+The name is the command's last path component, so `/usr/bin/curl` is `curl`, also at the start of the command line.
 
 | Form | Meaning |
 |------|---------|
@@ -11,6 +17,9 @@
 | `match = ["zed", "zeditor"]` | either `zed` or `zeditor` |
 | `match = "code*"` | `code`, `code-oss`, `code-insiders`, … |
 | `match = "*"` | every command: a catch-all default |
+| `match = "git push*"` | `git push`, `git push origin main`, … but not `git status` |
+| `match = '/^python3?$/'` | `python` or `python3`, not `python3.12` |
+| `match = '/^npm( \S+)* (-g\|--global)( \|$)/'` | `npm` run with `-g` or `--global` anywhere among its arguments |
 
 Every profile that matches is applied, in the order the profiles were written (see [Combining profiles](#combining-profiles)).
 
@@ -81,7 +90,17 @@ A profile defined again in a higher-priority config file **adds to** the one bel
 filesystem.write = ["$SCUDO_CONFIG_DIR/target"]
 ```
 
-To replace the lower-priority profile instead, set `inherit = false`:
+To replace only its `match` patterns and keep adding to the rest, list `match` in `replace`. With `replace = ["match"]` and no `match`, the profile no longer matches anything and becomes a base:
+
+```toml
+# the system-wide profile matches "cargo" and "rustc"
+[cargo]
+replace = ["match"]
+match = "cargo"
+filesystem.write = ["$SCUDO_CONFIG_DIR/target"]
+```
+
+To replace the lower-priority profile as a whole, set `inherit = false`:
 
 ```toml
 [cargo]

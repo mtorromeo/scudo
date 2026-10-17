@@ -15,8 +15,9 @@
 //! inside the agent's.
 //!
 //! **What the broker guards is that the request cannot widen anything.** The
-//! command's name has to be matched by a delegated profile, and nothing else
-//! of the command line reaches the profile selection. The working directory is
+//! command has to be matched by a delegated profile, through that profile's
+//! own `match` patterns (on the name, or on the whole command line), and
+//! nothing else of the request reaches the profile selection. The working directory is
 //! read from the kernel rather than taken from the request, and has to be the
 //! very same directory outside the sandbox, inside something the sandbox could
 //! already write. And the paths a profile works out from the request — `$PWD`,
@@ -46,10 +47,14 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use glob::Pattern;
 use serde::{Deserialize, Serialize};
 
-use crate::{bpfd::cgroup, nested, policy::dbus};
+use crate::{
+    bpfd::cgroup,
+    config::{CommandPattern, command_line},
+    nested,
+    policy::dbus,
+};
 
 /// How many delegated commands may run at once for one sandbox.
 const MAX_IN_FLIGHT: usize = 16;
@@ -265,7 +270,7 @@ pub fn serve(
 /// What every connection needs, prepared once.
 struct Context<'a> {
     spec: &'a Spec,
-    patterns: Vec<(String, Vec<Pattern>)>,
+    patterns: Vec<(String, Vec<CommandPattern>)>,
     roots: Vec<PathBuf>,
     uid: u32,
     self_exe: PathBuf,
@@ -279,10 +284,12 @@ impl<'a> Context<'a> {
         let patterns = spec
             .delegates
             .iter()
-            .map(|(name, globs)| {
-                let compiled = globs
+            .map(|(name, sources)| {
+                let compiled = sources
                     .iter()
-                    .map(|g| Pattern::new(g).with_context(|| format!("invalid pattern '{g}'")))
+                    .map(|p| {
+                        CommandPattern::new(p).with_context(|| format!("invalid pattern '{p}'"))
+                    })
                     .collect::<Result<_>>()?;
                 Ok((name.clone(), compiled))
             })
@@ -350,10 +357,11 @@ fn handle(stream: &UnixStream, ctx: &Context<'_>, sink: &(dyn Fn(Event) + Sync))
     let name = Path::new(&command)
         .file_name()
         .map_or_else(|| command.clone(), |n| n.to_string_lossy().into_owned());
+    let line = command_line(&name, &args);
     let profiles: Vec<String> = ctx
         .patterns
         .iter()
-        .filter(|(_, patterns)| patterns.iter().any(|p| p.matches(&name)))
+        .filter(|(_, patterns)| patterns.iter().any(|p| p.matches(&name, &line)))
         .map(|(profile, _)| profile.clone())
         .collect();
     if profiles.is_empty() {

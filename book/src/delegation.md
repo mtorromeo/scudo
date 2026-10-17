@@ -39,7 +39,7 @@ is `delegable` and has a `match`. It can also be given a name or a list of names
 only those. A name that does not exist, has no `match` or is not `delegable` is an error.
 Both forms accumulate when profiles are combined.
 
-A command is delegated when its name matches a delegated profile, and it then runs exactly as
+A command is delegated when a delegated profile matches it (by name, or by the whole command line for a pattern that holds a space), and it then runs exactly as
 it would have from a terminal, under every profile that matches it. It runs in a sandbox
 *beside* the agent's, not inside it, so the agent's profile no longer has to carry each
 tool's caches and credentials: it can stay as narrow as the agent itself needs.
@@ -133,8 +133,11 @@ and so is one whose caller is killed.
 The request is the agent's, and its command line is the agent's to write, so nothing in it
 gets to widen what the delegated sandbox may do:
 
-- **Only the command's name chooses the profiles.** `--profile`, `--no-match`, `-P` and the
-  network flags are refused.
+- **Only the command line chooses the profiles**, through the profiles' own `match` patterns.
+  `--profile`, `--no-match`, `-P` and the network flags are refused. Since the arguments are
+  the agent's to write, a pattern on the command line can be dodged (`--global` for `-g`,
+  `git -C . push` for `git push`): it can choose what to delegate, but never keep a command
+  from being delegated.
 - **The working directory comes from the kernel**, not from the request. It has to be the
   very same directory outside the sandbox, which rules out a private `/tmp` or a hidden
   `$HOME`. It also has to lie inside something the agent can already write.
