@@ -79,6 +79,12 @@ fn read_name(msg: &[u8], start: usize) -> Result<(String, usize)> {
                 // happen.
                 bail!("DNS name has a forward compression pointer");
             }
+            if target < HEADER_LEN {
+                // Nothing in a real message lives there, and the header is
+                // what `refuse` rewrites: a name read out of it would not be
+                // the name echoed back.
+                bail!("DNS name points into the header");
+            }
             at = target;
             continue;
         }
@@ -376,6 +382,18 @@ mod tests {
             slot.copy_from_slice(&[0xc0, 0x0c]);
         }
         question(&msg).unwrap_err();
+    }
+
+    /// Found by the `dns` fuzz target: a name spelt out of the answer count,
+    /// which the refusal zeroes, so the refusal asked a different question.
+    #[test]
+    fn refuses_a_name_read_out_of_the_header() {
+        let msg = [
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0xff, 0xff, 0x00, 0x42, 0xc0, 0x07,
+            0x1c, 0x01, 0x0f,
+        ];
+        question(&msg).unwrap_err();
+        answers(&msg).unwrap_err();
     }
 
     #[test]
