@@ -30,6 +30,11 @@ pub struct Options<'a> {
     /// The name to give the unit, when it has to be told apart from others:
     /// a sealed sandbox; see [`crate::nested`].
     pub unit: Option<&'a str>,
+    /// A descriptor to put in place of stderr just before the command starts,
+    /// so that the watcher and the command write to it while everything scudo
+    /// said before still went to the stderr it was started with. A delegated
+    /// run uses it for the requester's stderr; see [`crate::broker`].
+    pub stderr: Option<i32>,
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -118,10 +123,34 @@ pub fn exec(
         }
     }
 
+    if let Some(fd) = options.stderr {
+        // SAFETY: dup2 on descriptors this process owns.
+        if unsafe { libc::dup2(fd, 2i32) } < 0i32 {
+            return Err(std::io::Error::last_os_error()).context("taking over stderr");
+        }
+        // SAFETY: the original is not used again.
+        if unsafe { libc::close(fd) } != 0i32 {
+            debug!(
+                "closing the stderr handed over: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
     // After the prompt, so that declining leaves nothing behind, and before the
     // exec, which is the last moment this process gets to start anything.
     if log_denials && let Some(token) = shim_token {
-        spawn_watcher(token, command, log);
+        // A delegated run's watcher writes to the requester, which wants the
+        // refusals, not every path that was never there.
+        if options.stderr.is_some() {
+            let quieter = LogConfig {
+                level: Some(Level::Info),
+                ..log.clone()
+            };
+            spawn_watcher(token, command, &quieter);
+        } else {
+            spawn_watcher(token, command, log);
+        }
     }
     if let Some(proxy) = dbus_proxy {
         proxy.write_args()?;
@@ -169,7 +198,14 @@ fn spawn_watcher(token: &str, command: &Path, log: &LogConfig) {
 /// watcher exists only because the denials were asked for, and its closing
 /// summary must not then be filtered out by a quieter level.
 fn watcher_log_env(log: &LogConfig) -> Vec<(&'static str, String)> {
-    let mut env = vec![("SCUDO_LOG_LEVEL", log.level().max(Level::Info).to_string())];
+    log_env(log, Level::Info)
+}
+
+/// `log` as the `SCUDO_LOG_*` variables a scudo started by this one reads,
+/// never quieter than `floor`.
+#[must_use]
+pub fn log_env(log: &LogConfig, floor: Level) -> Vec<(&'static str, String)> {
+    let mut env = vec![("SCUDO_LOG_LEVEL", log.level().max(floor).to_string())];
     if let Some(targets) = log.targets.as_ref() {
         env.push((
             "SCUDO_LOG_TARGET",
@@ -273,6 +309,7 @@ mod tests {
             log_denials: false,
             dbus_proxy: None,
             unit,
+            stderr: None,
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")

@@ -19,14 +19,9 @@ use tracing::{debug, error, warn};
 #[derive(Debug, Parser)]
 #[command(about, version, author)]
 #[expect(clippy::struct_field_names, reason = "the log flags share a prefix")]
-// Only with the UI does the count of flags reach the limit; without it the
-// expectation would go unfulfilled, which is itself a warning.
-#[cfg_attr(
-    feature = "tui",
-    expect(
-        clippy::struct_excessive_bools,
-        reason = "each is a flag the person typed, and they are independent"
-    )
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a flag of its own, and they are independent"
 )]
 struct Args {
     /// Enable verbose output. A shorthand for `--log-level debug`.
@@ -69,6 +64,14 @@ struct Args {
     /// Skip profile matching; apply only the profiles given with --profile.
     #[arg(long)]
     no_match: bool,
+
+    /// Run commands started inside the sandbox under their own profile when it is delegable, as `delegate = true` does.
+    #[arg(long, overrides_with = "no_delegate")]
+    delegate: bool,
+
+    /// Run every command started inside the sandbox in the sandbox itself, whatever `delegate` says.
+    #[arg(long, overrides_with = "delegate")]
+    no_delegate: bool,
 
     /// Allow a destination (address, CIDR, host or glob), even one a profile denies (repeatable, comma-separated).
     #[arg(long, value_name = "DEST", value_delimiter = ',')]
@@ -118,6 +121,25 @@ struct Args {
         conflicts_with_all = ["bpf_shim", "bpf_watch"]
     )]
     dbus_proxy: Option<String>,
+
+    /// Internal: serve the delegation requests of the sandbox that started us.
+    /// Set by scudo itself when a profile delegates commands.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = ["bpf_shim", "bpf_watch", "dbus_proxy"]
+    )]
+    broker: bool,
+
+    /// Internal: run the command for a sandbox's broker, as sandbox ID. Set by
+    /// the broker itself.
+    #[arg(
+        long,
+        value_name = "ID",
+        hide = true,
+        conflicts_with_all = ["bpf_shim", "bpf_watch", "dbus_proxy", "broker"]
+    )]
+    delegated: Option<String>,
 
     #[arg()]
     command: String,
@@ -229,12 +251,135 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         std::process::exit(code);
     }
 
-    let bin = which(&args.command, &self_exe)?;
+    if args.broker {
+        return scudo::broker::run_process(&log_broker_event);
+    }
 
     // Before the config, so that no file anyone else wrote has a say in it.
     if scudo::nested::inside_sealed_sandbox() {
+        refuse_nested_flags(&args)?;
+        // Before looking the command up: the sandbox may not even let us see
+        // it, and outside is where it will be found.
+        if scudo::nested::broker_mounted() {
+            match scudo::broker::delegate(&args.command, &args.command_args)? {
+                scudo::broker::Outcome::NotDelegated => {}
+                scudo::broker::Outcome::Exited { code, signal } => exit_like(code, signal),
+            }
+        }
+        let bin = which(&args.command, &self_exe)?;
         return run_nested(&bin, &args);
     }
+
+    let delegation = match args.delegated.as_deref() {
+        Some(id) => Some(Delegation::from_env(id, &args)?),
+        None => None,
+    };
+    if delegation.is_some() {
+        // Whatever goes wrong from here on, the requester has to be told: its
+        // stderr is the only place it is looking.
+        return run_sandboxed(&args, &self_exe, logging, &cli_log, delegation.as_ref())
+            .inspect_err(tell_requester);
+    }
+    run_sandboxed(&args, &self_exe, logging, &cli_log, None)
+}
+
+/// What a run on behalf of a sandbox's broker is held to.
+struct Delegation {
+    id: String,
+    limits: scudo::broker::Limits,
+}
+
+impl Delegation {
+    fn from_env(id: &str, args: &Args) -> Result<Self> {
+        // The command line is the requester's in all but name: nothing on it
+        // may choose a profile or loosen one.
+        #[cfg(feature = "tui")]
+        let tui = args.tui;
+        #[cfg(not(feature = "tui"))]
+        let tui = false;
+        if !args.profile.is_empty()
+            || args.no_match
+            || !args.property.is_empty()
+            || !args.allow_dest.is_empty()
+            || !args.deny_dest.is_empty()
+            || !args.allow_port.is_empty()
+            || !args.deny_port.is_empty()
+            || args.delegate
+            || args.no_delegate
+            || args.confirm
+            || tui
+        {
+            anyhow::bail!("a delegated run takes no options");
+        }
+        let limits = serde_json::from_str(
+            &std::env::var(scudo::broker::DELEGATE_ENV)
+                .with_context(|| format!("{} is not set", scudo::broker::DELEGATE_ENV))?,
+        )
+        .context("reading the delegation's limits")?;
+        Ok(Delegation {
+            id: id.to_owned(),
+            limits,
+        })
+    }
+}
+
+/// Say what went wrong where the requester of a delegated run will see it.
+fn tell_requester(err: &anyhow::Error) {
+    use std::{io::Write as _, os::fd::FromRawFd as _};
+
+    // SAFETY: the broker put the requester's stderr there for us to write to;
+    // `ManuallyDrop` leaves closing it to the process exit.
+    let file = unsafe { std::fs::File::from_raw_fd(scudo::broker::REQUESTER_STDERR) };
+    let mut file = core::mem::ManuallyDrop::new(file);
+    drop(writeln!(file, "scudo: {err:#}"));
+}
+
+/// Exit the way the delegated command did: with its code, or by its signal.
+fn exit_like(code: Option<i32>, signal: Option<i32>) -> ! {
+    if let Some(signal) = signal {
+        // SAFETY: restoring the default disposition, so that the signal
+        // raised next is not ignored or handled.
+        let restored = unsafe { libc::signal(signal, libc::SIG_DFL) } != libc::SIG_ERR;
+        // SAFETY: raising it on ourselves is how a parent learns what killed
+        // its child.
+        if restored && unsafe { libc::raise(signal) } != 0i32 {
+            debug!("cannot end by signal {signal}");
+        }
+        // Still here: say it the way a shell would.
+        #[expect(clippy::exit, reason = "the command's end has to become scudo's")]
+        exit(signal.saturating_add(128i32));
+    }
+    #[expect(clippy::exit, reason = "the command's code has to become scudo's")]
+    exit(code.unwrap_or(1i32));
+}
+
+/// Report what the broker did: refusals always, the rest when asked for.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "a sink is handed each event to keep"
+)]
+fn log_broker_event(event: scudo::broker::Event) {
+    if event.is_refusal() {
+        warn!("{event}");
+    } else {
+        debug!("{event}");
+    }
+}
+
+/// The run itself, from the config to `systemd-run`: from a terminal, or for a
+/// broker when `delegation` is set.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one straight path from the profiles to the exec"
+)]
+fn run_sandboxed(
+    args: &Args,
+    self_exe: &Path,
+    logging: &scudo::logging::Handle,
+    cli_log: &LogConfig,
+    delegation: Option<&Delegation>,
+) -> Result<()> {
+    let bin = which(&args.command, &self_exe.to_path_buf())?;
 
     // Before the config: a mistyped rule is the command line's fault, and says
     // so without waiting on anything else.
@@ -245,7 +390,9 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         &args.deny_port,
     )?;
 
-    let loaded = scudo::config::load_configs()?;
+    // A delegated run's standard input is the requester's: no question may be
+    // put to it.
+    let loaded = scudo::config::load_configs_with(delegation.is_none())?;
     let mut resolved = scudo::profile::resolve_with(
         &loaded.profiles,
         &args.command,
@@ -258,9 +405,26 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         },
     )?;
 
+    if let Some(delegation) = delegation {
+        if !resolved
+            .matched
+            .iter()
+            .any(|name| delegation.limits.allow.contains(name))
+        {
+            anyhow::bail!("'{}' is not matched by a delegated profile", args.command);
+        }
+        if resolved.confirm {
+            anyhow::bail!("its profile asks for confirmation, which a delegated run cannot ask");
+        }
+        scudo::broker::check_derived(&resolved.derived, &delegation.limits.roots)?;
+    }
+
     // The command line has the last word, so it goes on top of what the
     // profiles settled on, which in turn sit on the `[scudo]` defaults.
-    let log = cli_log.over(resolved.log).over(loaded.settings.log.clone());
+    let log = cli_log
+        .clone()
+        .over(resolved.log)
+        .over(loaded.settings.log.clone());
     logging.reconfigure(&log)?;
 
     // Everything `--verbose` used to switch on now hangs off the level, so that
@@ -363,7 +527,10 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     let mut dbus_proxy = None;
     let mut unit = None;
     if !unsandboxed {
-        let bus = scudo::policy::dbus::prepare(&resolved.dbus);
+        let bus = scudo::policy::dbus::prepare(
+            &resolved.dbus,
+            delegation.map(|delegation| delegation.id.as_str()),
+        );
         let properties: Vec<String> = bus
             .properties
             .iter()
@@ -394,18 +561,80 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         unit = bus.unit;
     }
 
+    if let Some(delegation) = delegation {
+        if unsandboxed {
+            // Outside the requester's sandbox and in none of its own: that is
+            // no sandbox at all.
+            anyhow::bail!("'{}' would run without a sandbox", args.command);
+        }
+        // Named even when unsealed, so that the broker knows what to stop.
+        unit = unit.or_else(|| Some(scudo::broker::plain_unit(&delegation.id)));
+    }
+
+    // The command line has the last word here too: `--delegate` adds every
+    // delegable profile to what the profiles named, `--no-delegate` takes all
+    // of it away.
+    if args.no_delegate {
+        resolved.delegate.clear();
+    } else if args.delegate {
+        let all = loaded.profiles.delegates(&scudo::config::Delegate {
+            all: true,
+            names: Vec::new(),
+        });
+        for name in all {
+            if !resolved.delegate.contains(&name) {
+                resolved.delegate.push(name);
+            }
+        }
+    } else {
+        // Neither: the profiles decide.
+    }
+
+    let broker = if resolved.delegate.is_empty() || unsandboxed {
+        None
+    } else {
+        let Some(sandbox) = unit.as_deref() else {
+            anyhow::bail!(
+                "delegating commands needs a sealed sandbox, and this profile lets the \
+                 command reach the service manager (`dbus.session = \"allow\"`)"
+            );
+        };
+        let private_tmp = scudo::runner::property_value(&resolved.systemd_args, "PrivateTmp")
+            .is_some_and(|value| !matches!(value, "no" | "false" | "0" | "off"));
+        let broker = prepare_broker(
+            &loaded.profiles,
+            &resolved.delegate,
+            &resolved.writable,
+            private_tmp,
+            sandbox,
+            &log,
+        )?;
+        let first_cli = resolved
+            .systemd_args
+            .iter()
+            .position(|arg| arg.starts_with("--property="))
+            .unwrap_or(resolved.systemd_args.len());
+        resolved
+            .systemd_args
+            .splice(first_cli..first_cli, broker.properties());
+        Some(broker)
+    };
+
     for warning in &warnings {
         warn!("{warning}");
     }
 
     let options = scudo::runner::Options {
-        verbose,
+        // `systemd-run`'s own chatter would go to the requester of a delegated
+        // run, which asked for the command and not for that.
+        verbose: verbose && delegation.is_none(),
         confirm: resolved.confirm,
         log: &log,
         shim_token: shim_token.as_deref(),
         log_denials: reporting,
         dbus_proxy: dbus_proxy.as_ref(),
         unit: unit.as_deref(),
+        stderr: delegation.map(|_| scudo::broker::REQUESTER_STDERR),
     };
 
     #[cfg(feature = "tui")]
@@ -419,7 +648,7 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         };
         return start_ui(
             cmd,
-            &args,
+            args,
             logging,
             &log,
             &loaded.settings.tui,
@@ -430,8 +659,13 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
                 reporting: reporting_state(reporting, shim_token_present, network_unwatched),
                 confirm: resolved.confirm,
                 dbus_proxy: dbus_proxy.as_ref(),
+                broker,
             },
         );
+    }
+
+    if let Some(broker) = broker {
+        broker.spawn(self_exe, &args.command)?;
     }
 
     if unsandboxed {
@@ -451,6 +685,23 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
 /// and are not quietly dropped: they fail instead. `--no-match` only takes
 /// profiles away, which is what happens here anyway.
 fn run_nested(bin: &Path, args: &Args) -> Result<()> {
+    debug!(
+        "already inside a scudo sandbox that cannot start another one: \
+         running '{}' in it as it is",
+        args.command
+    );
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(&args.command_args);
+    scudo::runner::confirm(&scudo::runner::render(&cmd), args.confirm)?;
+    let err = cmd.exec();
+    Err(anyhow::Error::from(err).context("exec failed"))
+}
+
+/// The restrictions the command line asks for explicitly cannot be had inside
+/// a sandbox, whether the command then runs there or is delegated, and are not
+/// quietly dropped: they fail instead. `--no-match` only takes profiles away,
+/// which is what happens here anyway.
+fn refuse_nested_flags(args: &Args) -> Result<()> {
     #[cfg(feature = "tui")]
     let tui = args.tui;
     #[cfg(not(feature = "tui"))]
@@ -462,6 +713,8 @@ fn run_nested(bin: &Path, args: &Args) -> Result<()> {
         ("--deny-dest", !args.deny_dest.is_empty()),
         ("--allow-port", !args.allow_port.is_empty()),
         ("--deny-port", !args.deny_port.is_empty()),
+        ("--delegate", args.delegate),
+        ("--no-delegate", args.no_delegate),
         ("--tui", tui),
     ];
     let asked: Vec<&str> = asked
@@ -475,17 +728,46 @@ fn run_nested(bin: &Path, args: &Args) -> Result<()> {
             asked.join(", ")
         );
     }
+    Ok(())
+}
 
-    debug!(
-        "already inside a scudo sandbox that cannot start another one: \
-         running '{}' in it as it is",
-        args.command
-    );
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(&args.command_args);
-    scudo::runner::confirm(&scudo::runner::render(&cmd), args.confirm)?;
-    let err = cmd.exec();
-    Err(anyhow::Error::from(err).context("exec failed"))
+/// Make the socket and the spec for the broker of `sandbox`.
+fn prepare_broker(
+    profiles: &scudo::config::ValidatedConfigMap,
+    delegate: &[String],
+    writable: &[PathBuf],
+    private_tmp: bool,
+    sandbox: &str,
+    log: &LogConfig,
+) -> Result<scudo::broker::Setup> {
+    let (listener, socket) = scudo::broker::listen(sandbox)?;
+    // A private `/tmp` is not the `/tmp` outside: nothing in it is the same
+    // directory for the broker, and nothing under it may be handed over.
+    let roots = writable
+        .iter()
+        .filter(|root| {
+            !private_tmp || !["/tmp", "/var/tmp"].iter().any(|tmp| root.starts_with(tmp))
+        })
+        .cloned()
+        .collect();
+    let spec = scudo::broker::Spec {
+        delegates: profiles.delegate_patterns(delegate),
+        roots,
+        unit: sandbox.to_owned(),
+        parent: i32::try_from(std::process::id()).context("pid out of range")?,
+        log_env: scudo::runner::log_env(log, Level::Off)
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    };
+    for (name, _) in &spec.delegates {
+        debug!("commands of profile '{name}' are delegated to a sandbox of their own");
+    }
+    Ok(scudo::broker::Setup {
+        listener,
+        socket,
+        spec,
+    })
 }
 
 /// What the UI needs that the command line does not carry.
@@ -499,6 +781,7 @@ struct UiContext<'a> {
     reporting: scudo::tui::Reporting,
     confirm: bool,
     dbus_proxy: Option<&'a scudo::policy::dbus::Proxy>,
+    broker: Option<scudo::broker::Setup>,
 }
 
 /// Why the panel would be empty, so it can say so rather than look broken.
@@ -597,6 +880,7 @@ fn start_ui(
             config,
             panel_width: remembered.tui.panel_width,
         },
+        context.broker,
     );
 
     logging.reconfigure(log)?;

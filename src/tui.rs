@@ -130,8 +130,15 @@ mod run {
         Denial(Notification),
         /// The daemon closed the notification stream: the sandbox is gone.
         DenialsClosed,
+        /// The broker started, refused or finished a delegated command.
+        Delegation(crate::broker::Event),
         Exited(ExitStatus),
     }
+
+    /// How many lines about delegated commands the context area keeps: the
+    /// latest are what is worth reading, and every line kept takes a row from
+    /// the command's terminal while the area is open.
+    const DELEGATION_LINES: usize = 6;
 
     /// How the run ended.
     #[derive(Debug)]
@@ -149,7 +156,14 @@ mod run {
     }
 
     /// Run `cmd` in the terminal UI, returning what it exited with.
-    pub fn run(mut cmd: Command, options: &Options<'_>) -> Result<Outcome> {
+    ///
+    /// With `broker`, the sandbox's delegation requests are served from a
+    /// thread of this process, and what it does is shown in the context area.
+    pub fn run(
+        mut cmd: Command,
+        options: &Options<'_>,
+        broker: Option<crate::broker::Setup>,
+    ) -> Result<Outcome> {
         // Checked before anything is torn down or started: failing here has to
         // leave the person exactly where they were.
         if !std::io::stdout().is_terminal() {
@@ -162,7 +176,7 @@ mod run {
         // From here on the terminal is ours, and every path out of this function
         // has to give it back — hence the single call site below rather than a
         // `?` on each step.
-        let result = session(&mut terminal, &mut cmd, options, prefix);
+        let result = session(&mut terminal, &mut cmd, options, prefix, broker);
         ratatui::restore();
         best_effort(
             "give back the modes it was put in",
@@ -187,6 +201,7 @@ mod run {
         cmd: &mut Command,
         options: &Options<'_>,
         prefix: KeySpec,
+        broker: Option<crate::broker::Setup>,
     ) -> Result<(i32, Option<String>, Option<u16>)> {
         best_effort(
             "take pastes as pastes",
@@ -233,6 +248,14 @@ mod run {
         if let Some(token) = options.token.clone() {
             start_watcher(token, tx.clone());
         }
+        let broker = match broker {
+            Some(setup) => {
+                let tx = tx.clone();
+                let sink = Box::new(move |event| drop(tx.send(Event::Delegation(event))));
+                Some(setup.start_thread(sink)?)
+            }
+            None => None,
+        };
 
         let mut dirty = true;
         let mut last_drawn = Instant::now()
@@ -268,6 +291,11 @@ mod run {
         // One last frame, so what the command printed as it exited is on screen
         // when the terminal is handed back.
         terminal.draw(|frame| app.draw(frame, parser.screen()))?;
+        // Stopping it stops whatever it still runs: the sandbox those were
+        // started for is gone.
+        if let Some(broker) = broker {
+            broker.shutdown();
+        }
 
         let summary = matches!(options.reporting, Reporting::Watching)
             .then(|| app.denials.summary_line(options.command));
@@ -283,6 +311,9 @@ mod run {
         denials: Denials,
         command: String,
         context: Vec<String>,
+        /// How many lines of `context` were there from the start; the ones
+        /// after are about delegated commands, and only the latest are kept.
+        base_context: usize,
         reporting: Reporting,
         prefix: KeySpec,
         prefix_label: String,
@@ -328,6 +359,7 @@ mod run {
     impl App {
         fn new(options: &Options<'_>, prefix: KeySpec, host: query::Host) -> Self {
             App {
+                base_context: options.context.len(),
                 denials: Denials::default(),
                 command: options.command.to_owned(),
                 context: options.context.clone(),
@@ -410,7 +442,22 @@ mod run {
                 Event::Input(input) => self.input(input, parser, writer, pid),
                 Event::Denial(notification) => self.denials.push(&notification, &self.command),
                 Event::DenialsClosed => self.denials.close(),
+                Event::Delegation(event) => self.delegation(&event),
                 Event::Exited(status) => self.exited(status),
+            }
+        }
+
+        /// Note what the broker did in the context area, keeping the latest few.
+        fn delegation(&mut self, event: &crate::broker::Event) {
+            let prefix = if event.is_refusal() {
+                "refused"
+            } else {
+                "broker"
+            };
+            self.context.push(format!("{prefix}: {event}"));
+            let delegated = self.context.len().saturating_sub(self.base_context);
+            if delegated > DELEGATION_LINES {
+                self.context.remove(self.base_context);
             }
         }
 
@@ -1049,6 +1096,32 @@ mod run {
 
         use super::*;
         use crate::bpfd::protocol::{FileError, FileOp, Outside};
+
+        /// The context area keeps the latest few delegations, and never at the
+        /// expense of what it was opened with.
+        #[test]
+        fn only_the_latest_delegations_are_kept() {
+            let mut app = app(120, 40);
+            app.context
+                .push("profile 'agent' matched 'claude'".to_owned());
+            app.base_context = 1;
+            for n in 0..10 {
+                app.delegation(&crate::broker::Event::NotDelegated {
+                    command: format!("cmd{n}"),
+                });
+            }
+            assert_eq!(app.context.len(), 1 + DELEGATION_LINES);
+            assert_eq!(
+                app.context.first().map(String::as_str),
+                Some("profile 'agent' matched 'claude'")
+            );
+            assert!(app.context.last().unwrap().contains("cmd9"));
+            app.delegation(&crate::broker::Event::Refused {
+                command: "make".to_owned(),
+                reason: "outside".to_owned(),
+            });
+            assert!(app.context.last().unwrap().starts_with("refused: "));
+        }
 
         fn app(width: u16, height: u16) -> App {
             let options = Options {

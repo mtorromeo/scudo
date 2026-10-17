@@ -33,6 +33,58 @@ where
     }
 }
 
+/// What a profile's `delegate` says: every delegable profile, some by name, or
+/// both, once profiles are combined.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Delegate {
+    /// `delegate = true`: every profile that is `delegable` and has a `match`.
+    pub all: bool,
+    /// Profiles named one by one.
+    pub names: Vec<String>,
+}
+
+impl Delegate {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.all && self.names.is_empty()
+    }
+
+    /// Both say what they say: `true` on either side stays, and the names
+    /// accumulate like any other list.
+    fn merge(&mut self, other: &Delegate) {
+        self.all = self.all || other.all;
+        union(&mut self.names, &other.names);
+    }
+}
+
+/// `delegate` as written: `true`, a name, or a list of names. `false` says
+/// nothing, since what a profile inherits can only be added to.
+fn delegate_spec<'de, D>(de: D) -> Result<Delegate, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Spec {
+        All(bool),
+        One(String),
+        Many(Vec<String>),
+    }
+    match Spec::deserialize(de).map_err(|_ignored| {
+        de::Error::custom("expected true, a profile name or an array of profile names")
+    })? {
+        Spec::All(all) => Ok(Delegate {
+            all,
+            names: Vec::new(),
+        }),
+        Spec::One(name) => Ok(Delegate {
+            all: false,
+            names: vec![name],
+        }),
+        Spec::Many(names) => Ok(Delegate { all: false, names }),
+    }
+}
+
 /// Maps a `$arg_<name>` variable to the flags that fill it.
 pub type ArgDecls = IndexMap<String, ArgDecl>;
 
@@ -143,6 +195,17 @@ pub struct ProfileConfig {
     /// Profiles applied before this one.
     #[serde(default, deserialize_with = "one_or_many")]
     pub extend: Vec<String>,
+    /// Profiles whose commands, started from inside this sandbox, are run in a
+    /// sandbox of their own by a broker outside it: `true` for every profile
+    /// that is `delegable`, or their names. Each must have a `match` and be
+    /// `delegable`.
+    #[serde(default, deserialize_with = "delegate_spec")]
+    pub delegate: Delegate,
+    /// Whether this profile may be delegated to: run on the request of a
+    /// sandbox that lists it, or says `delegate = true`. Inherited through
+    /// `extend`. Meant for profiles built to run hostile code confined, never
+    /// for ones that grant much.
+    pub delegable: Option<bool>,
     /// Whether this profile adds to a same-named one from a lower-priority
     /// config file (the default) or replaces it.
     pub inherit: Option<bool>,
@@ -233,6 +296,8 @@ pub struct Loaded {
 pub struct Profile {
     pub patterns: Vec<Pattern>,
     pub extend: Vec<String>,
+    pub delegate: Delegate,
+    pub delegable: Option<bool>,
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
@@ -255,6 +320,8 @@ impl Profile {
     pub fn merge(&mut self, other: &Profile) {
         union(&mut self.patterns, &other.patterns);
         union(&mut self.extend, &other.extend);
+        self.delegate.merge(&other.delegate);
+        self.delegable = other.delegable.or(self.delegable);
         self.exec = other.exec.clone().or(self.exec.take());
         self.verbose = other.verbose.or(self.verbose);
         self.confirm = other.confirm.or(self.confirm);
@@ -286,6 +353,7 @@ impl Profile {
             .r#match
             .iter()
             .chain(&config.extend)
+            .chain(&config.delegate.names)
             .chain(&config.filesystem.write)
             .chain(&config.filesystem.read)
             .chain(&config.filesystem.hide)
@@ -324,6 +392,8 @@ impl Profile {
         Ok(Profile {
             patterns,
             extend: config.extend,
+            delegate: config.delegate,
+            delegable: config.delegable,
             exec: config.exec,
             verbose: config.verbose,
             confirm: config.confirm,
@@ -401,6 +471,101 @@ impl ValidatedConfigMap {
         }
         Ok(())
     }
+
+    /// Check what can only be checked once every file is in: a profile named
+    /// in `delegate` has to exist, match something and be `delegable`.
+    ///
+    /// The broker decides by matching the command's name, so a profile without
+    /// `match` could never be reached through it; and a misspelt name would
+    /// leave the tool running in the caller's sandbox, which is exactly what
+    /// delegating it was meant to prevent. A profile that is not `delegable`
+    /// was not written to be run on anyone's request. All three are errors
+    /// rather than entries quietly ignored.
+    fn check_delegates(&self) -> Result<()> {
+        for (name, profile) in &self.0 {
+            for delegated in &profile.delegate.names {
+                let target = self.0.get(delegated).with_context(|| {
+                    format!("profile '{name}': delegated profile '{delegated}' not found")
+                })?;
+                if target.patterns.is_empty() {
+                    bail!(
+                        "profile '{name}': delegated profile '{delegated}' has no `match`, \
+                         so no command could ever be delegated to it"
+                    );
+                }
+                if !self.is_delegable(delegated) {
+                    bail!(
+                        "profile '{name}': profile '{delegated}' is not delegable; \
+                         set `delegable = true` on it, or on a profile it extends"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `name` may be delegated to: its own `delegable`, or else the one
+    /// it inherits, the last base to say anything winning as in a merge.
+    #[must_use]
+    pub fn is_delegable(&self, name: &str) -> bool {
+        self.delegable_along(name, &mut Vec::new()).unwrap_or(false)
+    }
+
+    fn delegable_along<'a>(&'a self, name: &'a str, path: &mut Vec<&'a str>) -> Option<bool> {
+        if path.contains(&name) {
+            return None;
+        }
+        let profile = self.0.get(name)?;
+        if profile.delegable.is_some() {
+            return profile.delegable;
+        }
+        path.push(name);
+        let inherited = profile
+            .extend
+            .iter()
+            .rev()
+            .find_map(|parent| self.delegable_along(parent, path));
+        path.pop();
+        inherited
+    }
+
+    /// The profiles `delegate` stands for, in the order they were defined.
+    #[must_use]
+    pub fn delegates(&self, delegate: &Delegate) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if delegate.all {
+            names.extend(
+                self.0
+                    .iter()
+                    .filter(|(name, profile)| {
+                        !profile.patterns.is_empty() && self.is_delegable(name)
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+        }
+        union(&mut names, &delegate.names);
+        names
+    }
+
+    /// The `match` patterns of each delegated profile, as written.
+    #[must_use]
+    pub fn delegate_patterns(&self, names: &[String]) -> Vec<(String, Vec<String>)> {
+        names
+            .iter()
+            .filter_map(|name| {
+                self.0.get(name).map(|profile| {
+                    (
+                        name.clone(),
+                        profile
+                            .patterns
+                            .iter()
+                            .map(|p| p.as_str().to_owned())
+                            .collect(),
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 impl TryFrom<ConfigMap> for ValidatedConfigMap {
@@ -409,6 +574,7 @@ impl TryFrom<ConfigMap> for ValidatedConfigMap {
     fn try_from(value: ConfigMap) -> Result<Self> {
         let mut map = ValidatedConfigMap::default();
         map.layer(value)?;
+        map.check_delegates()?;
         Ok(map)
     }
 }
@@ -541,6 +707,15 @@ fn split_settings(mut table: toml::Table, path: &std::path::Path) -> Result<(Con
 
 /// Load and merge configs from all search paths (lowest to highest priority).
 pub fn load_configs() -> Result<Loaded> {
+    load_configs_with(true)
+}
+
+/// Like [`load_configs`], but with `interactive` false a project config that is
+/// not trusted yet is an error rather than a question.
+///
+/// A delegated run's standard input belongs to whoever asked for it — an agent,
+/// typically — and a `[y/N]` it could answer would let it trust its own config.
+pub fn load_configs_with(interactive: bool) -> Result<Loaded> {
     let mut profiles = ValidatedConfigMap::default();
     let mut settings = Settings::default();
     for path in config_search_paths() {
@@ -553,7 +728,7 @@ pub fn load_configs() -> Result<Loaded> {
 
         if path.file_name().is_some_and(|n| n == ".scudo.toml") {
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-            trust::check_and_confirm(&canonical, &content)?;
+            trust::check_and_confirm(&canonical, &content, interactive)?;
         }
 
         let table: toml::Table =
@@ -577,6 +752,7 @@ pub fn load_configs() -> Result<Loaded> {
             .layer(file_configs)
             .with_context(|| format!("in {}", path.display()))?;
     }
+    profiles.check_delegates()?;
     Ok(Loaded { profiles, settings })
 }
 
@@ -922,5 +1098,82 @@ mod tests {
             ]))
         );
         assert_eq!(profile.exec.as_deref(), Some("/home/user/wrapper.sh"));
+    }
+
+    #[test]
+    fn a_delegated_profile_has_to_exist() {
+        let raw: ConfigMap = toml::from_str("[agent]\ndelegate = \"npm\"\n").unwrap();
+        let err = ValidatedConfigMap::try_from(raw).unwrap_err();
+        assert!(format!("{err:#}").contains("'npm' not found"), "{err:#}");
+    }
+
+    /// The broker decides by the command's name, so a profile it could never
+    /// pick is a mistake to point out, not an entry to skip.
+    #[test]
+    fn a_delegated_profile_has_to_match_something() {
+        let raw: ConfigMap = toml::from_str(
+            "[agent]\ndelegate = [\"base\"]\n\n[base]\ndelegable = true\nfilesystem.read = [\"/\"]\n",
+        )
+        .unwrap();
+        let err = ValidatedConfigMap::try_from(raw).unwrap_err();
+        assert!(format!("{err:#}").contains("has no `match`"), "{err:#}");
+    }
+
+    /// Naming a profile is not enough: it has to have been written to be run
+    /// on someone else's request.
+    #[test]
+    fn a_profile_has_to_be_delegable_to_be_named() {
+        let raw: ConfigMap =
+            toml::from_str("[agent]\ndelegate = \"code\"\n\n[code]\nmatch = \"code\"\n").unwrap();
+        let err = ValidatedConfigMap::try_from(raw).unwrap_err();
+        assert!(format!("{err:#}").contains("not delegable"), "{err:#}");
+    }
+
+    #[test]
+    fn delegable_is_inherited_and_can_be_taken_back() {
+        let map = load(&["[base]\ndelegable = true\n\
+             [npm]\nextend = \"base\"\nmatch = \"npm\"\n\
+             [risky]\nextend = \"base\"\nmatch = \"risky\"\ndelegable = false\n\
+             [code]\nmatch = \"code\"\n"]);
+        assert!(map.is_delegable("npm"));
+        assert!(!map.is_delegable("risky"));
+        assert!(!map.is_delegable("code"));
+    }
+
+    /// `true` stands for every delegable profile a command could match, and
+    /// nothing else: not a base without `match`, not one never marked.
+    #[test]
+    fn delegating_everything_means_every_delegable_profile() {
+        let map = load(&["[base]\ndelegable = true\n\
+             [npm]\nextend = \"base\"\nmatch = \"npm\"\n\
+             [cargo]\nmatch = \"cargo\"\ndelegable = true\n\
+             [code]\nmatch = \"code\"\n\
+             [agent]\ndelegate = true\n"]);
+        let agent = map.0.get("agent").unwrap();
+        assert_eq!(map.delegates(&agent.delegate), ["npm", "cargo"]);
+        assert_eq!(
+            map.delegate_patterns(&map.delegates(&agent.delegate)),
+            [
+                ("npm".to_owned(), vec!["npm".to_owned()]),
+                ("cargo".to_owned(), vec!["cargo".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn delegates_accumulate_through_extend_and_layers() {
+        let map = load(&[
+            "[base]\ndelegate = \"npm\"\n[npm]\nmatch = \"npm\"\ndelegable = true\n\
+             [cargo]\nmatch = \"cargo\"\ndelegable = true\n",
+            "[base]\ndelegate = [\"cargo\", \"npm\"]\n",
+        ]);
+        let base = map.0.get("base").unwrap();
+        assert_eq!(base.delegate.names, ["npm", "cargo"]);
+        assert!(!base.delegate.all);
+        let map = load(&[
+            "[base]\ndelegate = \"npm\"\n[npm]\nmatch = \"npm\"\n",
+            "[base]\ndelegate = true\n",
+        ]);
+        assert!(map.0.get("base").unwrap().delegate.all);
     }
 }

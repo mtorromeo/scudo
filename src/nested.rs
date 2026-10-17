@@ -49,6 +49,40 @@ pub fn marker_path(uid: u32) -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}/scudo/sealed"))
 }
 
+/// Where a sandbox that delegates commands finds its broker's socket.
+///
+/// Fixed, like [`marker_path`], and a mount point inside the sandbox: the
+/// socket itself lives outside it, in a directory the sandbox cannot see, and
+/// is bind-mounted here into this one sandbox only.
+#[must_use]
+pub fn broker_path(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}/scudo/broker"))
+}
+
+/// Whether this process can reach a broker: the socket is mounted where
+/// [`broker_path`] says.
+///
+/// A mount and not just a file, for the same reason as the marker: anyone in
+/// the sandbox can make a file, only scudo's own unit can make a mount.
+#[must_use]
+pub fn broker_mounted() -> bool {
+    // SAFETY: getuid always succeeds and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    std::fs::read_to_string("/proc/self/mountinfo").is_ok_and(|mountinfo| {
+        broker_path(uid)
+            .to_str()
+            .is_some_and(|path| has_mount_point(&mountinfo, path))
+    })
+}
+
+/// Whether `path`, a cgroup2 path, lies in `unit`, one of `uid`'s own.
+///
+/// Any component may be the unit, as in [`is_sealed_cgroup`].
+#[must_use]
+pub fn in_unit(path: &str, uid: u32, unit: &str) -> bool {
+    cgroup::belongs_to_user(path, uid) && path.split('/').any(|component| component == unit)
+}
+
 /// Whether this process runs inside a sandbox scudo marked as sealed.
 ///
 /// Anything that cannot be read answers `false`: the worst that does is try to

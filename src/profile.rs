@@ -29,6 +29,19 @@ pub struct ResolvedProfile {
     /// What the command gets of the session bus. Realised only once it is
     /// known the command runs sandboxed at all.
     pub dbus: DbusConfig,
+    /// The profiles whose `match` picked this command, as opposed to those
+    /// selected with `--profile` or reached through `extend`.
+    pub matched: Vec<String>,
+    /// Profiles whose commands a broker runs in a sandbox of their own when
+    /// they are started from inside this one; see [`crate::broker`].
+    pub delegate: Vec<String>,
+    /// Every path the command may write, expanded and absolute.
+    pub writable: Vec<PathBuf>,
+    /// The paths the profiles grant access to that were worked out from the
+    /// request rather than written down: from `$PWD`, an `$arg_*`, a lookup
+    /// variable or a relative path. Whoever asked controls them, which is what
+    /// a delegated run has to check before it hands them over.
+    pub derived: Vec<PathBuf>,
 }
 
 /// Maps arg variable names to their accumulated values (always a `Vec`).
@@ -87,12 +100,14 @@ pub fn resolve_with(
         .map_or(command.into(), |n| n.to_string_lossy());
 
     let mut requested: Vec<(&str, String)> = Vec::new();
+    let mut matched: Vec<String> = Vec::new();
     if !opts.no_match {
         for (profile_name, profile) in &configs.0 {
             if selected.contains(&profile_name.as_str()) {
                 continue;
             }
             if let Some(pattern) = profile.patterns.iter().find(|p| p.matches(&name)) {
+                matched.push(profile_name.clone());
                 requested.push((
                     profile_name,
                     format!("profile '{profile_name}' matched '{}'", pattern.as_str()),
@@ -143,7 +158,11 @@ pub fn resolve_with(
         args: parse_command_args(command_args, &merged.args),
         lookups,
     };
-    build_args(merged, match_log, &vars, overrides)
+    let delegate = configs.delegates(&merged.delegate);
+    let mut resolved = build_args(merged, match_log, &vars, overrides)?;
+    resolved.matched = matched;
+    resolved.delegate = delegate;
+    Ok(resolved)
 }
 
 /// Look up explicitly requested profile names, preserving order and dropping duplicates.
@@ -331,7 +350,14 @@ fn build_args(
 ) -> Result<ResolvedProfile> {
     let mut args = Vec::new();
 
-    for (key, val) in mount_properties(filesystem_entries(&profile.filesystem, vars)?) {
+    let entries = filesystem_entries(&profile.filesystem, vars)?;
+    let writable = entries
+        .iter()
+        .filter(|(access, _)| *access == Access::Write)
+        .map(|(_, path)| path.clone())
+        .collect();
+    let derived = derived_paths(&profile, vars)?;
+    for (key, val) in mount_properties(entries) {
         args.push("-p".into());
         args.push(format_property(key, &val));
     }
@@ -368,7 +394,96 @@ fn build_args(
         match_log,
         policies,
         dbus: profile.dbus,
+        matched: Vec::new(),
+        delegate: Vec::new(),
+        writable,
+        derived,
     })
+}
+
+/// The paths the profile grants access to that the request decided; see
+/// [`ResolvedProfile::derived`].
+///
+/// Only grants count: `hide` and `deny` take access away, whatever path they
+/// end up naming. A `src:dst` pair is checked on both sides, and a leading `-`
+/// or `+`, which systemd reads as a flag, is not part of the path.
+fn derived_paths(profile: &Profile, vars: &Vars) -> Result<Vec<PathBuf>> {
+    let mut templates: Vec<(&str, bool)> = profile
+        .filesystem
+        .write
+        .iter()
+        .chain(&profile.filesystem.read)
+        .map(|t| (t.as_str(), true))
+        .collect();
+    let mut systemd_values = Vec::new();
+    for (key, val) in &profile.systemd {
+        if is_path_property(key) {
+            collect_strings(val, &mut systemd_values);
+        }
+    }
+    templates.extend(systemd_values.iter().map(|t| (t.as_str(), true)));
+
+    let mut paths = Vec::new();
+    for (template, is_path) in templates {
+        if !request_derived(template, vars)? {
+            continue;
+        }
+        for value in expand_vars(template, vars, is_path)? {
+            for side in value.split(':') {
+                let side = side.trim_start_matches(['-', '+']);
+                if !side.is_empty() {
+                    paths.push(PathBuf::from(make_absolute(side)));
+                }
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn collect_strings(val: &Value, out: &mut Vec<String>) {
+    match val {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_strings(item, out);
+            }
+        }
+        Value::Integer(_)
+        | Value::Float(_)
+        | Value::Boolean(_)
+        | Value::Datetime(_)
+        | Value::Table(_) => {}
+    }
+}
+
+/// Whether what `template` expands to depends on the request: the directory it
+/// was made from, or the command's arguments.
+///
+/// Decided from the template, not from its value, and conservatively: a
+/// default counts even when it ends up unused. `$PWD` is listed by name because
+/// it is the request's directory, not the environment's, wherever the template
+/// is expanded.
+fn request_derived(template: &str, vars: &Vars) -> Result<bool> {
+    let pieces = parse_template(template)?;
+    if let Some(Piece::Literal(first)) = pieces.first() {
+        let first = first.trim_start_matches(['-', '+']);
+        if !first.starts_with('/') {
+            return Ok(true);
+        }
+    }
+    for piece in pieces {
+        if let Piece::Var { name, default } = piece {
+            if name.starts_with("arg_") || name == "PWD" || vars.lookups.contains_key(name) {
+                return Ok(true);
+            }
+            if let Some(default) = default
+                && request_derived(default, vars)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Expand the paths of the `filesystem` table, made absolute, each with the
@@ -2133,5 +2248,69 @@ mod tests {
         .unwrap();
         let err = ValidatedConfigMap::try_from(raw).unwrap_err();
         assert!(format!("{err:#}").contains("curl"));
+    }
+
+    const DELEGATING: &str = r#"
+        [agent]
+        match = "agent"
+        filesystem.read = ["/"]
+        filesystem.write = ["/srv/agent"]
+        delegate = "tool"
+
+        [tool]
+        match = "tool"
+        delegable = true
+        args.dir = ["-C"]
+        filesystem.read = ["/", "relative/dir"]
+        filesystem.write = ["/srv/cache", "${arg_dir:-$PWD}"]
+        systemd.BindPaths = ["/srv/fixed:/srv/fixed", "$PWD/out:/out"]
+    "#;
+
+    #[test]
+    fn what_is_delegated_and_what_matched_is_reported() {
+        let configs = configs_from_toml(DELEGATING);
+        let agent = resolve(&configs, "agent", &[]).unwrap();
+        assert_eq!(agent.delegate, ["tool"]);
+        assert_eq!(agent.matched, ["agent"]);
+        assert_eq!(agent.writable, [PathBuf::from("/srv/agent")]);
+        // Nothing the agent's own profile grants comes from the request.
+        assert_eq!(agent.derived, Vec::<PathBuf>::new());
+    }
+
+    /// `$PWD`, an argument and a relative path are the request's to choose;
+    /// `/srv/cache` and `/srv/fixed` were written down and are not.
+    #[test]
+    fn paths_worked_out_from_the_request_are_told_apart() {
+        let configs = configs_from_toml(DELEGATING);
+        let cwd = std::env::current_dir().unwrap();
+        let tool = resolve(&configs, "tool", &args(&["-C", "/elsewhere"])).unwrap();
+        assert!(tool.derived.contains(&PathBuf::from("/elsewhere")));
+        assert!(tool.derived.contains(&cwd.join("relative/dir")));
+        assert!(!tool.derived.contains(&PathBuf::from("/srv/cache")));
+        assert!(!tool.derived.contains(&PathBuf::from("/srv/fixed")));
+        assert!(tool.derived.contains(&PathBuf::from("/out")));
+
+        let tool = resolve(&configs, "tool", &[]).unwrap();
+        // The default stands in for the missing argument, and is `$PWD`.
+        let pwd = PathBuf::from(std::env::var("PWD").unwrap());
+        assert!(tool.derived.contains(&pwd));
+    }
+
+    #[test]
+    fn a_lookup_variable_is_the_request_s() {
+        let vars = Vars {
+            args: ArgVars::new(),
+            lookups: [(
+                "PROJECT".to_owned(),
+                toml::from_str("lookup = \".git\"\nfallback = \"cwd\"").unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert!(request_derived("${PROJECT}/target", &vars).unwrap());
+        assert!(request_derived("${HOME:-$PROJECT}", &vars).unwrap());
+        assert!(!request_derived("$HOME/.cache", &vars).unwrap());
+        assert!(!request_derived("-/srv/x", &vars).unwrap());
+        assert!(request_derived("-srv/x", &vars).unwrap());
     }
 }

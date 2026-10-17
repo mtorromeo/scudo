@@ -28,7 +28,10 @@ use crate::{
         events::Bus,
         fsmon::{Monitor, Watch},
         loader::{self, Attached},
-        protocol::{Notification, Request, Response, read_message, socket_path, write_message},
+        protocol::{
+            Notification, Request, Response, peer_credentials, read_message, socket_path,
+            write_message,
+        },
     },
     policy::Policy,
 };
@@ -495,37 +498,6 @@ fn lock(state: &Mutex<State>) -> Result<std::sync::MutexGuard<'_, State>> {
     state
         .lock()
         .map_err(|err| anyhow::anyhow!("daemon state is poisoned: {err}"))
-}
-
-/// Read the connecting process's pid and uid from the kernel.
-///
-/// `UnixStream::peer_cred` is still unstable, and these are the credentials the
-/// whole trust model rests on, so we ask for them directly.
-fn peer_credentials(stream: &UnixStream) -> Result<(i32, u32)> {
-    use std::os::fd::AsRawFd as _;
-
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len =
-        libc::socklen_t::try_from(size_of::<libc::ucred>()).context("ucred size does not fit")?;
-    // SAFETY: passing a correctly sized, correctly typed buffer for SO_PEERCRED
-    // on a socket we own.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast::<libc::c_void>(),
-            &raw mut len,
-        )
-    };
-    if rc != 0i32 {
-        return Err(std::io::Error::last_os_error()).context("reading peer credentials");
-    }
-    Ok((cred.pid, cred.uid))
 }
 
 /// Is that process still running?

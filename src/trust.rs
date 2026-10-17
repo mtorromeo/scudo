@@ -40,8 +40,9 @@ fn save_trust_db(db_path: &Path, db: &TrustDb) -> Result<()> {
 
 /// Check whether `file_path` with the given `content` is trusted.
 /// If not, show a diff (or full content for new files) and prompt the user.
-/// Returns an error if the user declines.
-pub fn check_and_confirm(file_path: &Path, content: &str) -> Result<()> {
+/// Returns an error if the user declines, and without asking at all when
+/// `interactive` is false.
+pub fn check_and_confirm(file_path: &Path, content: &str, interactive: bool) -> Result<()> {
     let db_path = config::user_path()
         .with_context(|| "determining trust db file path")?
         .join("trusted.toml");
@@ -52,6 +53,12 @@ pub fn check_and_confirm(file_path: &Path, content: &str) -> Result<()> {
     if let Some(entry) = db.entries.iter().find(|e| e.path == path_str) {
         if entry.content == content {
             return Ok(());
+        }
+        if !interactive {
+            bail!(
+                "config file {path_str} changed since it was trusted; run scudo from a \
+                 terminal there to review it"
+            );
         }
         // Content changed: show diff against the trusted version
         eprintln!("\nModified config file: {path_str}");
@@ -66,6 +73,11 @@ pub fn check_and_confirm(file_path: &Path, content: &str) -> Result<()> {
             };
             eprint!("{sign}{change}");
         }
+    } else if !interactive {
+        bail!(
+            "config file {path_str} is not trusted; run scudo from a terminal there to \
+             review it"
+        );
     } else {
         // New path: show full content
         eprintln!("\nNew config file: {path_str}\n");

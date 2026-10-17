@@ -272,8 +272,12 @@ impl Proxy {
 }
 
 /// Decide what the session bus looks like from inside the sandbox.
+///
+/// `id` names the sandbox; a fresh one is made up when it is `None`. A broker
+/// picks it itself, so that it knows which unit to stop; see
+/// [`crate::broker`].
 #[must_use]
-pub fn prepare(config: &DbusConfig) -> Bus {
+pub fn prepare(config: &DbusConfig, id: Option<&str>) -> Bus {
     let runtime_dir = runtime_dir();
     let upstream = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
     // SAFETY: getuid always succeeds and touches no memory.
@@ -283,7 +287,7 @@ pub fn prepare(config: &DbusConfig) -> Bus {
         &runtime_dir,
         upstream.as_deref(),
         proxy_availability(),
-        &new_id(),
+        &id.map_or_else(new_id, str::to_owned),
         uid,
     )
 }
@@ -431,7 +435,8 @@ fn args_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 /// Unique enough among one user's sandboxes, and a valid unit instance name.
-fn new_id() -> String {
+#[must_use]
+pub fn new_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
