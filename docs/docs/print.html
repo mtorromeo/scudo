@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-073ca001.js";
+            window.path_to_searchindex_js = "searchindex-29954e1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-eec0241e.js"></script>
+        <script src="toc-6da527ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -347,6 +347,70 @@ on portals is better served by Flatpak.</li>
 <h2 id="license"><a class="header" href="#license">License</a></h2>
 <p>Licensed under either of <a href="https://github.com/mtorromeo/scudo/blob/main/LICENSE-APACHE">Apache License, Version 2.0</a> or <a href="https://github.com/mtorromeo/scudo/blob/main/LICENSE-MIT">MIT License</a>, at your option.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
+<p>scudo needs Linux with systemd and a user session (<code>systemd --user</code>). Some features need a
+little more:</p>
+<ul>
+<li><code>fuse3</code> for the <a href="#symlinks-aliases-and-the-fuse-shim">FUSE shim</a>;</li>
+<li><code>xdg-dbus-proxy</code> for the <a href="#session-bus">session bus</a> filter;</li>
+<li>a kernel with cgroup eBPF support, and <code>scudo-bpfd</code> with its file capabilities, for
+<a href="#network-filtering">network filtering</a> and for reporting refused file accesses.</li>
+</ul>
+<h2 id="prebuilt-binaries"><a class="header" href="#prebuilt-binaries">Prebuilt binaries</a></h2>
+<p>Each <a href="https://github.com/mtorromeo/scudo/releases">release</a> has an archive for x86-64,
+<code>scudo-&lt;version&gt;-x86_64-linux.tar.xz</code>. Its binaries are statically linked, glibc included, so
+they depend on no library of the host. They are built against glibc 2.28 and run on RHEL 8,
+Ubuntu 22.04 and anything newer.</p>
+<p>The archive holds <code>scudo</code>, <code>scudo-fuse</code> and <code>scudo-bpfd</code>, the systemd user units under
+<code>systemd/</code>, the licenses and the README. The units expect the binaries in <code>/usr/bin</code>:</p>
+<pre><code class="language-bash">tar -xJf scudo-&lt;version&gt;-x86_64-linux.tar.xz
+cd scudo-&lt;version&gt;-x86_64-linux
+sudo install -m755 scudo scudo-fuse scudo-bpfd /usr/bin/
+sudo install -m644 systemd/* /usr/lib/systemd/user/
+</code></pre>
+<p>A tar archive does not carry file capabilities, so they have to be given back to
+<code>scudo-bpfd</code>. Without <code>cap_bpf</code> and <code>cap_net_admin</code> it can do nothing; <code>cap_perfmon</code> is only
+for reporting refused file accesses:</p>
+<pre><code class="language-bash">sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
+systemctl --user enable --now scudo-bpfd.socket
+</code></pre>
+<p>Every release also has a <code>.sha256</code> file beside the archive, to check it with
+<code>sha256sum -c</code>.</p>
+<h2 id="building"><a class="header" href="#building">Building</a></h2>
+<pre><code>cargo build --release
+</code></pre>
+<p>The stable toolchain is enough. The eBPF programs additionally need its <code>rust-src</code> component, since
+<code>core</code> is built from source for their tier 3 target, and <code>bpf-linker</code>:</p>
+<pre><code>rustup component add rust-src --toolchain stable
+cargo install bpf-linker
+</code></pre>
+<p>Two features are on by default and can be dropped:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Feature</th><th>Drops</th></tr>
+</thead>
+<tbody>
+<tr><td><code>bpf</code></td><td><code>scudo-bpfd</code> and the eBPF programs, along with the <code>rust-src</code> component and <code>bpf-linker</code> needed to build them. scudo still talks to a daemon that is installed.</td></tr>
+<tr><td><code>tui</code></td><td><code>--tui</code> and the terminal UI. A config naming <code>[scudo.tui]</code> still parses, so one shared with a full build is not rejected.</td></tr>
+</tbody>
+</table>
+</div>
+<pre><code>cargo build --release --no-default-features --features bpf
+</code></pre>
+<p>The binaries go in <code>target/release</code>, and are installed as above:</p>
+<pre><code class="language-bash">sudo install -m755 target/release/scudo target/release/scudo-fuse target/release/scudo-bpfd /usr/bin/
+sudo install -m644 scudo-bpfd.service scudo-bpfd.socket scudo-fuse.service scudo-dbus@.service \
+    /usr/lib/systemd/user/
+sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
+</code></pre>
+<h3 id="static-binaries"><a class="header" href="#static-binaries">Static binaries</a></h3>
+<p>The release archives are built by <code>packaging/build-static.sh</code>, in an AlmaLinux 8 container.
+The same build can be run locally with podman or docker:</p>
+<pre><code class="language-bash">podman run --rm -v "$PWD:/src:Z" -w /src almalinux:8 packaging/build-static.sh
+</code></pre>
+<p>The archive ends up in <code>dist/</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="usage"><a class="header" href="#usage">Usage</a></h1>
 <pre><code>Usage: scudo [OPTIONS] &lt;COMMAND&gt; [COMMAND_ARGS]...
 
@@ -421,6 +485,9 @@ systemctl --user enable --now scudo-fuse
 </tbody>
 </table>
 </div>
+<p>To start from something that already works, copy the
+<a href="#recommended-configuration">recommended configuration</a> to
+<code>$XDG_CONFIG_HOME/scudo/config.toml</code> and adapt it.</p>
 <p>For the per-directory tier, scudo walks every ancestor of <code>$PWD</code> from the filesystem root down to the current directory, loading each <code>.scudo.toml</code> it finds. This lets a project directory override settings defined higher up the tree. For example, with <code>$PWD</code> set to <code>/home/user/projects/myapp</code>, the lookup order is <code>/.scudo.toml</code>, <code>/home/.scudo.toml</code>, <code>/home/user/.scudo.toml</code>, <code>/home/user/projects/.scudo.toml</code>, <code>/home/user/projects/myapp/.scudo.toml</code>.</p>
 <p>Every top-level section is a profile, with one exception: <code>[scudo]</code> holds settings that are
 about scudo itself rather than about a command — the <a href="#logging">logging</a> defaults, the
@@ -432,6 +499,312 @@ log.level = "info"
 tui.prefix = "C-b"
 tui.scrollback = 20000
 vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="recommended-configuration"><a class="header" href="#recommended-configuration">Recommended configuration</a></h1>
+<p>scudo ships a configuration meant to be copied and adapted:
+<a href="https://github.com/mtorromeo/scudo/blob/main/examples/config.toml"><code>examples/config.toml</code></a>,
+also installed with the documentation by the packages and included in the release
+archives. It is reproduced in full <a href="#the-file">below</a>.</p>
+<blockquote>
+<p><strong>It is a starting point, not a guarantee.</strong> You are responsible for the configuration you
+choose to use, and for judging whether it protects what you need it to protect in your own
+case. scudo enforces exactly what the profiles say, and a profile that grants too much
+protects nothing (<a href="#what-it-is-not">What it is not</a>). Read it, adapt it to
+the tools and the paths you actually have, and check what a command can still reach before
+relying on it — <code>scudo --tui -- &lt;command&gt;</code>, or a shell under one of its profiles:
+<code>scudo --no-match --profile supply-chain -- sh</code>.</p>
+</blockquote>
+<p>Copy it to your own configuration, whole or only the profiles you want:</p>
+<pre><code class="language-bash">mkdir -p ~/.config/scudo
+curl -fsSLo ~/.config/scudo/config.toml \
+    https://raw.githubusercontent.com/mtorromeo/scudo/main/examples/config.toml
+</code></pre>
+<p>scudo itself has to be installed outside <code>$HOME</code>, as the packages do, or in <code>~/.local/bin</code>.
+It runs inside every sandbox that reports refusals, filters the network or delegates
+commands, and these profiles hide the rest of <code>$HOME</code>. For the same reason the
+<a href="#symlinks-aliases-and-the-fuse-shim">FUSE shim</a> has to be mounted under
+<code>$XDG_RUNTIME_DIR/scudo/shims</code>, the one place these profiles give back, for commands started
+inside a sandbox to be wrapped too.</p>
+<p>Beware if you install it as <code>/etc/scudo/config.toml</code>. Profiles there are merged into every user’s
+profiles of the same name (<a href="#same-named-profiles-across-files">Same-named profiles across
+files</a>), and its <code>match</code> rules would sandbox
+every user’s package managers.</p>
+<h2 id="what-is-in-it"><a class="header" href="#what-is-in-it">What is in it</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Profile</th><th>Matches</th><th>What it is</th></tr>
+</thead>
+<tbody>
+<tr><td><code>sandbox</code></td><td>—</td><td>Everything read-only, <code>$HOME</code> and <code>$XDG_RUNTIME_DIR</code> replaced by empty directories, a private <code>/tmp</code>; <code>~/.cache</code>, <code>~/.local/bin</code> (read-only) and scudo’s own daemon socket and FUSE shim (read-only) given back</td></tr>
+<tr><td><code>git-project</code></td><td>—</td><td><code>sandbox</code>, plus the <a href="#lookup-variables">project</a> writable and <code>/var</code> denied</td></tr>
+<tr><td><code>no-net</code></td><td>—</td><td>No network beyond <code>localhost</code>; for <code>--profile</code></td></tr>
+<tr><td><code>supply-chain</code></td><td>—</td><td><code>git-project</code>, with the project’s <code>.git</code> read-only; <code>delegable</code></td></tr>
+<tr><td><code>npm</code>, <code>pnpm</code>, <code>yarn</code>, <code>bun</code>, <code>deno</code></td><td>their commands</td><td><code>supply-chain</code> and the tool’s cache; <code>~/.npmrc</code> stays hidden</td></tr>
+<tr><td><code>pip</code>, <code>uv</code>, <code>poetry</code></td><td>their commands</td><td><code>supply-chain</code>, the tool’s config read-only</td></tr>
+<tr><td><code>cargo</code></td><td><code>cargo</code></td><td><code>supply-chain</code>, <code>~/.cargo</code> and <code>~/.rustup</code> read-only except the registry, credentials denied</td></tr>
+<tr><td><code>composer</code>, <code>go</code>, <code>ruby</code></td><td>their commands</td><td><code>supply-chain</code> and the tool’s cache</td></tr>
+<tr><td><code>npm-publish</code>, <code>cargo-install</code></td><td>—</td><td>What publishing or installing needs on top; for <code>--profile</code></td></tr>
+<tr><td><code>agents</code></td><td><code>claude</code>, <code>opencode</code></td><td><code>git-project</code>, writing <code>.git</code> and the agent’s own state; <a href="#delegating-commands">delegates</a> every <code>delegable</code> profile</td></tr>
+</tbody>
+</table>
+</div>
+<p>Several pages of this documentation build their examples on these profiles.</p>
+<h2 id="why-it-is-written-this-way"><a class="header" href="#why-it-is-written-this-way">Why it is written this way</a></h2>
+<ul>
+<li><strong><code>$HOME</code> is hidden, not made read-only.</strong> A read-only <code>$HOME</code> still hands out SSH keys,
+tokens and browser profiles to anyone who reads them. Each profile gives back what its tool
+needs, which is usually its cache and its configuration.</li>
+<li><strong>The session’s sockets are hidden with it, in the base every profile extends.</strong> <code>ssh-agent</code>, <code>gpg-agent</code>, the keyring and the
+container sockets let a program act as you without reading a single secret, and connecting to
+a socket needs no write access, so a read-only runtime directory is not enough. Only two
+entries of scudo’s own come back, read-only: <code>bpfd.sock</code>, so that network policies can be
+enforced, and <code>shims</code>, so that a command started inside is still wrapped. Do not give back
+the whole <code>$XDG_RUNTIME_DIR/scudo</code>: it also holds the session bus proxies of other sandboxes,
+and writing to it would let a command replace the daemon’s socket.</li>
+<li><strong><code>.git</code> is read-only for build and install tools.</strong> Hooks, <code>core.hooksPath</code> and
+<code>core.fsmonitor</code> are run by git outside any sandbox, so a writable <code>.git</code> is a way out. The
+agent, which commits, gets it back.</li>
+<li><strong>Directories on <code>PATH</code> stay read-only</strong>: <code>~/.local/bin</code>, <code>~/.cargo/bin</code>, Composer’s
+<code>vendor/bin</code>. A build script that could write there would replace <code>npm</code> or <code>git</code> with
+something that runs unsandboxed the next time. Installing into them is what the explicit
+<code>cargo-install</code> profile is for.</li>
+<li><strong><code>$XDG_RUNTIME_DIR</code> is never written by a base profile.</strong> The most permissive access to a
+path wins (<a href="#filesystem-access">Filesystem access</a>), so a base that wrote it
+would undo the hiding in every profile built on it. A profile that needs one socket, an
+editor talking to the display say, gives back that socket alone.</li>
+<li><strong>What the agent can use as you is opt-in.</strong> The display (to paste images), <code>gpg-agent</code> (to
+sign commits) and the keyring’s SSH agent (to push) are listed in comments at the end of
+<code>[agents]</code>: each one is something a prompt injection could use too.</li>
+</ul>
+<h2 id="the-file"><a class="header" href="#the-file">The file</a></h2>
+<pre><code class="language-toml"># A recommended starting point for ~/.config/scudo/config.toml
+#
+# This file is a starting point, not a guarantee. You are responsible for the
+# configuration you choose to use, and for judging whether it protects what you
+# need it to protect in your own case: scudo enforces exactly what the profiles
+# say, and a profile that grants too much protects nothing. Read it, adapt it,
+# and check what a command can still reach (`scudo --tui -- &lt;command&gt;`, or
+# `scudo -v --profile sandbox -- sh`) before relying on it.
+#
+# Copy it as it is, or only the profiles you want:
+#
+#     mkdir -p ~/.config/scudo
+#     cp examples/config.toml ~/.config/scudo/config.toml
+#
+# Do not install it as /etc/scudo/config.toml: profiles there are merged into
+# every user's profiles of the same name, and its `match` rules would sandbox
+# every user's package managers.
+#
+# A profile only applies to a command run through scudo: `scudo npm install`,
+# a symlink named after the command, or the FUSE shim on PATH.
+#
+# scudo itself has to be installed outside $HOME (/usr/bin, as the packages
+# do), or in ~/.local/bin: it runs inside every sandbox that reports refusals,
+# filters the network or delegates, and the rest of $HOME is hidden.
+
+# The project a command runs in: the closest directory holding a `.git`, or the
+# current directory outside a repository.
+[scudo]
+vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
+
+# ── Bases ───────────────────────────────────────────────────────────────────
+# No `match`: these never apply on their own, only through `extend` or
+# `--profile`.
+
+# Everything is read-only, $HOME and the session's sockets are replaced by
+# empty directories and /tmp is private. Give back what a tool needs in the
+# profile that extends this one.
+#
+# The session's sockets hand out credentials (ssh-agent, gpg-agent, keyrings)
+# or run code outside the sandbox (podman, docker), and new ones keep
+# appearing, so the whole runtime dir goes and a profile that needs a socket
+# gives that one back. Hiding it is what matters, not making it read-only:
+# connecting to a socket needs no write access. For the same reason, do not
+# write $XDG_RUNTIME_DIR here or in a profile everything extends: the most
+# permissive access wins, and nothing would be hidden.
+#
+# Only two things of scudo's own come back, both read-only: the daemon that
+# enforces network policies, and the FUSE shim, so that commands run from
+# inside are still wrapped. Never give back the whole $XDG_RUNTIME_DIR/scudo:
+# it also holds the session bus proxies of other sandboxes, and written to, the
+# daemon's socket could be replaced.
+[sandbox]
+systemd.WorkingDirectory = "/"
+systemd.PrivateTmp = true
+filesystem.read = [
+  "/",
+  "$HOME/.local/bin",
+  "$XDG_RUNTIME_DIR/scudo/bpfd.sock",
+  "$XDG_RUNTIME_DIR/scudo/shims",
+]
+filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
+filesystem.write = ["/tmp", "$HOME/.cache"]
+
+# Works on the project it was started in. /var is denied, since nothing a
+# project tool needs lives there and service data often does.
+[git-project]
+extend = "sandbox"
+systemd.WorkingDirectory = "$PWD"
+filesystem.deny = ["/var"]
+filesystem.write = ["${PROJECT_DIR:-$PWD}"]
+
+# No network at all, except the machine itself. Explicit only:
+# `scudo -p no-net -- &lt;command&gt;`.
+[no-net.network]
+default = "deny"
+inbound = "deny"
+on_unavailable = "fail"
+dest.allow = ["localhost"]
+
+# ── Supply chain ────────────────────────────────────────────────────────────
+# Package managers run code they downloaded (install scripts, build.rs,
+# setup.py): assume that code is hostile.
+
+# Base for package managers: the project is writable, its .git is not, since
+# hooks, core.hooksPath and core.fsmonitor are run by git outside the sandbox.
+[supply-chain]
+extend = "git-project"
+# Built to run hostile code confined, so a sandbox may ask for its commands to
+# run here instead of inside it; see `delegate` in [agents].
+delegable = true
+filesystem.read = ["${PROJECT_DIR:-$PWD}/.git"]
+
+# ── JavaScript ──────────────────────────────────────────────────────────────
+# ~/.npmrc holds the registry token that a postinstall would steal and
+# republish with (Shai-Hulud): it stays hidden with the rest of $HOME, and npm
+# runs with its default settings.
+#
+# If npm needs settings of yours (a private registry, a scope), write them to
+# a second file without the token, and add to [npm]:
+#   systemd.Environment = ["NPM_CONFIG_USERCONFIG=$HOME/.config/scudo/npm/npmrc"]
+#   filesystem.read = ["$HOME/.config/scudo/npm/npmrc"]
+# and to [npm-publish], which would otherwise inherit that variable:
+#   systemd.Environment = ["NPM_CONFIG_USERCONFIG=$HOME/.npmrc"]
+[npm]
+extend = "supply-chain"
+match = ["npm", "npx"]
+filesystem.write = ["$HOME/.npm"]
+
+# Explicit only: `scudo -p npm-publish -- npm publish`, which needs the token.
+[npm-publish]
+filesystem.read = ["$HOME/.npmrc"]
+
+[pnpm]
+extend = "npm"
+match = ["pnpm", "pnpx", "pnx"]
+filesystem.read = ["$HOME/.local/share/pnpm"]
+filesystem.write = ["$HOME/.local/share/pnpm/store", "$HOME/.pnpm-store"]
+
+[yarn]
+extend = "npm"
+match = ["yarn"]
+filesystem.read = ["$HOME/.yarnrc"]
+filesystem.write = ["$HOME/.yarn"]
+
+[bun]
+extend = "npm"
+match = ["bun", "bunx"]
+filesystem.read = ["$HOME/.bun"]
+filesystem.write = ["$HOME/.bun/install/cache"]
+
+[deno]
+extend = "supply-chain"
+match = ["deno"]
+
+# ── Python ──────────────────────────────────────────────────────────────────
+# Caches live in ~/.cache. Installs go into the project's venv; --user and
+# tool installs land in directories on PATH and need running unsandboxed.
+[pip]
+extend = "supply-chain"
+match = ["pip", "pip3"]
+filesystem.read = ["$HOME/.config/pip"]
+
+[uv]
+extend = "supply-chain"
+match = ["uv", "uvx"]
+filesystem.read = ["$HOME/.config/uv", "$HOME/.local/share/uv"]
+filesystem.write = ["$HOME/.local/share/uv/python"]
+
+[poetry]
+extend = "supply-chain"
+match = ["poetry"]
+filesystem.read = ["$HOME/.config/pypoetry"]
+
+# ── Rust ────────────────────────────────────────────────────────────────────
+# ~/.cargo/bin is usually first on PATH: a build.rs that could write there
+# would shadow npm, git or cargo itself with no sandbox at all.
+[cargo]
+extend = "supply-chain"
+match = ["cargo"]
+filesystem.read = ["$HOME/.cargo", "$HOME/.rustup"]
+filesystem.write = [
+  "$HOME/.cargo/registry",
+  "$HOME/.cargo/git",
+  "$HOME/.cargo/advisory-db",
+  "$HOME/.cargo/script-cache",
+]
+filesystem.deny = ["$HOME/.cargo/credentials", "$HOME/.cargo/credentials.toml"]
+
+# Explicit only: `scudo -p cargo-install -- cargo install …`
+[cargo-install]
+filesystem.write = ["$HOME/.cargo/bin", "$HOME/.cargo/binary-cache", "$HOME/.cargo/binstall"]
+
+# ── Others ──────────────────────────────────────────────────────────────────
+# COMPOSER_HOME is ~/.config/composer; its vendor/bin is on PATH, so it is
+# read-only like ~/.cargo/bin.
+[composer]
+extend = "supply-chain"
+match = ["composer"]
+filesystem.read = ["$HOME/.config/composer"]
+filesystem.write = ["$HOME/.config/composer/cache"]
+
+[go]
+extend = "supply-chain"
+match = ["go"]
+filesystem.read = ["$HOME/.config/go", "$HOME/go"]
+filesystem.write = ["$HOME/go/pkg/mod"]
+
+[ruby]
+extend = "supply-chain"
+match = ["gem", "bundle", "bundler", "rake"]
+filesystem.write = ["$HOME/.gem", "$HOME/.bundle", "$HOME/.local/share/gem"]
+filesystem.deny = ["$HOME/.gem/credentials"]
+
+# ── AI coding agents ────────────────────────────────────────────────────────
+# The agent works on its project and keeps its own state; everything it runs
+# that has a delegable profile (all of the above) runs in a sandbox of its own
+# instead of inheriting the agent's access.
+[agents]
+extend = "git-project"
+match = ["claude", "opencode"]
+delegate = true
+# The broker's reports would otherwise land in the agent's terminal.
+log.target = "journald"
+# Your git identity, and where the native installers put the agents' own
+# binaries (~/.local/bin only holds links to them), read-only.
+filesystem.read = [
+  "$HOME/.gitconfig",
+  "$HOME/.config/git",
+  "$HOME/.local/share/claude",
+  "$HOME/.opencode",
+]
+filesystem.write = [
+  # The agent commits: the project's .git, which [supply-chain] keeps read-only.
+  "${PROJECT_DIR:-$PWD}/.git",
+  "$HOME/.claude",
+  "$HOME/.claude.json",
+  "$HOME/.config/opencode",
+  "$HOME/.local/share/opencode",
+  "$HOME/.local/state/opencode",
+]
+# Opt-ins: each of these hands the agent something it can use as you. Add the
+# ones you want to the `filesystem.read` list above.
+#
+#   "$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}",  # pasting images
+#   "$HOME/.gnupg", "$XDG_RUNTIME_DIR/gnupg",          # gpg: signs commits, and anything else
+#   "$XDG_RUNTIME_DIR/gcr",                            # the keyring's ssh agent: pushes wherever you can
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="trust-confirmation-for-per-directory-configs"><a class="header" href="#trust-confirmation-for-per-directory-configs">Trust confirmation for per-directory configs</a></h1>
@@ -476,40 +849,42 @@ Trust this config file? [y/N]
 <p>The command starts in the current directory, unless <code>WorkingDirectory</code> is set (in the table or with <code>-P</code>): then <code>systemd-run</code> is not given <code>-d</code> and the property decides.</p>
 <p>Any other key is a typo and scudo says so instead of ignoring it.</p>
 <h2 id="example"><a class="header" href="#example">Example</a></h2>
+<p>The bases here are those of the <a href="#recommended-configuration">recommended configuration</a>,
+cut down to what the example needs.</p>
 <pre><code class="language-toml"># The project a command runs in: the closest directory holding a `.git`
 [scudo]
 vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 
-# Base profile — no `match`, so it is never matched directly, only used via extend
-[sandboxed]
-filesystem.read = ["/"]
-filesystem.write = ["/tmp", "$XDG_RUNTIME_DIR"]
+# Base profiles — no `match`, so they are never matched directly, only used via extend
+[sandbox]
+filesystem.read = ["/", "$XDG_RUNTIME_DIR/scudo/bpfd.sock", "$XDG_RUNTIME_DIR/scudo/shims"]
+filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
+filesystem.write = ["/tmp", "$HOME/.cache"]
 systemd.PrivateTmp = true
 
-[sandboxed-home]
-extend = "sandboxed"
-filesystem.hide = ["$HOME"]
-filesystem.write = ["$HOME/.cache"]
+[git-project]
+extend = "sandbox"
+filesystem.write = ["$PROJECT_DIR"]
 
 # curl: extends the base sandbox
 [curl]
 match = "curl"
-extend = "sandboxed"
+extend = "sandbox"
 systemd.MemoryMax = "256M"
 
 # claude: works on the project it is started in, plus any --add-dir
 [claude]
 match = "claude"
-extend = "sandboxed-home"
+extend = "git-project"
 args.add_dir = { flags = "--add-dir", greedy = true }
 filesystem.read = ["$HOME/.gitconfig", "$arg_add_dir"]
-filesystem.write = ["$PROJECT_DIR", "$HOME/.claude", "$HOME/.claude.json"]
+filesystem.write = ["$HOME/.claude", "$HOME/.claude.json"]
 network.dest.allow = ["*.anthropic.com"]
 
 # code: VS Code and its variants
 [code]
 match = ["code", "code-oss", "codium", "vscode"]
-extend = "sandboxed-home"
+extend = "git-project"
 filesystem.write = [
   "/proc",
   "/dev/shm",
@@ -518,8 +893,9 @@ filesystem.write = [
   "$HOME/.vscode-oss",
   "$HOME/.config/Code",
   "$HOME/.config/Code - OSS",
-  "$PROJECT_DIR",
 ]
+# The display: the one socket of the session's an editor needs, given back alone.
+filesystem.read = ["$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}"]
 # The launcher leaves the editor running and exits: keep the unit until it is gone.
 systemd.ExitType = "cgroup"
 dbus.talk = [
@@ -529,19 +905,18 @@ dbus.talk = [
 ]
 dbus.own = ["com.visualstudio.code.*"]
 
-# npm: the npm cache and config, and the project
+# npm: the npm cache, and the project
 [npm]
 match = "npm"
-extend = "sandboxed-home"
-filesystem.write = ["$HOME/.npm", "$PROJECT_DIR"]
-filesystem.read = ["$HOME/.npmrc"]
+extend = "git-project"
+filesystem.write = ["$HOME/.npm"]
 
 [pnpm]
 match = "pnpm"
 extend = "npm"
 filesystem.write = ["$HOME/.pnpm-store"]
 </code></pre>
-<p>Every list adds to the ones it inherits: <code>pnpm</code> can write <code>~/.npm</code>, the project and <code>~/.pnpm-store</code>, and read everything <code>sandboxed</code> lets it read.</p>
+<p>Every list adds to the ones it inherits: <code>pnpm</code> can write <code>~/.npm</code>, the project and <code>~/.pnpm-store</code>, and read everything <code>sandbox</code> lets it read.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="matching-and-combining-profiles"><a class="header" href="#matching-and-combining-profiles">Matching and combining profiles</a></h1>
 <h2 id="match-patterns"><a class="header" href="#match-patterns">Match patterns</a></h2>
@@ -570,18 +945,18 @@ filesystem.write = ["$HOME/.pnpm-store"]
 <tr><th>Invocation</th><th>Profiles applied</th></tr>
 </thead>
 <tbody>
-<tr><td><code>scudo --profile netblock -- curl https://example.com</code></td><td>everything matching <code>curl</code>, then <code>netblock</code></td></tr>
+<tr><td><code>scudo --profile no-net -- curl https://example.com</code></td><td>everything matching <code>curl</code>, then <code>no-net</code></td></tr>
 <tr><td><code>scudo --profile a,b -- curl https://example.com</code></td><td>matches for <code>curl</code>, then <code>a</code>, then <code>b</code></td></tr>
-<tr><td><code>scudo --profile claude,npm,cargo -- zsh</code></td><td>a shell with everything those three profiles allow, and their restrictions</td></tr>
-<tr><td><code>scudo --no-match --profile netblock -- curl https://example.com</code></td><td>only <code>netblock</code></td></tr>
+<tr><td><code>scudo --profile agents,npm,cargo -- zsh</code></td><td>a shell with everything those three profiles allow, and their restrictions</td></tr>
+<tr><td><code>scudo --no-match --profile no-net -- curl https://example.com</code></td><td>only <code>no-net</code></td></tr>
 <tr><td><code>scudo --no-match -- curl https://example.com</code></td><td>none — the command is executed directly, without <code>systemd-run</code></td></tr>
 <tr><td><code>scudo --no-match -p MemoryMax=1G -- curl https://example.com</code></td><td>none, but <code>systemd-run</code> still runs with the explicit property</td></tr>
 </tbody>
 </table>
 </div>
 <p>A profile that both matches and is named explicitly is applied only once, in its explicit position. An unknown profile name is a fatal error: scudo exits with status 1 without running the command, rather than running it with less sandboxing than was asked for.</p>
-<pre><code>$ scudo --profile snadboxed -- curl https://example.com
-scudo: profile 'snadboxed' not found
+<pre><code>$ scudo --profile sandbx -- curl https://example.com
+scudo: profile 'sandbx' not found
 </code></pre>
 <p>Both flags belong to scudo itself, so they are only available through the explicit <code>scudo &lt;command&gt;</code> form. When scudo is invoked through a symlink or the FUSE shim, every argument belongs to the wrapped command.</p>
 <h2 id="combining-profiles"><a class="header" href="#combining-profiles">Combining profiles</a></h2>
@@ -792,8 +1167,9 @@ no way to say which path it was about, and a profile that is one <code>BindPaths
 exactly like a program that is broken.</p>
 <p><code>filesystem.log = "denied"</code> on the profile — or <code>--verbose</code>, or <code>--tui</code> — asks <code>scudo-bpfd</code> to
 watch the syscalls that name a path and report the ones that come back with an error a sandbox
-could have caused:</p>
-<pre><code class="language-console">$ scudo --verbose --profile sandboxed-home -- bash -lc 'git status'
+could have caused. With <code>sandbox</code> from the
+<a href="#recommended-configuration">recommended configuration</a>:</p>
+<pre><code class="language-console">$ scudo --verbose --profile sandbox -- bash -lc 'git status'
 scudo: warning: blocked open of /home/me/.bashrc (hidden by the sandbox)
 scudo: warning: blocked open of /home/me/.gitconfig (hidden by the sandbox)
 scudo: warning: blocked open of /etc/shadow (permission denied)
@@ -997,7 +1373,9 @@ inside, so they fail the command rather than being dropped. <code>--confirm</cod
 round. The <code>npm install</code> it runs has the agent’s access rather than npm’s, so a postinstall
 script reaches everything the agent was trusted with: its git credentials, its signing key,
 the container socket it was given.</p>
-<p>Instead, two settings let such commands run in a sandbox of their own:</p>
+<p>Instead, two settings let such commands run in a sandbox of their own. The
+<a href="#recommended-configuration">recommended configuration</a> is set up
+this way; cut down to the two settings:</p>
 <pre><code class="language-toml"># The tools: built to run hostile code confined.
 [supply-chain]
 extend = ["git-project"]
@@ -1166,10 +1544,12 @@ a clean exit for a service, exactly as when scudo is run from a terminal.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="network-filtering"><a class="header" href="#network-filtering">Network filtering</a></h1>
 <p><code>PrivateNetwork = true</code> is all-or-nothing. The <code>[profile.network]</code> table asks for something
-finer: deny everything by default and allow only what the command actually needs.</p>
+finer: deny everything by default and allow only what the command actually needs. Here
+<code>supply-chain</code> is the base of the
+<a href="#recommended-configuration">recommended configuration</a>.</p>
 <pre><code class="language-toml">[cargo]
 match = "cargo"
-extend = "sandboxed-home"
+extend = "supply-chain"
 
 [cargo.network]
 default = "deny"            # "deny" (default) or "allow"
@@ -1687,29 +2067,6 @@ columns: a shell wrapping into nonsense costs more than the panel shows.</p>
 <pre><code class="language-toml">[scudo]
 tui.prefix = "C-b"          # default "C-a"
 tui.scrollback = 20000      # default 10000 lines
-</code></pre>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="building"><a class="header" href="#building">Building</a></h1>
-<pre><code>cargo build --release
-</code></pre>
-<p>The stable toolchain is enough. The eBPF programs additionally need its <code>rust-src</code> component, since
-<code>core</code> is built from source for their tier 3 target, and <code>bpf-linker</code>:</p>
-<pre><code>rustup component add rust-src --toolchain stable
-cargo install bpf-linker
-</code></pre>
-<p>Two features are on by default and can be dropped:</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th>Feature</th><th>Drops</th></tr>
-</thead>
-<tbody>
-<tr><td><code>bpf</code></td><td><code>scudo-bpfd</code> and the eBPF programs, along with the <code>rust-src</code> component and <code>bpf-linker</code> needed to build them. scudo still talks to a daemon that is installed.</td></tr>
-<tr><td><code>tui</code></td><td><code>--tui</code> and the terminal UI. A config naming <code>[scudo.tui]</code> still parses, so one shared with a full build is not rejected.</td></tr>
-</tbody>
-</table>
-</div>
-<pre><code>cargo build --release --no-default-features --features bpf
 </code></pre>
 
                     </main>

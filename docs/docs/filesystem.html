@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-073ca001.js";
+            window.path_to_searchindex_js = "searchindex-29954e1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-eec0241e.js"></script>
+        <script src="toc-6da527ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -218,8 +218,9 @@ no way to say which path it was about, and a profile that is one <code>BindPaths
 exactly like a program that is broken.</p>
 <p><code>filesystem.log = "denied"</code> on the profile — or <code>--verbose</code>, or <code>--tui</code> — asks <code>scudo-bpfd</code> to
 watch the syscalls that name a path and report the ones that come back with an error a sandbox
-could have caused:</p>
-<pre><code class="language-console">$ scudo --verbose --profile sandboxed-home -- bash -lc 'git status'
+could have caused. With <code>sandbox</code> from the
+<a href="configuration/recommended.html#recommended-configuration">recommended configuration</a>:</p>
+<pre><code class="language-console">$ scudo --verbose --profile sandbox -- bash -lc 'git status'
 scudo: warning: blocked open of /home/me/.bashrc (hidden by the sandbox)
 scudo: warning: blocked open of /home/me/.gitconfig (hidden by the sandbox)
 scudo: warning: blocked open of /etc/shadow (permission denied)

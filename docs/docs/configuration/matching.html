@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-073ca001.js";
+            window.path_to_searchindex_js = "../searchindex-29954e1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-eec0241e.js"></script>
+        <script src="../toc-6da527ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -209,18 +209,18 @@
 <tr><th>Invocation</th><th>Profiles applied</th></tr>
 </thead>
 <tbody>
-<tr><td><code>scudo --profile netblock -- curl https://example.com</code></td><td>everything matching <code>curl</code>, then <code>netblock</code></td></tr>
+<tr><td><code>scudo --profile no-net -- curl https://example.com</code></td><td>everything matching <code>curl</code>, then <code>no-net</code></td></tr>
 <tr><td><code>scudo --profile a,b -- curl https://example.com</code></td><td>matches for <code>curl</code>, then <code>a</code>, then <code>b</code></td></tr>
-<tr><td><code>scudo --profile claude,npm,cargo -- zsh</code></td><td>a shell with everything those three profiles allow, and their restrictions</td></tr>
-<tr><td><code>scudo --no-match --profile netblock -- curl https://example.com</code></td><td>only <code>netblock</code></td></tr>
+<tr><td><code>scudo --profile agents,npm,cargo -- zsh</code></td><td>a shell with everything those three profiles allow, and their restrictions</td></tr>
+<tr><td><code>scudo --no-match --profile no-net -- curl https://example.com</code></td><td>only <code>no-net</code></td></tr>
 <tr><td><code>scudo --no-match -- curl https://example.com</code></td><td>none — the command is executed directly, without <code>systemd-run</code></td></tr>
 <tr><td><code>scudo --no-match -p MemoryMax=1G -- curl https://example.com</code></td><td>none, but <code>systemd-run</code> still runs with the explicit property</td></tr>
 </tbody>
 </table>
 </div>
 <p>A profile that both matches and is named explicitly is applied only once, in its explicit position. An unknown profile name is a fatal error: scudo exits with status 1 without running the command, rather than running it with less sandboxing than was asked for.</p>
-<pre><code>$ scudo --profile snadboxed -- curl https://example.com
-scudo: profile 'snadboxed' not found
+<pre><code>$ scudo --profile sandbx -- curl https://example.com
+scudo: profile 'sandbx' not found
 </code></pre>
 <p>Both flags belong to scudo itself, so they are only available through the explicit <code>scudo &lt;command&gt;</code> form. When scudo is invoked through a symlink or the FUSE shim, every argument belongs to the wrapped command.</p>
 <h2 id="combining-profiles"><a class="header" href="#combining-profiles">Combining profiles</a></h2>

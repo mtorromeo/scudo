@@ -22,18 +22,18 @@ Every profile that matches is applied, in the order the profiles were written (s
 
 | Invocation | Profiles applied |
 |------------|------------------|
-| `scudo --profile netblock -- curl https://example.com` | everything matching `curl`, then `netblock` |
+| `scudo --profile no-net -- curl https://example.com` | everything matching `curl`, then `no-net` |
 | `scudo --profile a,b -- curl https://example.com` | matches for `curl`, then `a`, then `b` |
-| `scudo --profile claude,npm,cargo -- zsh` | a shell with everything those three profiles allow, and their restrictions |
-| `scudo --no-match --profile netblock -- curl https://example.com` | only `netblock` |
+| `scudo --profile agents,npm,cargo -- zsh` | a shell with everything those three profiles allow, and their restrictions |
+| `scudo --no-match --profile no-net -- curl https://example.com` | only `no-net` |
 | `scudo --no-match -- curl https://example.com` | none — the command is executed directly, without `systemd-run` |
 | `scudo --no-match -p MemoryMax=1G -- curl https://example.com` | none, but `systemd-run` still runs with the explicit property |
 
 A profile that both matches and is named explicitly is applied only once, in its explicit position. An unknown profile name is a fatal error: scudo exits with status 1 without running the command, rather than running it with less sandboxing than was asked for.
 
 ```
-$ scudo --profile snadboxed -- curl https://example.com
-scudo: profile 'snadboxed' not found
+$ scudo --profile sandbx -- curl https://example.com
+scudo: profile 'sandbx' not found
 ```
 
 Both flags belong to scudo itself, so they are only available through the explicit `scudo <command>` form. When scudo is invoked through a symlink or the FUSE shim, every argument belongs to the wrapped command.

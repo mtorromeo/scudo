@@ -6,6 +6,7 @@
 - [Usage](usage.md)
 - [Symlinks, aliases and the FUSE shim](dispatch.md)
 - [Configuration](configuration/README.md)
+  - [Recommended configuration](configuration/recommended.md)
   - [Trust confirmation](configuration/trust.md)
   - [Profiles](configuration/profiles.md)
   - [Matching and combining profiles](configuration/matching.md)

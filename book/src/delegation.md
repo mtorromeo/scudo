@@ -6,7 +6,9 @@ round. The `npm install` it runs has the agent's access rather than npm's, so a 
 script reaches everything the agent was trusted with: its git credentials, its signing key,
 the container socket it was given.
 
-Instead, two settings let such commands run in a sandbox of their own:
+Instead, two settings let such commands run in a sandbox of their own. The
+[recommended configuration](configuration/recommended.md#recommended-configuration) is set up
+this way; cut down to the two settings:
 
 ```toml
 # The tools: built to run hostile code confined.

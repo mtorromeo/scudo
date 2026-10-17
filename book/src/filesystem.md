@@ -36,10 +36,11 @@ exactly like a program that is broken.
 
 `filesystem.log = "denied"` on the profile — or `--verbose`, or `--tui` — asks `scudo-bpfd` to
 watch the syscalls that name a path and report the ones that come back with an error a sandbox
-could have caused:
+could have caused. With `sandbox` from the
+[recommended configuration](configuration/recommended.md#recommended-configuration):
 
 ```console
-$ scudo --verbose --profile sandboxed-home -- bash -lc 'git status'
+$ scudo --verbose --profile sandbox -- bash -lc 'git status'
 scudo: warning: blocked open of /home/me/.bashrc (hidden by the sandbox)
 scudo: warning: blocked open of /home/me/.gitconfig (hidden by the sandbox)
 scudo: warning: blocked open of /etc/shadow (permission denied)

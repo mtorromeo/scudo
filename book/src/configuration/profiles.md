@@ -28,41 +28,44 @@ Any other key is a typo and scudo says so instead of ignoring it.
 
 ## Example
 
+The bases here are those of the [recommended configuration](recommended.md#recommended-configuration),
+cut down to what the example needs.
+
 ```toml
 # The project a command runs in: the closest directory holding a `.git`
 [scudo]
 vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 
-# Base profile — no `match`, so it is never matched directly, only used via extend
-[sandboxed]
-filesystem.read = ["/"]
-filesystem.write = ["/tmp", "$XDG_RUNTIME_DIR"]
+# Base profiles — no `match`, so they are never matched directly, only used via extend
+[sandbox]
+filesystem.read = ["/", "$XDG_RUNTIME_DIR/scudo/bpfd.sock", "$XDG_RUNTIME_DIR/scudo/shims"]
+filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
+filesystem.write = ["/tmp", "$HOME/.cache"]
 systemd.PrivateTmp = true
 
-[sandboxed-home]
-extend = "sandboxed"
-filesystem.hide = ["$HOME"]
-filesystem.write = ["$HOME/.cache"]
+[git-project]
+extend = "sandbox"
+filesystem.write = ["$PROJECT_DIR"]
 
 # curl: extends the base sandbox
 [curl]
 match = "curl"
-extend = "sandboxed"
+extend = "sandbox"
 systemd.MemoryMax = "256M"
 
 # claude: works on the project it is started in, plus any --add-dir
 [claude]
 match = "claude"
-extend = "sandboxed-home"
+extend = "git-project"
 args.add_dir = { flags = "--add-dir", greedy = true }
 filesystem.read = ["$HOME/.gitconfig", "$arg_add_dir"]
-filesystem.write = ["$PROJECT_DIR", "$HOME/.claude", "$HOME/.claude.json"]
+filesystem.write = ["$HOME/.claude", "$HOME/.claude.json"]
 network.dest.allow = ["*.anthropic.com"]
 
 # code: VS Code and its variants
 [code]
 match = ["code", "code-oss", "codium", "vscode"]
-extend = "sandboxed-home"
+extend = "git-project"
 filesystem.write = [
   "/proc",
   "/dev/shm",
@@ -71,8 +74,9 @@ filesystem.write = [
   "$HOME/.vscode-oss",
   "$HOME/.config/Code",
   "$HOME/.config/Code - OSS",
-  "$PROJECT_DIR",
 ]
+# The display: the one socket of the session's an editor needs, given back alone.
+filesystem.read = ["$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}"]
 # The launcher leaves the editor running and exits: keep the unit until it is gone.
 systemd.ExitType = "cgroup"
 dbus.talk = [
@@ -82,12 +86,11 @@ dbus.talk = [
 ]
 dbus.own = ["com.visualstudio.code.*"]
 
-# npm: the npm cache and config, and the project
+# npm: the npm cache, and the project
 [npm]
 match = "npm"
-extend = "sandboxed-home"
-filesystem.write = ["$HOME/.npm", "$PROJECT_DIR"]
-filesystem.read = ["$HOME/.npmrc"]
+extend = "git-project"
+filesystem.write = ["$HOME/.npm"]
 
 [pnpm]
 match = "pnpm"
@@ -95,4 +98,4 @@ extend = "npm"
 filesystem.write = ["$HOME/.pnpm-store"]
 ```
 
-Every list adds to the ones it inherits: `pnpm` can write `~/.npm`, the project and `~/.pnpm-store`, and read everything `sandboxed` lets it read.
+Every list adds to the ones it inherits: `pnpm` can write `~/.npm`, the project and `~/.pnpm-store`, and read everything `sandbox` lets it read.

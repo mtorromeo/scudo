@@ -1,12 +1,14 @@
 # Network filtering
 
 `PrivateNetwork = true` is all-or-nothing. The `[profile.network]` table asks for something
-finer: deny everything by default and allow only what the command actually needs.
+finer: deny everything by default and allow only what the command actually needs. Here
+`supply-chain` is the base of the
+[recommended configuration](configuration/recommended.md#recommended-configuration).
 
 ```toml
 [cargo]
 match = "cargo"
-extend = "sandboxed-home"
+extend = "supply-chain"
 
 [cargo.network]
 default = "deny"            # "deny" (default) or "allow"

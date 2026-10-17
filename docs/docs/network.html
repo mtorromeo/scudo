@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-073ca001.js";
+            window.path_to_searchindex_js = "searchindex-29954e1f.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-eec0241e.js"></script>
+        <script src="toc-6da527ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -184,10 +184,12 @@
                     <main>
                         <h1 id="network-filtering"><a class="header" href="#network-filtering">Network filtering</a></h1>
 <p><code>PrivateNetwork = true</code> is all-or-nothing. The <code>[profile.network]</code> table asks for something
-finer: deny everything by default and allow only what the command actually needs.</p>
+finer: deny everything by default and allow only what the command actually needs. Here
+<code>supply-chain</code> is the base of the
+<a href="configuration/recommended.html#recommended-configuration">recommended configuration</a>.</p>
 <pre><code class="language-toml">[cargo]
 match = "cargo"
-extend = "sandboxed-home"
+extend = "supply-chain"
 
 [cargo.network]
 default = "deny"            # "deny" (default) or "allow"
