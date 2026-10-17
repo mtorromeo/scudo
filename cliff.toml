@@ -1,0 +1,90 @@
+# git-cliff configuration: CHANGELOG.md is generated from the conventional
+# commits, and updated when a version is tagged (`cargo make release`). It
+# starts after v0.1.0, which was released without one: the tasks pass the
+# range, so a bare `git cliff` still covers the whole history.
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+
+Every notable change to scudo, by release. Generated from the commit history
+with [git-cliff](https://git-cliff.org); the format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/)."""
+body = """
+{%- macro remote_url() -%}
+  https://github.com/mtorromeo/scudo
+{%- endmacro %}
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{%- else -%}
+## [Unreleased]
+{%- endif %}
+
+{%- set breaking = commits | filter(attribute="breaking", value=true) %}
+{%- if breaking | length > 0 %}
+
+### Breaking changes
+{% for commit in breaking %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }} \
+  ([{{ commit.id | truncate(length=7, end="") }}]({{ self::remote_url() }}/commit/{{ commit.id }}))
+{%- if commit.breaking_description and commit.breaking_description != commit.message %}
+{{ commit.breaking_description | indent(prefix="  ", first=true) }}
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+
+{%- for group, commits in commits | filter(attribute="breaking", value=false) | group_by(attribute="group") %}
+
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }} \
+  ([{{ commit.id | truncate(length=7, end="") }}]({{ self::remote_url() }}/commit/{{ commit.id }}))
+{%- endfor %}
+{%- endfor %}
+"""
+footer = """
+{%- macro remote_url() -%}
+  https://github.com/mtorromeo/scudo
+{%- endmacro -%}
+{% for release in releases %}
+{%- if release.previous and release.previous.version %}
+{%- if release.version %}
+[{{ release.version | trim_start_matches(pat="v") }}]: {{ self::remote_url() }}/compare/{{ release.previous.version }}...{{ release.version }}
+{%- else %}
+[unreleased]: {{ self::remote_url() }}/compare/{{ release.previous.version }}...HEAD
+{%- endif %}
+{%- elif release.version %}
+[{{ release.version | trim_start_matches(pat="v") }}]: {{ self::remote_url() }}/releases/tag/{{ release.version }}
+{%- endif %}
+{%- endfor %}
+"""
+# Whitespace is handled by the templates: trimming would also remove the line
+# break that separates one release from the next.
+trim = false
+
+[git]
+conventional_commits = true
+# The history starts before the convention was adopted.
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^(build|packaging|ci)", group = "<!-- 5 -->Build and packaging" },
+  { message = "^test", group = "<!-- 6 -->Tests" },
+  { message = "^(chore|style)", skip = true },
+]
+
+[bump]
+# Before 1.0 a breaking change bumps the minor version, not the major one.
+features_always_bump_minor = true
+breaking_always_bump_major = false

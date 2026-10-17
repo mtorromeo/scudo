@@ -19,6 +19,8 @@ CARGO_PROFILE = "dev"
 TARGET_DIR = "debug"
 # Extra flags for clippy; CI turns warnings into errors.
 CLIPPY_FLAGS = ""
+# CHANGELOG.md starts after the first release, which was published without one.
+CHANGELOG_SINCE = "v0.1.0"
 
 [env.production]
 CARGO_PROFILE = "release"
@@ -189,6 +191,59 @@ if [ -f "target/${TARGET_DIR}/scudo-bpfd" ]; then
 else
     echo "installed without scudo-bpfd (built without the bpf feature)"
 fi
+'''
+
+[tasks.changelog]
+description = "Show what the next release would add to CHANGELOG.md"
+category = "Release"
+command = "git-cliff"
+args = ["${CHANGELOG_SINCE}..HEAD", "--unreleased", "--strip", "header"]
+
+# CHANGELOG.md is only written here, when a version is tagged, so that each of
+# its sections is exactly what the tag contains. The version is the argument
+# (`cargo make release 0.2.0`), or else the one git-cliff works out from the
+# commits since the last tag. Nothing is pushed: the release workflow starts
+# when the tag is.
+#
+# When cargo is sandboxed by scudo, this runs under cargo's profile, which has
+# to be able to write the project's .git for the commit and the tag.
+[tasks.release]
+description = "Bump the version, update CHANGELOG.md, commit and tag"
+category = "Release"
+script_runner = "@shell"
+script = '''
+set -eu
+
+if [ -n "$(git status --porcelain)" ]; then
+    echo "error: the working tree has uncommitted changes" >&2
+    exit 1
+fi
+
+version="${CARGO_MAKE_TASK_ARGS:-}"
+if [ -z "$version" ]; then
+    version=$(git-cliff "$CHANGELOG_SINCE..HEAD" --bumped-version 2>/dev/null)
+fi
+version=${version#v}
+if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+    echo "error: '$version' is not a version" >&2
+    exit 1
+fi
+tag="v$version"
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    echo "error: $tag already exists" >&2
+    exit 1
+fi
+
+# The package's own version, the first one in the file; the PKGBUILD and the
+# static build read it from there.
+sed -i "0,/^version = \".*\"\$/s//version = \"$version\"/" Cargo.toml
+cargo update --workspace --offline --quiet
+git-cliff "$CHANGELOG_SINCE..HEAD" --tag "$tag" --output CHANGELOG.md
+
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit --quiet --message "chore(release): $tag"
+git tag --annotate "$tag" --message "scudo $version"
+echo "tagged $tag; publish it with: git push --atomic origin HEAD $tag"
 '''
 
 [tasks.archive-source]
