@@ -45,7 +45,8 @@ every user's package managers.
 | `pip`, `uv`, `poetry` | their commands | `supply-chain`, the tool's config read-only |
 | `cargo` | `cargo` | `supply-chain`, `~/.cargo` and `~/.rustup` read-only except the registry, credentials denied |
 | `composer`, `go`, `ruby` | their commands | `supply-chain` and the tool's cache |
-| `npm-publish`, `cargo-install` | — | What publishing or installing needs on top; for `--profile` |
+| `cargo-install` | `cargo install`, `cargo binstall`, `cargo-binstall` | `cargo`, plus `~/.cargo/bin` and the install bookkeeping writable; not `delegable` |
+| `npm-publish` | — | What publishing needs on top; for `--profile` |
 | `agents` | `claude`, `opencode` | `git-project`, writing `.git` and the agent's own state; [delegates](../delegation.md#delegating-commands) every `delegable` profile |
 
 Several pages of this documentation build their examples on these profiles.
@@ -68,8 +69,9 @@ Several pages of this documentation build their examples on these profiles.
   agent, which commits, gets it back.
 - **Directories on `PATH` stay read-only**: `~/.local/bin`, `~/.cargo/bin`, Composer's
   `vendor/bin`. A build script that could write there would replace `npm` or `git` with
-  something that runs unsandboxed the next time. Installing into them is what the explicit
-  `cargo-install` profile is for.
+  something that runs unsandboxed the next time. Installing into them is what the
+  `cargo-install` profile is for: it matches `cargo install` on its arguments, and says
+  `delegable = false` so that a sandbox delegating `cargo` cannot install through it.
 - **`$XDG_RUNTIME_DIR` is never written by a base profile.** The most permissive access to a
   path wins ([Filesystem access](../filesystem.md#filesystem-access)), so a base that wrote it
   would undo the hiding in every profile built on it. A profile that needs one socket, an

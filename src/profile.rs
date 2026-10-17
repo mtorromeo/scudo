@@ -993,6 +993,33 @@ mod tests {
         assert!(systemd_args(src, "python3x", &[]).is_empty());
     }
 
+    /// The example's `cargo-install` is applied to installs alone, on top of
+    /// `cargo`, however cargo is reached.
+    #[test]
+    fn the_example_installs_with_cargo_install() {
+        let configs = configs_from_toml(include_str!("../examples/config.toml"));
+        let matched = |command: &str, command_args: &[&str]| {
+            resolve(&configs, command, &args(command_args))
+                .unwrap()
+                .matched
+        };
+        for (command, command_args) in [
+            ("cargo", &["install", "ripgrep"][..]),
+            ("/usr/bin/cargo", &["binstall", "-y", "ripgrep"]),
+            ("cargo", &["+nightly", "install", "--locked", "x"]),
+        ] {
+            assert_eq!(
+                matched(command, command_args),
+                ["cargo", "cargo-install"],
+                "{command} {command_args:?}"
+            );
+        }
+        assert_eq!(matched("cargo-binstall", &["ripgrep"]), ["cargo-install"]);
+        for command_args in [&["build"][..], &["run", "--", "install"], &["installer"]] {
+            assert_eq!(matched("cargo", command_args), ["cargo"], "{command_args:?}");
+        }
+    }
+
     /// The section name is an identifier, not a pattern: without `match` the
     /// profile is invisible to the matcher, but still reachable by name.
     #[test]

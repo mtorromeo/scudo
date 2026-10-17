@@ -166,9 +166,22 @@ filesystem.write = [
 ]
 filesystem.deny = ["$HOME/.cargo/credentials", "$HOME/.cargo/credentials.toml"]
 
-# Explicit only: `scudo -p cargo-install -- cargo install …`
+# `cargo install` and `cargo binstall` (with or without a `+toolchain`), and
+# `cargo-binstall` run directly: what installing needs on top of [cargo].
+# Not delegable, though it extends a profile that is: a sandbox that delegates
+# `cargo` must not get to install into ~/.cargo/bin, outside of it, by asking.
 [cargo-install]
-filesystem.write = ["$HOME/.cargo/bin", "$HOME/.cargo/binary-cache", "$HOME/.cargo/binstall"]
+extend = "cargo"
+match = ['/^cargo( \+\S+)? b?install( |$)/', "cargo-binstall"]
+delegable = false
+filesystem.write = [
+  "$HOME/.cargo/bin",
+  "$HOME/.cargo/.crates.toml",
+  "$HOME/.cargo/.crates2.json",
+  "$HOME/.cargo/binary-cache",
+  "$HOME/.cargo/binstall",
+  "$HOME/.cargo/binstall.toml",
+]
 
 # ── Others ──────────────────────────────────────────────────────────────────
 # COMPOSER_HOME is ~/.config/composer; its vendor/bin is on PATH, so it is
