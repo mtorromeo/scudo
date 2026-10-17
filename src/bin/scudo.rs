@@ -413,6 +413,13 @@ fn run_sandboxed(
         {
             anyhow::bail!("'{}' is not matched by a delegated profile", args.command);
         }
+        if let Some(name) = resolved
+            .matched
+            .iter()
+            .find(|name| loaded.profiles.refuses_delegation(name))
+        {
+            anyhow::bail!("profile '{name}' matches it and is not delegable");
+        }
         if resolved.confirm {
             anyhow::bail!("its profile asks for confirmation, which a delegated run cannot ask");
         }

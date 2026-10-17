@@ -35,6 +35,12 @@ filesystem.read = ["/"]
 filesystem.write = ["$PWD"]
 filesystem.deny = ["$PWD/agent-only"]
 
+# Matches what `tool` matches, on its arguments, and refuses delegation.
+[tool-install]
+match = "probe-tool install*"
+delegable = false
+filesystem.write = ["/"]
+
 [mk]
 match = "probe-mk"
 delegable = true
@@ -165,6 +171,21 @@ fn a_profile_nobody_made_delegable_is_not_delegated() {
     let units = units(&stdout);
     assert_eq!(units.len(), 2usize, "{stdout}");
     assert_eq!(units.first(), units.get(1), "{stdout}");
+}
+
+/// `tool` is delegable, but `tool-install`, which also matches `probe-tool
+/// install`, says `delegable = false`: the run is refused rather than given
+/// what `tool-install` grants.
+#[test]
+#[ignore = "starts units under systemd --user"]
+fn a_profile_that_refuses_delegation_stops_it() {
+    let (stdout, _) = agent("\"$SCUDO\" -- ./probe-tool install; echo \"code=$?\"");
+    assert!(stdout.contains("code=1"), "{stdout}");
+    assert!(stdout.contains("is not delegable"), "{stdout}");
+    assert!(units(&stdout).is_empty(), "{stdout}");
+
+    let (stdout, _) = agent("\"$SCUDO\" -- ./probe-tool build; echo \"code=$?\"");
+    assert!(stdout.contains("code=7"), "{stdout}");
 }
 
 /// Where the agent shell and the tool it starts ran.

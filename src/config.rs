@@ -610,6 +610,14 @@ impl ValidatedConfigMap {
         self.delegable_along(name, &mut Vec::new()).unwrap_or(false)
     }
 
+    /// Whether `name` says, itself or through what it inherits,
+    /// `delegable = false`: a delegated run that it matches is refused, even
+    /// when another profile matching the same command is delegable.
+    #[must_use]
+    pub fn refuses_delegation(&self, name: &str) -> bool {
+        self.delegable_along(name, &mut Vec::new()) == Some(false)
+    }
+
     fn delegable_along<'a>(&'a self, name: &'a str, path: &mut Vec<&'a str>) -> Option<bool> {
         if path.contains(&name) {
             return None;
@@ -1308,6 +1316,9 @@ mod tests {
         assert!(map.is_delegable("npm"));
         assert!(!map.is_delegable("risky"));
         assert!(!map.is_delegable("code"));
+        assert!(map.refuses_delegation("risky"));
+        assert!(!map.refuses_delegation("code"), "saying nothing refuses nothing");
+        assert!(!map.refuses_delegation("npm"));
     }
 
     /// `true` stands for every delegable profile a command could match, and

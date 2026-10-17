@@ -80,6 +80,7 @@ cargo make release [VERSION]
 - `delegate` picks target profiles that are `delegable` and have a `match`; the opt-in is on the target. `--delegate`/`--no-delegate` are refused inside a sandbox.
 - The broker runs the same binary outside with `--delegated <id>`, so everything goes through `run()`; keep logic out of the broker.
 - The request widens nothing: only the command line selects profiles (through `match`); only peers in the caller's unit are served; cwd and every path in `ResolvedProfile::derived` must be the same inode outside and under a root the caller can write. A delegated run never prompts (untrusted `.scudo.toml` and `confirm` are errors) and always ends sandboxed.
+- A matched profile that resolves to `delegable = false` makes the delegated run fail (`ValidatedConfigMap::refuses_delegation`), even when another matched profile is delegable.
 - Fail closed: an unresponsive broker is an error.
 - Stop by unit name (`systemctl --user stop`/`kill`); `SIGWINCH` goes to `systemd-run`.
 - Command and watcher output go to the requester's stderr (`runner::Options::stderr`); scudo's own logs stay on the broker's.

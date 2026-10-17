@@ -29,7 +29,12 @@ delegate = true
 
 **`delegable = true`** is what the tool's profile says: it may be run on someone else's
 request. It is inherited through `extend`, so it can be set once on a base profile, and
-`delegable = false` takes it back for a profile that extends one. Mark only profiles meant to
+`delegable = false` takes it back for a profile that extends one. A profile that says
+`delegable = false`, itself or through what it extends, also stops every delegated run it
+matches, even when another profile matching the same command is delegable: the run fails
+rather than get what that profile grants. That is how `cargo-install` in the
+[recommended configuration](configuration/recommended.md) keeps a sandbox that delegates
+`cargo` from installing into `~/.cargo/bin` by asking for `cargo install`. Mark only profiles meant to
 contain what they run. Delegation hands over whatever the profile grants, so a profile that
 grants much — an editor writing its config, anything with the container socket — would turn
 every sandbox that may delegate to it into one that grants as much.
