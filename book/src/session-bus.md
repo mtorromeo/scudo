@@ -102,6 +102,9 @@ which is as much freedom as writing to `cgroup.procs`.
 - In a sandbox that can reach the manager (`session = "allow"`, a filter that names it, or
   a bus on an abstract socket), scudo starts a sandbox of its own as before, and the inner
   profile applies.
+- A sealed sandbox whose profile delegates the command's profile (`delegate`, and the target
+  `delegable`) hands the command to a broker outside, which runs it in a sandbox of its own: see
+  [Delegating commands](delegation.md#delegating-commands).
 - Restrictions asked for on the command line (`--profile`, `-P`, `--allow-dest`,
-  `--deny-dest`, `--allow-port`, `--deny-port`) and `--tui` cannot be had
+  `--deny-dest`, `--allow-port`, `--deny-port`), `--delegate`, `--no-delegate` and `--tui` cannot be had
   inside, so they fail the command rather than being dropped. `--confirm` still asks.

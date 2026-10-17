@@ -17,6 +17,8 @@ Options:
   -P, --property <PROPERTY=VALUE>       Set a property for the systemd-run command
   -p, --profile <NAME>                  Apply the named profile, ignoring its match rules (repeatable, comma-separated)
       --no-match                        Skip profile matching; apply only the profiles given with --profile
+      --delegate                        Run commands started inside the sandbox under their own profile when it is delegable, as `delegate = true` does
+      --no-delegate                     Run every command started inside the sandbox in the sandbox itself, whatever `delegate` says
       --allow-dest <DEST>               Allow a destination (address, CIDR, host or glob), even one a profile denies (repeatable, comma-separated)
       --deny-dest <DEST>                Deny a destination, even one a profile allows (repeatable, comma-separated)
       --allow-port <PORT[/PROTO]>       Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated)

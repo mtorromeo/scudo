@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-385ba874.js";
+            window.path_to_searchindex_js = "searchindex-8715e948.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-6adab0e6.js"></script>
+        <script src="toc-eec0241e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -197,6 +197,8 @@ Options:
   -P, --property &lt;PROPERTY=VALUE&gt;       Set a property for the systemd-run command
   -p, --profile &lt;NAME&gt;                  Apply the named profile, ignoring its match rules (repeatable, comma-separated)
       --no-match                        Skip profile matching; apply only the profiles given with --profile
+      --delegate                        Run commands started inside the sandbox under their own profile when it is delegable, as `delegate = true` does
+      --no-delegate                     Run every command started inside the sandbox in the sandbox itself, whatever `delegate` says
       --allow-dest &lt;DEST&gt;               Allow a destination (address, CIDR, host or glob), even one a profile denies (repeatable, comma-separated)
       --deny-dest &lt;DEST&gt;                Deny a destination, even one a profile allows (repeatable, comma-separated)
       --allow-port &lt;PORT[/PROTO]&gt;       Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated)

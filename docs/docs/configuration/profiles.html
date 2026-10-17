@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-385ba874.js";
+            window.path_to_searchindex_js = "../searchindex-8715e948.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-6adab0e6.js"></script>
+        <script src="../toc-eec0241e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -190,6 +190,8 @@
 <tbody>
 <tr><td><code>match</code></td><td>string or array of strings</td><td>Glob(s) matched against the command name; any one is enough. See <a href="matching.html#match-patterns">Match patterns</a>. Absent = the profile never matches a command on its own and is reachable only through <code>extend</code> or <code>--profile</code>.</td></tr>
 <tr><td><code>extend</code></td><td>string or array of strings</td><td>Profile(s) applied before this one, left to right; see <a href="matching.html#combining-profiles">Combining profiles</a></td></tr>
+<tr><td><code>delegate</code></td><td><code>true</code>, string or array of strings</td><td>Profiles whose commands, started from inside this sandbox, run in a sandbox of their own: <code>true</code> for every <code>delegable</code> one, or their names. See <a href="../delegation.html#delegating-commands">Delegating commands</a></td></tr>
+<tr><td><code>delegable</code></td><td>bool</td><td>Whether a sandbox may have this profile’s commands run under it on its request; inherited through <code>extend</code> (default: <code>false</code>). See <a href="../delegation.html#delegating-commands">Delegating commands</a></td></tr>
 <tr><td><code>inherit</code></td><td>bool</td><td>Whether this profile adds to a same-named profile from a lower-priority config file (<code>true</code>, the default) or replaces it (<code>false</code>); see <a href="matching.html#same-named-profiles-across-files">Same-named profiles across files</a></td></tr>
 <tr><td><code>exec</code></td><td>string</td><td>Absolute path of the binary to execute, bypassing PATH resolution</td></tr>
 <tr><td><code>verbose</code></td><td>bool</td><td>Shorthand for <code>log.level = "debug"</code>, which among other things prints the full <code>systemd-run</code> command before executing (default: <code>false</code>)</td></tr>

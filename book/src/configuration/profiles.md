@@ -6,6 +6,8 @@ Each TOML section defines a profile. The section name identifies the profile for
 |-------|------|-------------|
 | `match` | string or array of strings | Glob(s) matched against the command name; any one is enough. See [Match patterns](matching.md#match-patterns). Absent = the profile never matches a command on its own and is reachable only through `extend` or `--profile`. |
 | `extend` | string or array of strings | Profile(s) applied before this one, left to right; see [Combining profiles](matching.md#combining-profiles) |
+| `delegate` | `true`, string or array of strings | Profiles whose commands, started from inside this sandbox, run in a sandbox of their own: `true` for every `delegable` one, or their names. See [Delegating commands](../delegation.md#delegating-commands) |
+| `delegable` | bool | Whether a sandbox may have this profile's commands run under it on its request; inherited through `extend` (default: `false`). See [Delegating commands](../delegation.md#delegating-commands) |
 | `inherit` | bool | Whether this profile adds to a same-named profile from a lower-priority config file (`true`, the default) or replaces it (`false`); see [Same-named profiles across files](matching.md#same-named-profiles-across-files) |
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |

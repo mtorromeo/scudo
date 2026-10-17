@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-385ba874.js";
+            window.path_to_searchindex_js = "searchindex-8715e948.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-6adab0e6.js"></script>
+        <script src="toc-eec0241e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -269,8 +269,11 @@ which is as much freedom as writing to <code>cgroup.procs</code>.</p>
 <li>In a sandbox that can reach the manager (<code>session = "allow"</code>, a filter that names it, or
 a bus on an abstract socket), scudo starts a sandbox of its own as before, and the inner
 profile applies.</li>
+<li>A sealed sandbox whose profile delegates the command’s profile (<code>delegate</code>, and the target
+<code>delegable</code>) hands the command to a broker outside, which runs it in a sandbox of its own: see
+<a href="delegation.html#delegating-commands">Delegating commands</a>.</li>
 <li>Restrictions asked for on the command line (<code>--profile</code>, <code>-P</code>, <code>--allow-dest</code>,
-<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>) and <code>--tui</code> cannot be had
+<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>), <code>--delegate</code>, <code>--no-delegate</code> and <code>--tui</code> cannot be had
 inside, so they fail the command rather than being dropped. <code>--confirm</code> still asks.</li>
 </ul>
 
@@ -282,7 +285,7 @@ inside, so they fail the command rather than being dropped. <code>--confirm</cod
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="network.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="delegation.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -296,7 +299,7 @@ inside, so they fail the command rather than being dropped. <code>--confirm</cod
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="network.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="delegation.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

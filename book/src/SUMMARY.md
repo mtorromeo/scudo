@@ -11,6 +11,7 @@
   - [Variables](configuration/variables.md)
 - [Filesystem access](filesystem.md)
 - [Session bus](session-bus.md)
+- [Delegating commands](delegation.md)
 - [Network filtering](network.md)
 - [Logging](logging.md)
 - [Terminal UI](tui.md)
