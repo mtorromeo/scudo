@@ -28,7 +28,7 @@ mod mouse;
 #[cfg(feature = "tui")]
 pub mod pty;
 #[cfg(feature = "tui")]
-mod query;
+pub mod query;
 #[cfg(feature = "tui")]
 pub mod state;
 #[cfg(feature = "tui")]

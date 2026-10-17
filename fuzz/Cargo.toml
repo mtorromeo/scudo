@@ -1,0 +1,64 @@
+[package]
+name = "scudo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# A workspace of its own: the fuzz build needs nightly and sanitizer flags,
+# neither of which the main workspace's profiles and lints are written for.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = "1"
+serde_json = "1"
+toml = "1"
+# Same version as scudo's, so `Answerer::answer` takes the parser built here.
+vt100 = "0.16"
+
+# Without `bpf`: its build script compiles the eBPF object with a nested cargo,
+# which would inherit the instrumentation flags and needs bpf-linker besides.
+# Nothing fuzzed here lives behind it.
+[dependencies.scudo]
+path = ".."
+default-features = false
+features = ["tui"]
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tui-query"
+path = "fuzz_targets/tui-query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config-resolve"
+path = "fuzz_targets/config-resolve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network-overrides"
+path = "fuzz_targets/network-overrides.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire-messages"
+path = "fuzz_targets/wire-messages.rs"
+test = false
+doc = false
+bench = false

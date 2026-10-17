@@ -7,13 +7,14 @@
 
 pub mod cgroup;
 pub mod client;
+// Pure parsing with no aya in it, so it builds without the eBPF toolchain and
+// the fuzz targets can reach it.
+pub mod dns;
 pub mod protocol;
 pub mod report;
 
 #[cfg(feature = "bpf")]
 pub mod caps;
-#[cfg(feature = "bpf")]
-pub mod dns;
 #[cfg(feature = "bpf")]
 pub mod events;
 #[cfg(feature = "bpf")]
