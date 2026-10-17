@@ -52,7 +52,7 @@ covers both, with the toolchain requirements and optional features):
 ```bash
 cargo build --release
 sudo install -m755 target/release/scudo target/release/scudo-fuse target/release/scudo-bpfd /usr/bin/
-# Only needed for network filtering
+# Only needed for network filtering and blocked-access reports
 sudo setcap cap_bpf,cap_net_admin,cap_perfmon=ep /usr/bin/scudo-bpfd
 systemctl --user enable --now scudo-bpfd.socket
 ```
@@ -97,8 +97,9 @@ logging, the terminal UI and the FUSE shim — is in the
 - Linux with systemd (user session).
 - `fuse3` for the FUSE shim; `xdg-dbus-proxy` and the `scudo-dbus@.service` user unit for the
   session bus filter.
-- For network filtering, a kernel with cgroup eBPF support and `scudo-bpfd` installed with its
-  file capabilities.
+- For network filtering and for reporting what was blocked (including `--tui`), a kernel with
+  cgroup eBPF support and `scudo-bpfd` installed with its file capabilities, with
+  `scudo-bpfd.socket` enabled and active in `systemctl --user`.
 
 ## License
 
