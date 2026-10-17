@@ -12,8 +12,8 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="icon" href="favicon-4005c412.svg">
+        <link rel="shortcut icon" href="favicon-b3623b66.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
         <link rel="stylesheet" href="css/general-e96d0476.css">
         <link rel="stylesheet" href="css/chrome-d279d366.css">
@@ -28,6 +28,8 @@
         <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/scudo-32933726.css">
+        <link rel="stylesheet" href="theme/diagrams-938bc176.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -35,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8715e948.js";
+            window.path_to_searchindex_js = "searchindex-073ca001.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-eec0241e.js"></script>
@@ -182,6 +184,168 @@
                     <main>
                         <h1 id="scudo"><a class="header" href="#scudo">scudo</a></h1>
 <p>scudo wraps commands with <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html"><code>systemd-run</code></a>, applying resource limits and sandboxing constraints defined in per-command profiles. It requires Linux with systemd.</p>
+<h2 id="what-it-is"><a class="header" href="#what-it-is">What it is</a></h2>
+<p>Much of what runs on a developer’s machine executes code that nobody has read:</p>
+<ul>
+<li>package managers running install scripts;</li>
+<li>build systems running <code>build.rs</code>, <code>setup.py</code> and Makefiles;</li>
+<li>editors loading extensions;</li>
+<li>AI coding agents running whatever they decide to.</li>
+</ul>
+<p>All of it runs as you, with the same access you have: your <code>$HOME</code>, your SSH keys and tokens,
+your session bus, the whole network.</p>
+<p>scudo narrows that access, one command at a time. The command still runs on your system,
+with your toolchain and your files, but inside a transient systemd unit that is told what it
+may see, write and reach. A <strong>profile</strong> says what that is, and is matched by the command’s
+name. Once scudo is symlinked under a command’s name, or its FUSE shim is on your <code>PATH</code>, the
+command is sandboxed every time it runs, without anyone having to remember to ask
+(<a href="dispatch.html#symlinks-aliases-and-the-fuse-shim">Symlinks, aliases and the FUSE shim</a>).</p>
+<p>What a profile can say:</p>
+<ul>
+<li><strong>Files</strong>: which paths are writable, read-only, replaced by an empty directory, or
+inaccessible. Typically: the project and the tool’s own cache, and nothing else of <code>$HOME</code>
+(<a href="filesystem.html#filesystem-access">Filesystem access</a>).</li>
+<li><strong>Network</strong>: which addresses, hosts and ports may be reached, enforced by eBPF programs on
+the command’s cgroup, with DNS answered only for the names the rules mention
+(<a href="network.html#network-filtering">Network filtering</a>).</li>
+<li><strong>Session bus</strong>: none of it by default, or a filtered view, so that the command cannot ask
+<code>systemd --user</code> to start something outside the sandbox
+(<a href="session-bus.html#session-bus">Session bus</a>).</li>
+<li><strong>Resources and everything else a systemd unit can say</strong>: <code>MemoryMax=</code>, <code>CPUQuota=</code>,
+<code>IOWeight=</code>, capabilities, private <code>/tmp</code> and so on.</li>
+</ul>
+<p>It also tells you what it took away. A sandboxed command that fails because a file was hidden
+or a connection refused looks exactly like a broken program, so scudo can report every
+refusal, as it happens or in a <a href="tui.html#terminal-ui">terminal UI</a> beside the command.</p>
+<h2 id="what-it-is-not"><a class="header" href="#what-it-is-not">What it is not</a></h2>
+<ul>
+<li>
+<p><strong>Not an antivirus.</strong> scudo does not scan, detect or recognise anything. It has no idea
+whether the code it runs is malicious, and it never will. It limits what <em>any</em> code run
+under a profile can do, whatever that code turns out to be. A malicious package is still
+installed, still runs, and can still do whatever its profile allows. What changes is what
+that amounts to.</p>
+</li>
+<li>
+<p><strong>Not a container or a virtual machine.</strong> The command runs on your kernel, as your user,
+against your real filesystem, seen through mount restrictions. A kernel vulnerability, or a
+privileged program it is allowed to talk to, is outside what scudo can contain.</p>
+</li>
+<li>
+<p><strong>Not stronger than its profile.</strong> Whatever a profile grants is granted:</p>
+<ul>
+<li>a project directory left writable can be damaged;</li>
+<li>a token left readable can be read;</li>
+<li>a network left open can carry it away.</li>
+</ul>
+<p>A profile that hides nothing protects nothing.</p>
+</li>
+<li>
+<p><strong>Not something that cannot be avoided.</strong> Commands that are not run through scudo are not
+sandboxed: a script that calls <code>/usr/bin/npm</code> by its full path skips the symlink. scudo
+confines the commands you route through it, not everything on the machine.</p>
+</li>
+<li>
+<p><strong>Not a replacement for reviewing what you install.</strong> It limits the damage of a bad
+dependency, it does not tell you that you have one.</p>
+</li>
+</ul>
+<h2 id="use-cases"><a class="header" href="#use-cases">Use cases</a></h2>
+<ul>
+<li><strong>Keep <code>npm install</code>, <code>pip</code> and <code>cargo build</code> away from your secrets.</strong> Hide <code>$HOME</code>, give
+back only the project and the tool’s cache, and let the tool reach its registry and nothing
+else.</li>
+<li><strong>Fence an AI coding agent into the project it was started in.</strong> The project is writable,
+everything else is read-only or hidden, and the network is limited to the agent’s API. The
+tools the agent runs can be <a href="delegation.html#delegating-commands">delegated</a> to sandboxes of
+their own, so that an install script run by the agent does not inherit the agent’s access.</li>
+<li><strong>Run an editor or an Electron app without letting it escape.</strong> The session bus is filtered,
+so the program cannot ask <code>systemd --user</code> to move it out of its sandbox.</li>
+<li><strong>Cap a hungry program</strong> with memory, CPU and I/O limits, per command.</li>
+<li><strong>Find out what a program actually touches.</strong> Refused connections, DNS lookups and hidden
+files are reported as they happen.</li>
+</ul>
+<h2 id="what-it-protects-against"><a class="header" href="#what-it-protects-against">What it protects against</a></h2>
+<p>A typical case is code from a compromised dependency, run by a tool you trusted. Without
+scudo it has everything you have. Under a profile that hides <code>$HOME</code> and restricts the
+network, it is kept from:</p>
+<ul>
+<li><strong>Reading your secrets</strong>: SSH keys, cloud credentials, registry tokens, browser profiles,
+password stores and anything else under <code>$HOME</code> that the profile does not give back.</li>
+<li><strong>Using your agents</strong>: the ssh-agent and gpg-agent sockets let a program push or sign as you
+without ever reading a key. Hiding <code>$XDG_RUNTIME_DIR</code> takes them away with every other
+socket of your session.</li>
+<li><strong>Sending what it found somewhere</strong>: with a network policy, the command can only reach the
+hosts its rules name, and can only resolve those names.</li>
+<li><strong>Staying behind</strong>: no writing to shell startup files, to directories on your <code>PATH</code>, to
+<code>.git/hooks</code>, or to anything else that would run its code again later, outside the sandbox.</li>
+<li><strong>Leaving the sandbox</strong>: no session bus and no way to the service manager, so it cannot
+start a process in a unit of its own, nor move itself out of its cgroup.</li>
+<li><strong>Taking the machine down</strong>: memory, CPU and process limits, if the profile sets them.</li>
+</ul>
+<p>Each of these holds only as far as the profile says so: scudo enforces the profile, and the
+profile decides how much protection there is.</p>
+<h2 id="how-it-differs-from-other-sandboxes"><a class="header" href="#how-it-differs-from-other-sandboxes">How it differs from other sandboxes</a></h2>
+<p>Flatpak, bubblewrap and Firejail all confine programs on Linux, and all three are good at what
+they were made for. scudo was made for a different job: putting the tools you already have,
+installed the way they already are, under a policy that follows the command wherever it is
+run from.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th>scudo</th><th>Flatpak</th><th>bubblewrap</th><th>Firejail</th></tr>
+</thead>
+<tbody>
+<tr><td>What it confines</td><td>the commands already on your system</td><td>applications packaged as Flatpaks</td><td>whatever command line you write for it</td><td>the commands already on your system</td></tr>
+<tr><td>Configured by</td><td>per-command profiles, matched by name</td><td>the app’s manifest, plus overrides</td><td>flags on each invocation</td><td>per-program profiles</td></tr>
+<tr><td>Privileges</td><td>none; an optional helper with file capabilities for network filtering</td><td>none (it uses bubblewrap)</td><td>none</td><td>a setuid-root binary</td></tr>
+<tr><td>Network</td><td>per host, address and port, DNS answered only for named hosts</td><td>all or nothing</td><td>all or nothing</td><td>all or nothing, or a firewall inside a network namespace of its own</td></tr>
+<tr><td>Resource limits</td><td>anything a systemd unit can set</td><td>none of its own</td><td>none</td><td>rlimits</td></tr>
+<tr><td>Reporting</td><td>every refused connection, lookup and file, live</td><td>—</td><td>—</td><td>blacklisted files, to syslog</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Flatpak</strong> is a way to distribute desktop applications. An application is built against a
+runtime, ships with a description of what it needs, and talks to the desktop through portals.
+That is the right shape for a GUI app you install from Flathub, but not for the <code>npm</code>, <code>cargo</code>
+or <code>make</code> on your <code>PATH</code>: those are not Flatpaks, they work on your files and your toolchain,
+and repackaging them would mean replacing the environment you build in. scudo confines those
+binaries as they are.</p>
+<p><strong>bubblewrap</strong> is the low-level tool Flatpak is built on: it sets up namespaces and bind
+mounts from its command line and runs the command. It has no notion of a profile, of which
+command is being run, or of a policy beyond the flags it was given, so using it day to day
+means writing a wrapper script for each command. It also stops at namespaces: there are no
+cgroup limits and no network rules finer than having a network or not. scudo gets its
+namespaces from systemd instead, and adds what a wrapper script would otherwise have to
+reinvent:</p>
+<ul>
+<li>profiles chosen by the command’s name;</li>
+<li>variables from the project and the command’s arguments;</li>
+<li>limits, network filtering and refusal reports.</li>
+</ul>
+<p><strong>Firejail</strong> is the closest in spirit. It also confines the programs you already have,
+symlinked under their own names, and ships a large collection of profiles for desktop
+software. The differences are in how it gets there and what it aims at:</p>
+<ul>
+<li><strong>Privileges.</strong> Firejail is setuid root, so every sandbox starts from a root process that
+parses user input. scudo runs entirely as you. Its one privileged part, the network helper,
+holds two file capabilities and can only ever add restrictions to a cgroup you already own.</li>
+<li><strong>The network.</strong> Filtering by host name, with DNS refused for every name the rules do not
+mention, works on the command’s own cgroup. It needs no network namespace, bridge or
+firewall setup.</li>
+<li><strong>Developer tools and agents.</strong> Profiles can follow the project the command was started in,
+or a directory named in its arguments. An agent’s sandbox can
+<a href="delegation.html#delegating-commands">delegate</a> the tools it runs to sandboxes of their own.
+Neither of these is something a desktop application needs, which is what Firejail’s profiles
+are written for.</li>
+</ul>
+<p>What scudo gives up in return:</p>
+<ul>
+<li>it needs Linux with systemd, and <code>systemd --user</code> running;</li>
+<li>reporting refused file accesses is implemented on x86-64 only;</li>
+<li>it has no answer for desktop integration beyond filtering the session bus: an app that lives
+on portals is better served by Flatpak.</li>
+</ul>
 <h2 id="license"><a class="header" href="#license">License</a></h2>
 <p>Licensed under either of <a href="https://github.com/mtorromeo/scudo/blob/main/LICENSE-APACHE">Apache License, Version 2.0</a> or <a href="https://github.com/mtorromeo/scudo/blob/main/LICENSE-MIT">MIT License</a>, at your option.</p>
 

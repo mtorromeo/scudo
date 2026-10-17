@@ -2,6 +2,7 @@
 
 [Introduction](introduction.md)
 
+- [Installation](installation.md)
 - [Usage](usage.md)
 - [Symlinks, aliases and the FUSE shim](dispatch.md)
 - [Configuration](configuration/README.md)
@@ -15,4 +16,3 @@
 - [Network filtering](network.md)
 - [Logging](logging.md)
 - [Terminal UI](tui.md)
-- [Building](building.md)

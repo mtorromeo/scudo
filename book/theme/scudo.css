@@ -1,0 +1,108 @@
+/* The homepage's palette and type, mapped onto the two themes the book uses
+   by default: `light`, and `navy` when the system asks for a dark one. The
+   other themes in the picker are left as mdbook ships them. */
+:root {
+    --mono-font: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, "DejaVu Sans Mono", monospace;
+}
+html {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.light, html:not(.js) {
+    --bg: #faf8f5;
+    --fg: #1c1917;
+
+    --sidebar-bg: #f3efe9;
+    --sidebar-fg: #1c1917;
+    --sidebar-non-existant: #a8a29e;
+    --sidebar-active: #c2410c;
+    --sidebar-spacer: #e7e2dc;
+
+    --scrollbar: #a8a29e;
+
+    --icons: #78716c;
+    --icons-hover: #1c1917;
+
+    --links: #c2410c;
+
+    --inline-code-color: #9a3412;
+
+    --theme-popup-bg: #ffffff;
+    --theme-popup-border: #e7e2dc;
+    --theme-hover: #f3efe9;
+
+    --quote-bg: #ffffff;
+    --quote-border: #e7e2dc;
+
+    --warning-border: #d97706;
+
+    --table-border-color: #e7e2dc;
+    --table-header-bg: #efe9e1;
+    --table-alternate-bg: #f6f2ec;
+
+    --searchbar-border-color: #d6d0c8;
+    --searchbar-bg: #ffffff;
+    --searchbar-fg: #1c1917;
+    --searchbar-shadow-color: #e7e2dc;
+    --searchresults-header-fg: #57534e;
+    --searchresults-border-color: #d6d0c8;
+    --searchresults-li-bg: #fff1e6;
+    --search-mark-bg: #fed7aa;
+
+    --footnote-highlight: #c2410c;
+    --sidebar-header-border-color: #c2410c;
+}
+
+.navy {
+    --bg: #12100e;
+    --fg: #e7e5e4;
+
+    --sidebar-bg: #1c1917;
+    --sidebar-fg: #d6d3d1;
+    --sidebar-non-existant: #57534e;
+    --sidebar-active: #fb923c;
+    --sidebar-spacer: #2e2a27;
+
+    --scrollbar: #57534e;
+
+    --icons: #a8a29e;
+    --icons-hover: #f5f5f4;
+
+    --links: #fb923c;
+
+    --inline-code-color: #fdba74;
+
+    --theme-popup-bg: #1c1917;
+    --theme-popup-border: #2e2a27;
+    --theme-hover: #2e2a27;
+
+    --quote-bg: #1c1917;
+    --quote-border: #2e2a27;
+
+    --warning-border: #f59e0b;
+
+    --table-border-color: #2e2a27;
+    --table-header-bg: #26221f;
+    --table-alternate-bg: #171412;
+
+    --searchbar-border-color: #3a3531;
+    --searchbar-bg: #1c1917;
+    --searchbar-fg: #f5f5f4;
+    --searchbar-shadow-color: #000000;
+    --searchresults-header-fg: #a8a29e;
+    --searchresults-border-color: #3a3531;
+    --searchresults-li-bg: #2a211b;
+    --search-mark-bg: #9a3412;
+
+    --footnote-highlight: #fb923c;
+    --sidebar-header-border-color: #fb923c;
+}
+
+/* Code blocks on the same grounds as the homepage's. */
+html.light pre > code.hljs,
+html:not(.js) pre > code.hljs {
+    background: #f3efe9;
+}
+html.navy pre > code.hljs {
+    background: #0b0a09;
+}

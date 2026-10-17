@@ -15,6 +15,11 @@ git-repository-url = "https://github.com/mtorromeo/scudo"
 edit-url-template = "https://github.com/mtorromeo/scudo/edit/gh-pages/book/src/{path}"
 default-theme = "light"
 preferred-dark-theme = "navy"
+additional-css = ["theme/scudo.css", "theme/diagrams.css"]
 
 [output.html.search]
 enable = true
+
+# The building instructions used to be a page of their own.
+[output.html.redirect]
+"/building.html" = "installation.html#building"

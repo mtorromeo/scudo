@@ -88,6 +88,50 @@ the whole daemon — on the first sandbox that asks, and unloaded with the last.
 being watched live in a map the programs consult first, which is also what keeps a path
 belonging to any other process on the machine from ever leaving the kernel.
 
+<svg class="diagram" viewBox="0 0 820 470" role="img" aria-labelledby="dg-fs-title">
+<title id="dg-fs-title">How refused file accesses are reported: two raw tracepoints see every syscall on the machine, keep only path syscalls from watched cgroups, and hand the failures to scudo-bpfd, which checks whether the path exists outside and reports it to the sandbox's watchers</title>
+<defs><marker id="dg-fs-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0 10 5 0 10z"/></marker></defs>
+<rect class="zone" x="16" y="16" width="380" height="438" rx="10"/>
+<text class="title" x="32" y="42">kernel</text>
+<text class="muted" x="32" y="60">one object for the whole daemon, every syscall on the machine</text>
+<rect class="box key" x="40" y="80" width="332" height="44" rx="6"/>
+<text class="mono" x="206" y="107" text-anchor="middle">raw tracepoints sys_enter, sys_exit</text>
+<rect class="box" x="40" y="160" width="332" height="56" rx="6"/>
+<text x="206" y="184" text-anchor="middle">does the syscall name a path?</text>
+<text class="muted" x="206" y="203" text-anchor="middle">no: done, without touching a map</text>
+<rect class="box" x="40" y="252" width="332" height="56" rx="6"/>
+<text x="206" y="276" text-anchor="middle">is its cgroup in WATCHED?</text>
+<text class="muted" x="206" y="295" text-anchor="middle">no: nothing leaves the kernel</text>
+<rect class="box" x="40" y="344" width="332" height="86" rx="6"/>
+<text x="206" y="368" text-anchor="middle">enter: keep the path in PENDING</text>
+<text x="206" y="388" text-anchor="middle">exit: an error goes to the ring buffer</text>
+<text class="muted" x="206" y="410" text-anchor="middle">success only drops the PENDING entry</text>
+<path class="flow" d="M206 124V158" marker-end="url(#dg-fs-arrow)"/>
+<path class="flow" d="M206 216V250" marker-end="url(#dg-fs-arrow)"/>
+<path class="flow" d="M206 308V342" marker-end="url(#dg-fs-arrow)"/>
+<rect class="zone" x="440" y="16" width="364" height="438" rx="10"/>
+<text class="title" x="456" y="42">scudo-bpfd</text>
+<text class="muted" x="456" y="60">outside every sandbox's mount namespace</text>
+<rect class="box" x="464" y="344" width="316" height="56" rx="6"/>
+<text x="622" y="368" text-anchor="middle">routes each event by its cgroup id</text>
+<text class="muted mono" x="622" y="387" text-anchor="middle">fsmon</text>
+<path class="flow" d="M372 380H462" marker-end="url(#dg-fs-arrow)"/>
+<rect class="box key" x="464" y="252" width="316" height="56" rx="6"/>
+<text x="622" y="276" text-anchor="middle">is the path there outside the sandbox?</text>
+<text class="muted" x="622" y="295" text-anchor="middle">hidden: warn · never there: debug</text>
+<path class="flow" d="M622 344V310" marker-end="url(#dg-fs-arrow)"/>
+<rect class="box" x="464" y="160" width="316" height="56" rx="6"/>
+<text x="622" y="184" text-anchor="middle">the sandbox's notification bus</text>
+<text class="muted" x="622" y="203" text-anchor="middle">shared with the network refusals</text>
+<path class="flow" d="M622 252V218" marker-end="url(#dg-fs-arrow)"/>
+<rect class="box" x="464" y="80" width="150" height="44" rx="6"/>
+<text x="539" y="107" text-anchor="middle">watcher, stderr</text>
+<rect class="box" x="630" y="80" width="150" height="44" rx="6"/>
+<text x="705" y="107" text-anchor="middle">--tui panel</text>
+<path class="flow" d="M580 160V126" marker-end="url(#dg-fs-arrow)"/>
+<path class="flow" d="M664 160V126" marker-end="url(#dg-fs-arrow)"/>
+</svg>
+
 They are *raw* tracepoints, attached by name through `bpf(2)`. A classic tracepoint per syscall
 would be the obvious shape, but attaching one means reading its id out of
 `<tracefs>/events/…/id`, and tracefs is `drwx------ root` on an ordinary system — no capability

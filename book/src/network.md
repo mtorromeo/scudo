@@ -122,6 +122,50 @@ nameservers, and records the `A` and `AAAA` addresses it hands back. From that m
 addresses are covered by the list that named the host, as `/32` and `/128` prefixes like any
 other. Both UDP and TCP queries are served, and a truncated answer is retried over TCP.
 
+<svg class="diagram" viewBox="0 0 820 380" role="img" aria-labelledby="dg-dns-title">
+<title id="dg-dns-title">How naming a host allows it: the sandbox's DNS is redirected to a resolver of its own, which answers only for names a rule mentions and adds the addresses it returns to the destination tries that every connection is checked against</title>
+<defs>
+<marker id="dg-dns-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0 10 5 0 10z"/></marker>
+<marker id="dg-dns-deny" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head deny" d="M0 0 10 5 0 10z"/></marker>
+</defs>
+<rect class="zone" x="16" y="16" width="190" height="348" rx="10"/>
+<text class="title" x="32" y="42">the sandbox</text>
+<rect class="box key" x="36" y="70" width="150" height="44" rx="6"/>
+<text x="111" y="97" text-anchor="middle">the command</text>
+<rect class="box" x="236" y="62" width="190" height="60" rx="6"/>
+<text class="title" x="331" y="85" text-anchor="middle">cgroup hooks</text>
+<text class="muted mono" x="331" y="104" text-anchor="middle">connect · sendmsg · skb</text>
+<rect class="box key" x="478" y="62" width="180" height="60" rx="6"/>
+<text class="title" x="568" y="85" text-anchor="middle">resolver</text>
+<text class="muted" x="568" y="104" text-anchor="middle">one per sandbox, in bpfd</text>
+<rect class="box" x="690" y="70" width="114" height="44" rx="6"/>
+<text x="747" y="97" text-anchor="middle">nameservers</text>
+<path class="flow" d="M186 92H234" marker-end="url(#dg-dns-arrow)"/>
+<path class="flow" d="M426 92H476" marker-end="url(#dg-dns-arrow)"/>
+<text class="muted" x="451" y="84" text-anchor="middle">DNS</text>
+<path class="flow" d="M658 92H688" marker-end="url(#dg-dns-arrow)"/>
+<path class="flow deny" d="M658 112C680 140 690 160 700 188" marker-end="url(#dg-dns-deny)"/>
+<text class="muted" x="747" y="134" text-anchor="middle">names a rule</text>
+<text class="muted" x="747" y="150" text-anchor="middle">mentions</text>
+<text class="muted" x="747" y="206" text-anchor="middle">any other name:</text>
+<text class="muted" x="747" y="222" text-anchor="middle">refused</text>
+<rect class="box" x="236" y="232" width="422" height="72" rx="6"/>
+<text class="title" x="447" y="256" text-anchor="middle">destination tries</text>
+<text class="muted" x="447" y="275" text-anchor="middle">deny and allow × IPv4 and IPv6, longest prefix wins</text>
+<text class="muted" x="447" y="292" text-anchor="middle">ports in bitmaps beside them; no loop, no rule limit</text>
+<path class="flow" d="M610 122V230" marker-end="url(#dg-dns-arrow)"/>
+<text class="muted" x="620" y="194">adds A, AAAA</text>
+<text class="muted" x="620" y="211">as /32, /128</text>
+<path class="flow" d="M331 122V230" marker-end="url(#dg-dns-arrow)"/>
+<text class="muted" x="341" y="194">every connection:</text>
+<text class="muted" x="341" y="211">deny first, then allow</text>
+<path class="flow deny" d="M234 268H120V116" marker-end="url(#dg-dns-deny)"/>
+<text class="muted" x="128" y="152">refused:</text>
+<text class="muted mono" x="128" y="170">EPERM</text>
+<text class="muted" x="447" y="336" text-anchor="middle">a learnt address is removed when its TTL runs out (30 s to 1 h);</text>
+<text class="muted" x="447" y="353" text-anchor="middle">what the config names outright is never removed</text>
+</svg>
+
 The redirect happens before any check, so a policy whose port lists never mention 53 still
 resolves names — and, for the same reason, `ports.deny = [53]` does not take that away: the
 query never reaches the port rules, because it never reaches port 53. What decides which names
@@ -206,6 +250,51 @@ that shim — running inside the unit, in the final cgroup — claims the token 
 execs the real command. The cgroup does not exist before the unit starts, so registering
 earlier is impossible, and attaching afterwards would leave a window in which the command runs
 unfiltered.
+
+<svg class="diagram" viewBox="0 0 820 560" role="img" aria-labelledby="dg-bpfd-title">
+<title id="dg-bpfd-title">How a sandbox with a network policy starts: scudo registers the policy and gets a token, the shim inside the unit claims it, and only then the command runs</title>
+<defs><marker id="dg-bpfd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0 10 5 0 10z"/></marker></defs>
+<rect class="box key" x="16" y="16" width="168" height="52" rx="6"/>
+<text class="title" x="100" y="38" text-anchor="middle">scudo</text>
+<text class="muted" x="100" y="56" text-anchor="middle">becomes systemd-run</text>
+<rect class="box key" x="226" y="16" width="168" height="52" rx="6"/>
+<text class="title" x="310" y="38" text-anchor="middle">scudo-bpfd</text>
+<text class="muted" x="310" y="56" text-anchor="middle">CAP_BPF, CAP_NET_ADMIN</text>
+<rect class="box key" x="436" y="16" width="168" height="52" rx="6"/>
+<text class="title" x="520" y="38" text-anchor="middle">the unit</text>
+<text class="muted" x="520" y="56" text-anchor="middle">its own cgroup</text>
+<rect class="box key" x="636" y="16" width="168" height="52" rx="6"/>
+<text class="title" x="720" y="38" text-anchor="middle">watcher</text>
+<text class="muted mono" x="720" y="56" text-anchor="middle">scudo --bpf-watch</text>
+<path class="lane" d="M100 68V546M310 68V546M520 68V546M720 68V546"/>
+<path class="flow" d="M100 100H308" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="mono" x="204" y="93" text-anchor="middle">Register(policies)</text>
+<path class="flow back" d="M310 130H102" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="mono" x="204" y="123" text-anchor="middle">token</text>
+<path class="flow" d="M100 168H718" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="muted" x="620" y="161" text-anchor="middle">spawns, if reporting</text>
+<path class="flow" d="M720 200H312" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="mono" x="620" y="193" text-anchor="middle">Watch(token)</text>
+<rect class="box" x="30" y="222" width="140" height="30" rx="6"/>
+<text class="mono" x="100" y="242" text-anchor="middle">exec systemd-run</text>
+<path class="flow" d="M100 276H518" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="muted" x="400" y="269" text-anchor="middle">starts it</text>
+<rect class="box" x="445" y="292" width="150" height="30" rx="6"/>
+<text class="mono" x="520" y="312" text-anchor="middle">scudo --bpf-shim</text>
+<path class="flow" d="M520 346H312" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="mono" x="416" y="339" text-anchor="middle">Attach(token)</text>
+<rect class="box" x="210" y="362" width="200" height="44" rx="6"/>
+<text x="310" y="380" text-anchor="middle">attaches the programs</text>
+<text class="muted" x="310" y="397" text-anchor="middle">to the shim's cgroup</text>
+<path class="flow back" d="M310 424H518" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="mono" x="416" y="417" text-anchor="middle">Attached</text>
+<rect class="box key" x="445" y="440" width="150" height="30" rx="6"/>
+<text class="mono" x="520" y="460" text-anchor="middle">exec the command</text>
+<path class="flow" d="M310 488H718" marker-end="url(#dg-bpfd-arrow)"/>
+<text class="muted" x="620" y="481" text-anchor="middle">refusals</text>
+<rect class="box" x="645" y="504" width="150" height="30" rx="6"/>
+<text x="720" y="524" text-anchor="middle">prints to stderr</text>
+</svg>
 
 **When the policy cannot be enforced** — the helper is not installed, lacks its capabilities,
 or the kernel does not support it — `on_unavailable` decides what happens:

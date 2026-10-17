@@ -12,8 +12,8 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="icon" href="favicon-4005c412.svg">
+        <link rel="shortcut icon" href="favicon-b3623b66.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
         <link rel="stylesheet" href="css/general-e96d0476.css">
         <link rel="stylesheet" href="css/chrome-d279d366.css">
@@ -28,6 +28,8 @@
         <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/scudo-32933726.css">
+        <link rel="stylesheet" href="theme/diagrams-938bc176.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -35,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8715e948.js";
+            window.path_to_searchindex_js = "searchindex-073ca001.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-eec0241e.js"></script>
@@ -235,6 +237,63 @@ hands the broker the command, its arguments and its three standard streams. The 
 checks the request and starts scudo again, outside, which reads the configuration and runs
 <code>systemd-run</code> like any other invocation. The exit code comes back the same way, and signals
 the scudo inside receives are passed on to the command.</p>
+<svg class="diagram" viewbox="0 0 820 560" role="img" aria-labelledby="dg-delegation-title">
+<title id="dg-delegation-title">A delegated command: the scudo inside the agent's sandbox hands the command to the broker outside, which starts it in a sandbox of its own</title>
+<defs><marker id="dg-delegation-arrow" viewbox="0 0 10 10" refx="9" refy="5" markerwidth="7" markerheight="7" orient="auto-start-reverse"><path class="head" d="M0 0 10 5 0 10z" /></marker></defs>
+<rect class="zone" x="16" y="16" width="232" height="528" rx="10" />
+<text class="title" x="32" y="42">agent sandbox</text>
+<text class="muted mono" x="32" y="60">scudo-sealed-…a.service</text>
+<rect class="box" x="36" y="84" width="192" height="44" rx="6" />
+<text x="132" y="111" text-anchor="middle">claude</text>
+<rect class="box key" x="36" y="172" width="192" height="56" rx="6" />
+<text x="132" y="196" text-anchor="middle">npm install</text>
+<text class="muted" x="132" y="215" text-anchor="middle">npm is a symlink to scudo</text>
+<rect class="box" x="36" y="274" width="192" height="56" rx="6" />
+<text class="mono" x="132" y="298" text-anchor="middle">…/scudo/broker</text>
+<text class="muted" x="132" y="317" text-anchor="middle">socket, mounted here only</text>
+<text class="muted" x="132" y="392" text-anchor="middle">a command no delegable</text>
+<text class="muted" x="132" y="409" text-anchor="middle">profile matches runs here,</text>
+<text class="muted" x="132" y="426" text-anchor="middle">as it always did</text>
+<path class="flow" d="M132 128V170" marker-end="url(#dg-delegation-arrow)" />
+<path class="flow" d="M132 228V272" marker-end="url(#dg-delegation-arrow)" />
+<text class="title" x="460" y="42" text-anchor="middle">outside any sandbox</text>
+<text class="muted" x="460" y="60" text-anchor="middle">started with the agent, gone with it</text>
+<text class="muted" x="460" y="214" text-anchor="middle">checks the caller's cgroup,</text>
+<text class="muted" x="460" y="231" text-anchor="middle">reads its directory from /proc,</text>
+<text class="muted" x="460" y="248" text-anchor="middle">matches the name to a delegable profile</text>
+<rect class="box key" x="360" y="274" width="200" height="56" rx="6" />
+<text class="title" x="460" y="298" text-anchor="middle">broker</text>
+<text class="muted mono" x="460" y="317" text-anchor="middle">scudo --broker</text>
+<path class="flow" d="M228 292H358" marker-end="url(#dg-delegation-arrow)" />
+<text x="240" y="263"><tspan class="num">1</tspan><tspan class="muted" dx="5">command, args,</tspan></text>
+<text class="muted" x="251" y="279">fds 0 1 2</text>
+<path class="flow back" d="M360 314H230" marker-end="url(#dg-delegation-arrow)" />
+<text x="240" y="336"><tspan class="num">4</tspan><tspan class="muted" dx="5">exit code</tspan></text>
+<rect class="box" x="360" y="384" width="200" height="56" rx="6" />
+<text class="mono" x="460" y="408" text-anchor="middle">scudo --delegated</text>
+<text class="muted" x="460" y="427" text-anchor="middle">config, trust, systemd-run</text>
+<path class="flow" d="M460 330V382" marker-end="url(#dg-delegation-arrow)" />
+<text x="470" y="352"><tspan class="num">2</tspan><tspan class="muted" dx="5">started in</tspan></text>
+<text class="muted" x="481" y="368">its directory</text>
+<rect class="zone" x="624" y="16" width="180" height="528" rx="10" />
+<text class="title" x="638" y="42">npm sandbox</text>
+<text class="muted mono" x="638" y="60">scudo-sealed-…b</text>
+<text class="muted" x="714" y="104" text-anchor="middle">npm's own profile:</text>
+<text class="muted" x="714" y="121" text-anchor="middle">its cache, its config,</text>
+<text class="muted" x="714" y="138" text-anchor="middle">none of the agent's</text>
+<text class="muted" x="714" y="155" text-anchor="middle">sockets</text>
+<text class="muted" x="714" y="212" text-anchor="middle">writes straight to</text>
+<text class="muted" x="714" y="229" text-anchor="middle">the agent's stdout</text>
+<text class="muted" x="714" y="246" text-anchor="middle">and stderr</text>
+<rect class="box" x="638" y="384" width="152" height="56" rx="6" />
+<text class="mono" x="714" y="408" text-anchor="middle">--bpf-shim</text>
+<text class="muted" x="714" y="427" text-anchor="middle">claims the policies</text>
+<rect class="box key" x="638" y="484" width="152" height="44" rx="6" />
+<text x="714" y="511" text-anchor="middle">npm install</text>
+<path class="flow" d="M714 440V482" marker-end="url(#dg-delegation-arrow)" />
+<path class="flow" d="M560 412H636" marker-end="url(#dg-delegation-arrow)" />
+<text x="572" y="402"><tspan class="num">3</tspan><tspan class="muted" dx="4">unit</tspan></text>
+</svg>
 <p>The broker ends with the agent’s sandbox. Delegated commands still running then are stopped,
 and so is one whose caller is killed.</p>
 <h2 id="what-a-request-cannot-do"><a class="header" href="#what-a-request-cannot-do">What a request cannot do</a></h2>
