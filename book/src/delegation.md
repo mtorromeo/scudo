@@ -139,7 +139,7 @@ The request is the agent's, and its command line is the agent's to write, so not
 gets to widen what the delegated sandbox may do:
 
 - **Only the command line chooses the profiles**, through the profiles' own `match` patterns.
-  `--profile`, `--no-match`, `-P` and the network flags are refused. Since the arguments are
+  `--profile`, `--no-match`, `-P`, the network flags and the filesystem flags are refused. Since the arguments are
   the agent's to write, a pattern on the command line can be dodged (`--global` for `-g`,
   `git -C . push` for `git push`): it can choose what to delegate, but never keep a command
   from being delegated.

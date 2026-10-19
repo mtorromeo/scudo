@@ -89,6 +89,18 @@ struct Args {
     #[arg(long, value_name = "PORT[/PROTO]", value_delimiter = ',')]
     deny_port: Vec<String>,
 
+    /// Hide a directory behind an empty one, even one a profile grants (repeatable).
+    #[arg(long, value_name = "PATH")]
+    fs_hide: Vec<String>,
+
+    /// Make a path read-only, even one a profile hides or makes writable (repeatable).
+    #[arg(long, value_name = "PATH")]
+    fs_read: Vec<String>,
+
+    /// Make a path writable, even one a profile hides or makes read-only (repeatable).
+    #[arg(long, value_name = "PATH")]
+    fs_write: Vec<String>,
+
     // Reachable only when scudo is invoked by name, and nothing checks: the
     // argv[0] dispatch rewrites a symlinked call into `scudo -- <command> …`,
     // after which every flag belongs to the command.
@@ -304,6 +316,9 @@ impl Delegation {
             || !args.deny_dest.is_empty()
             || !args.allow_port.is_empty()
             || !args.deny_port.is_empty()
+            || !args.fs_hide.is_empty()
+            || !args.fs_read.is_empty()
+            || !args.fs_write.is_empty()
             || args.delegate
             || args.no_delegate
             || args.confirm
@@ -389,6 +404,8 @@ fn run_sandboxed(
         &args.allow_port,
         &args.deny_port,
     )?;
+    let files =
+        scudo::policy::FilesystemOverrides::parse(&args.fs_hide, &args.fs_read, &args.fs_write)?;
 
     // A delegated run's standard input is the requester's: no question may be
     // put to it.
@@ -401,6 +418,7 @@ fn run_sandboxed(
             profiles: &args.profile,
             no_match: args.no_match,
             network: Some(&network),
+            filesystem: Some(&files),
             vars: Some(&loaded.settings.vars),
         },
     )?;
@@ -720,6 +738,9 @@ fn refuse_nested_flags(args: &Args) -> Result<()> {
         ("--deny-dest", !args.deny_dest.is_empty()),
         ("--allow-port", !args.allow_port.is_empty()),
         ("--deny-port", !args.deny_port.is_empty()),
+        ("--fs-hide", !args.fs_hide.is_empty()),
+        ("--fs-read", !args.fs_read.is_empty()),
+        ("--fs-write", !args.fs_write.is_empty()),
         ("--delegate", args.delegate),
         ("--no-delegate", args.no_delegate),
         ("--tui", tui),

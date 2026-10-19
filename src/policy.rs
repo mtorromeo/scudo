@@ -15,7 +15,10 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub use dbus::{DbusConfig, Session};
-pub use filesystem::{Access, FilesystemConfig, FilesystemPolicy, Mounts, UnitMounts, mount_properties};
+pub use filesystem::{
+    Access, FilesystemConfig, FilesystemOverrides, FilesystemPolicy, Mounts, UnitMounts,
+    mount_properties,
+};
 pub use network::{LogLevel, NetworkConfig, NetworkOverrides, NetworkPolicy, OnUnavailable};
 
 /// A single enforcement policy.

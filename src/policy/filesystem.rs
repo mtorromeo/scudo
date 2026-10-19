@@ -24,6 +24,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::policy::network::LogLevel;
@@ -91,6 +92,87 @@ fn union(mut base: Vec<String>, extra: Vec<String>) -> Vec<String> {
         }
     }
     base
+}
+
+/// Accesses given on the command line, applied on top of whatever the profiles
+/// settled on.
+///
+/// They have the last word on the paths they name: the most permissive access
+/// wins among profiles, so hiding something a profile reads would otherwise
+/// change nothing. Paths below one keep what the profiles gave them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FilesystemOverrides {
+    entries: Vec<(Access, PathBuf)>,
+}
+
+impl FilesystemOverrides {
+    /// Parse the values of `--fs-hide`, `--fs-read` and `--fs-write`. They are
+    /// taken as written, the shell having expanded whatever they held, and made
+    /// absolute against the current directory.
+    pub fn parse(hide: &[String], read: &[String], write: &[String]) -> Result<Self> {
+        let mut entries: Vec<(Access, PathBuf)> = Vec::new();
+        for (access, list) in [
+            (Access::Hide, hide),
+            (Access::Read, read),
+            (Access::Write, write),
+        ] {
+            for entry in list {
+                let path = normalize(
+                    &std::path::absolute(entry)
+                        .with_context(|| format!("invalid path '{entry}'"))?,
+                );
+                match entries.iter().find(|(_, known)| *known == path) {
+                    // Two accesses at once have no order to settle them.
+                    Some((known, _)) if *known != access => bail!(
+                        "{} is given two accesses on the command line",
+                        path.display()
+                    ),
+                    Some(_) => {}
+                    None => entries.push((access, path)),
+                }
+            }
+        }
+        Ok(FilesystemOverrides { entries })
+    }
+
+    /// `true` when no path was given.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The accesses given, for the log.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        for (label, wanted) in [
+            ("hide", Access::Hide),
+            ("read", Access::Read),
+            ("write", Access::Write),
+        ] {
+            let list: Vec<_> = self
+                .entries
+                .iter()
+                .filter(|(access, _)| *access == wanted)
+                .map(|(_, path)| path.to_string_lossy())
+                .collect();
+            if !list.is_empty() {
+                parts.push(format!("{label} {}", list.join(",")));
+            }
+        }
+        parts.join("; ")
+    }
+
+    /// Replace what the profiles' `entries` say about each path given here.
+    #[must_use]
+    pub fn apply(&self, mut entries: Vec<(Access, PathBuf)>) -> Vec<(Access, PathBuf)> {
+        entries.retain(|(_, path)| {
+            let path = normalize(path);
+            !self.entries.iter().any(|(_, given)| *given == path)
+        });
+        entries.extend(self.entries.iter().cloned());
+        entries
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -488,6 +570,55 @@ mod tests {
                 // A sibling that merely shares a prefix is not inside it.
                 ("ReadOnlyPaths", "-/home/user2".to_owned()),
             ]
+        );
+    }
+
+    fn overrides(hide: &[&str], read: &[&str], write: &[&str]) -> FilesystemOverrides {
+        let owned = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+        FilesystemOverrides::parse(&owned(hide), &owned(read), &owned(write)).unwrap()
+    }
+
+    /// The command line has the last word on the paths it names, even against
+    /// a more permissive profile, and leaves what is below them alone.
+    #[test]
+    fn the_command_line_replaces_what_profiles_say_about_a_path() {
+        let entries = overrides(&["/p/"], &[], &[]).apply(vec![
+            (Access::Write, PathBuf::from("/p")),
+            (Access::Read, PathBuf::from("/./p")),
+            (Access::Write, PathBuf::from("/p/sub")),
+        ]);
+        assert_eq!(
+            mount_properties(entries, &UnitMounts::default()).properties,
+            [
+                ("TemporaryFileSystem", "/p".to_owned()),
+                ("BindPaths", "-/p/sub".to_owned()),
+            ]
+        );
+        let entries = overrides(&[], &[], &["/h/u/p"]).apply(vec![(Access::Hide, "/h/u".into())]);
+        assert_eq!(
+            mount_properties(entries, &UnitMounts::default()).properties,
+            [
+                ("TemporaryFileSystem", "/h/u".to_owned()),
+                ("BindPaths", "-/h/u/p".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn command_line_paths_are_absolute_and_may_not_disagree() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            overrides(&[], &["rel"], &[]).apply(Vec::new()),
+            [(Access::Read, cwd.join("rel"))]
+        );
+        // Saying the same twice is not disagreeing.
+        assert_eq!(overrides(&["/a", "/a/"], &[], &[]).entries.len(), 1);
+        let err = FilesystemOverrides::parse(&["/a".into()], &[], &["/a/.".into()])
+            .expect_err("two accesses for one path");
+        assert!(format!("{err}").contains("/a"), "{err}");
+        assert_eq!(
+            overrides(&["/h"], &["/r"], &["/w", "/x"]).describe(),
+            "hide /h; read /r; write /w,/x"
         );
     }
 

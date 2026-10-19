@@ -28,6 +28,27 @@ Every entry is made absolute against the current directory, and an entry that ex
 
 Properties written by hand in the `systemd` table are passed as they are, next to the ones generated here.
 
+## From the command line
+
+`--fs-hide`, `--fs-read` and `--fs-write` change the access to a path for one run, without
+touching the config. Each takes one path and is repeatable; there is no comma-separated form,
+since a comma is a valid character in a path:
+
+```
+scudo --fs-hide ~/.ssh --fs-write ~/.cache/pip --fs-read /srv/data pip install .
+```
+
+They are applied after every profile, those selected with `--profile` included, and they have
+**the last word** on the paths they name: whatever the profiles listed for that same path is
+replaced, not merged. Without that, hiding a directory a profile reads would change nothing,
+since the most permissive access wins. Only the path itself is replaced: what the profiles grant
+below it stays, and is bind-mounted back in if the flag hid the directory, as with `hide`. So
+`--fs-hide $HOME` next to a profile that writes `$HOME/.claude` still leaves `.claude` writable.
+
+The paths are taken as written — the shell has already expanded them — and made absolute
+against the current directory. Giving the same path two accesses at once is an error. With no
+profile matched, the flags alone are enough to run the command in a sandbox.
+
 ## Seeing what the filesystem restrictions hid
 
 `ReadOnlyPaths=`, `TemporaryFileSystem=`, `InaccessiblePaths=`, `ProtectHome=` and `PrivateTmp=`

@@ -23,6 +23,9 @@ Options:
       --deny-dest <DEST>                Deny a destination, even one a profile allows (repeatable, comma-separated)
       --allow-port <PORT[/PROTO]>       Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated)
       --deny-port <PORT[/PROTO]>        Deny a port or range, optionally `/tcp` or `/udp`, even one a profile allows (repeatable, comma-separated)
+      --fs-hide <PATH>                  Hide a directory behind an empty one, even one a profile grants (repeatable)
+      --fs-read <PATH>                  Make a path read-only, even one a profile hides or makes writable (repeatable)
+      --fs-write <PATH>                 Make a path writable, even one a profile hides or makes read-only (repeatable)
       --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
       --tui-prefix <KEY>                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
   -h, --help                            Print help

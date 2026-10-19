@@ -11,8 +11,8 @@ use crate::{
     config::{ArgDecls, Fallback, Profile, ValidatedConfigMap, VarDecls, command_line},
     logging::{Level, LogConfig},
     policy::{
-        Access, DbusConfig, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides,
-        NetworkPolicy, Policy, UnitMounts, mount_properties,
+        Access, DbusConfig, FilesystemConfig, FilesystemOverrides, FilesystemPolicy, NetworkConfig,
+        NetworkOverrides, NetworkPolicy, Policy, UnitMounts, mount_properties,
     },
 };
 
@@ -67,6 +67,9 @@ pub struct ResolveOptions<'a> {
     pub no_match: bool,
     /// Network rules from the command line, applied after every profile.
     pub network: Option<&'a NetworkOverrides>,
+    /// File accesses from the command line, which replace the profiles' for
+    /// the paths they name.
+    pub filesystem: Option<&'a FilesystemOverrides>,
     /// Lookup variables from the `[scudo]` table; a profile's own win.
     pub vars: Option<&'a VarDecls>,
 }
@@ -153,6 +156,13 @@ pub fn resolve_with(
             overrides.describe()
         ));
     }
+    let files = opts.filesystem.filter(|files| !files.is_empty());
+    if let Some(files) = files {
+        match_log.push(format!(
+            "filesystem rules from the command line: {}",
+            files.describe()
+        ));
+    }
 
     let mut lookups = opts.vars.cloned().unwrap_or_default();
     lookups.extend(merged.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -161,7 +171,7 @@ pub fn resolve_with(
         lookups,
     };
     let delegate = configs.delegates(&merged.delegate);
-    let mut resolved = build_args(merged, match_log, &vars, overrides)?;
+    let mut resolved = build_args(merged, match_log, &vars, overrides, files)?;
     resolved.matched = matched;
     resolved.delegate = delegate;
     Ok(resolved)
@@ -359,10 +369,16 @@ fn build_args(
     match_log: Vec<String>,
     vars: &Vars,
     overrides: Option<&NetworkOverrides>,
+    files: Option<&FilesystemOverrides>,
 ) -> Result<ResolvedProfile> {
     let mut args = Vec::new();
 
-    let entries = filesystem_entries(&profile.filesystem, vars)?;
+    // Before `writable` is worked out: what the command line hides is no
+    // longer the profiles' to hand to a broker.
+    let mut entries = filesystem_entries(&profile.filesystem, vars)?;
+    if let Some(files) = files {
+        entries = files.apply(entries);
+    }
     let writable = entries
         .iter()
         .filter(|(access, _)| *access == Access::Write)
@@ -1309,6 +1325,50 @@ mod tests {
             &[],
         );
         assert_eq!(r, ["-p", "ReadOnlyPaths=-/x"]);
+    }
+
+    fn with_files(files: &FilesystemOverrides) -> ResolveOptions<'_> {
+        ResolveOptions {
+            filesystem: Some(files),
+            ..ResolveOptions::default()
+        }
+    }
+
+    /// The command line has the last word on a path, and what it writes is
+    /// what a broker may hand over.
+    #[test]
+    fn filesystem_flags_replace_the_profiles_access() {
+        let configs = configs_from_toml(
+            "[app]\nmatch = \"app\"\nfilesystem.hide = [\"/home/u\"]\n\
+             filesystem.write = [\"/srv/x\"]\n",
+        );
+        let files =
+            FilesystemOverrides::parse(&args(&["/srv/x"]), &[], &args(&["/home/u/p"])).unwrap();
+        let r = resolve_with(&configs, "app", &[], with_files(&files)).unwrap();
+        assert_eq!(
+            r.systemd_args,
+            [
+                "-p",
+                "TemporaryFileSystem=/home/u",
+                "-p",
+                "BindPaths=-/home/u/p",
+                "-p",
+                "TemporaryFileSystem=/srv/x",
+            ]
+        );
+        assert_eq!(r.writable, [PathBuf::from("/home/u/p")]);
+        assert!(
+            r.match_log.contains(
+                &"filesystem rules from the command line: hide /srv/x; write /home/u/p".to_owned()
+            ),
+            "{:?}",
+            r.match_log
+        );
+
+        // With no profile at all, the flags are a sandbox of their own.
+        let files = FilesystemOverrides::parse(&[], &args(&["/"]), &[]).unwrap();
+        let r = resolve_with(&configs, "other", &[], with_files(&files)).unwrap();
+        assert_eq!(r.systemd_args, ["-p", "ReadOnlyPaths=-/"]);
     }
 
     /// `PrivateTmp=` gives the unit a `/tmp` of its own, where only a bind
