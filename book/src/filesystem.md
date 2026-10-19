@@ -102,6 +102,13 @@ path, operation, error and outside verdict are fields of their own:
 $ journalctl -t scudo F_OUTSIDE=present -o json | jq -r .F_PATH
 ```
 
+The daemon looks outside after the call has returned, so a file can appear in between. Many
+programs check for a path and then create it, such as a lock file or a cache directory. If
+the directory is one the sandbox shares with the outside, the command's own file may already
+be there when the daemon looks, and a path that was simply missing is reported as hidden by the
+sandbox, at `warn`. Such a report only names a wrong cause. Nothing is enforced from it, and
+the access itself really did fail with `ENOENT`.
+
 Only calls that name a path are watched: `open`, `openat`, `openat2`, `creat`, `stat`, `lstat`,
 `newfstatat`, `statx`, `access`, `faccessat`, `faccessat2`, `readlink`, `readlinkat`, `execve`,
 `execveat`, `unlink`, `unlinkat`, `rmdir`, `mkdir`, `mkdirat`, `rename`, `renameat`,
