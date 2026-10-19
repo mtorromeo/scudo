@@ -6,6 +6,8 @@
 //! path ends up with the most permissive access any of them asked for, and
 //! whether that takes `ReadOnlyPaths=` or a bind mount depends on whether some
 //! profile hid a directory above it — something no single profile can know.
+//! The unit's own properties hide directories too (`PrivateTmp=` replaces
+//! `/tmp`), so they are read for the same decision; see [`UnitMounts`].
 //!
 //! Reporting is the one policy kind that enforces nothing. systemd applies the
 //! filesystem restrictions itself, by rearranging the unit's mount namespace,
@@ -116,21 +118,115 @@ pub enum Access {
     Write,
 }
 
+/// What the unit's own properties do to whole directories, as far as the
+/// `filesystem` lists care.
+///
+/// Fed the `systemd` table's properties, already expanded, in order; a
+/// single-valued one said twice counts as its last value, as in systemd.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnitMounts {
+    private_tmp: bool,
+    private_devices: bool,
+    protect_home: ProtectHome,
+    temporary: Vec<PathBuf>,
+    inaccessible: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ProtectHome {
+    #[default]
+    No,
+    ReadOnly,
+    Tmpfs,
+    Yes,
+}
+
+const HOMES: [&str; 3] = ["/home", "/root", "/run/user"];
+
+impl UnitMounts {
+    /// Take one value of the unit property `key` into account.
+    pub fn add(&mut self, key: &str, value: &str) {
+        let on = !matches!(value, "no" | "false" | "0" | "off");
+        match key {
+            "PrivateTmp" => self.private_tmp = on,
+            "PrivateDevices" => self.private_devices = on,
+            "ProtectHome" => {
+                self.protect_home = match value {
+                    "read-only" => ProtectHome::ReadOnly,
+                    "tmpfs" => ProtectHome::Tmpfs,
+                    _ if on => ProtectHome::Yes,
+                    _ => ProtectHome::No,
+                };
+            }
+            // Both take a space-separated list; a temporary file system's
+            // options follow its path after a `:`.
+            "TemporaryFileSystem" => self.temporary.extend(
+                value
+                    .split_whitespace()
+                    .filter_map(|entry| entry.split(':').next())
+                    .map(|path| normalize(Path::new(path))),
+            ),
+            "InaccessiblePaths" => self.inaccessible.extend(
+                value
+                    .split_whitespace()
+                    .map(|entry| normalize(Path::new(entry.trim_start_matches(['-', '+'])))),
+            ),
+            _ => {}
+        }
+    }
+
+    /// Directories the unit replaces with fresh ones: what is granted inside
+    /// has to be bind-mounted in.
+    fn replaced(&self) -> Vec<PathBuf> {
+        let mut dirs = self.temporary.clone();
+        if self.private_tmp {
+            dirs.extend(["/tmp", "/var/tmp"].map(PathBuf::from));
+        }
+        if self.private_devices {
+            dirs.push(PathBuf::from("/dev"));
+        }
+        if self.protect_home == ProtectHome::Tmpfs {
+            dirs.extend(HOMES.map(PathBuf::from));
+        }
+        dirs
+    }
+
+    /// Directories the unit makes inaccessible, inside which nothing can be
+    /// mounted, not even a bind mount.
+    fn inaccessible(&self) -> Vec<PathBuf> {
+        let mut dirs = self.inaccessible.clone();
+        if self.protect_home == ProtectHome::Yes {
+            dirs.extend(HOMES.map(PathBuf::from));
+        }
+        dirs
+    }
+}
+
+/// The systemd properties that realise the `filesystem` lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mounts {
+    pub properties: Vec<(&'static str, String)>,
+    /// Paths granted inside an inaccessible directory: systemd cannot give
+    /// them back, so the grant has no effect.
+    pub unreachable: Vec<PathBuf>,
+}
+
 /// Turn the accesses asked for into the systemd properties that realise them.
 ///
 /// A path named more than once gets the most permissive access among them, so
 /// a profile that only reads a directory cannot take writing away from one
-/// that writes it. A path inside a hidden directory is not there to be made
-/// read-only or writable, so it is bind-mounted back in instead. Every path
-/// but a hidden one is prefixed with `-`, which tells systemd to skip it when
-/// it does not exist: a tool's config directory often does not yet.
+/// that writes it. A path inside a hidden directory — one of the lists' or one
+/// the `unit` replaces — is not there to be made read-only or writable, so it
+/// is bind-mounted back in instead. Every path but a hidden one is prefixed
+/// with `-`, which tells systemd to skip it when it does not exist: a tool's
+/// config directory often does not yet.
 ///
 /// Paths are expected to be absolute already; they are only normalised here,
 /// lexically, so that `/a/b/`, `/a/./b` and `/a/c/../b` are the same path.
 /// Symlinks are left alone on purpose: binding a link's target in place of the
 /// link would put it somewhere the command does not look.
 #[must_use]
-pub fn mount_properties<I>(entries: I) -> Vec<(&'static str, String)>
+pub fn mount_properties<I>(entries: I, unit: &UnitMounts) -> Mounts
 where
     I: IntoIterator<Item = (Access, PathBuf)>,
 {
@@ -141,28 +237,47 @@ where
         *slot = (*slot).max(access);
     }
 
-    let hidden: Vec<&Path> = paths
-        .iter()
-        .filter(|&(_, access)| *access == Access::Hide)
-        .map(|(path, _)| path.as_path())
-        .collect();
-    let under_hidden = |path: &Path| hidden.iter().any(|h| *h != path && path.starts_with(h));
+    let listed = |wanted: Access| -> Vec<&Path> {
+        paths
+            .iter()
+            .filter(|&(_, access)| *access == wanted)
+            .map(|(path, _)| path.as_path())
+            .collect()
+    };
+    let (hidden, denied) = (listed(Access::Hide), listed(Access::Deny));
+    let (replaced, inaccessible) = (unit.replaced(), unit.inaccessible());
+    // A listed directory is itself what the grant on it overrides; one the
+    // unit replaces is gone even when the grant names it.
+    let inside = |path: &Path, listed: &[&Path], unit: &[PathBuf]| {
+        listed.iter().any(|dir| *dir != path && path.starts_with(dir))
+            || unit.iter().any(|dir| path.starts_with(dir))
+    };
 
-    paths
+    let mut unreachable = Vec::new();
+    let properties = paths
         .iter()
         .map(|(path, access)| {
+            let granted = matches!(access, Access::Read | Access::Write);
+            if granted && inside(path, &denied, &inaccessible) {
+                unreachable.push(path.clone());
+            }
+            let under_hidden = inside(path, &hidden, &replaced);
             let shown = path.to_string_lossy();
             let optional = format!("-{shown}");
             match access {
                 Access::Deny => ("InaccessiblePaths", optional),
                 Access::Hide => ("TemporaryFileSystem", shown.into_owned()),
-                Access::Read if under_hidden(path) => ("BindReadOnlyPaths", optional),
+                Access::Read if under_hidden => ("BindReadOnlyPaths", optional),
                 Access::Read => ("ReadOnlyPaths", optional),
-                Access::Write if under_hidden(path) => ("BindPaths", optional),
+                Access::Write if under_hidden => ("BindPaths", optional),
                 Access::Write => ("ReadWritePaths", optional),
             }
         })
-        .collect()
+        .collect();
+    Mounts {
+        properties,
+        unreachable,
+    }
 }
 
 impl From<FilesystemConfig> for FilesystemPolicy {
@@ -213,8 +328,98 @@ mod tests {
         );
     }
 
+    fn mounts(entries: &[(Access, &str)], unit: &[(&str, &str)]) -> Mounts {
+        let mut mounts = UnitMounts::default();
+        for (key, value) in unit {
+            mounts.add(key, value);
+        }
+        mount_properties(entries.iter().map(|(a, p)| (*a, PathBuf::from(p))), &mounts)
+    }
+
     fn props(entries: &[(Access, &str)]) -> Vec<(&'static str, String)> {
-        mount_properties(entries.iter().map(|(a, p)| (*a, PathBuf::from(p))))
+        mounts(entries, &[]).properties
+    }
+
+    fn props_in(entries: &[(Access, &str)], unit: &[(&str, &str)]) -> Vec<(&'static str, String)> {
+        mounts(entries, unit).properties
+    }
+
+    /// `PrivateTmp=` replaces `/tmp` and `/var/tmp` as `hide` would, so what is
+    /// granted there, the directory itself included, has to be bind-mounted.
+    #[test]
+    fn grants_inside_a_private_tmp_are_bind_mounts() {
+        let entries = [
+            (Access::Write, "/tmp/claude-1000"),
+            (Access::Read, "/var/tmp/x"),
+            (Access::Write, "/tmp"),
+            (Access::Write, "/tmpfoo"),
+        ];
+        for value in ["yes", "true", "disconnected"] {
+            assert_eq!(
+                props_in(&entries, &[("PrivateTmp", value)]),
+                [
+                    ("BindPaths", "-/tmp".to_owned()),
+                    ("BindPaths", "-/tmp/claude-1000".to_owned()),
+                    ("ReadWritePaths", "-/tmpfoo".to_owned()),
+                    ("BindReadOnlyPaths", "-/var/tmp/x".to_owned()),
+                ],
+                "{value}"
+            );
+        }
+        // The last value said is the one systemd keeps.
+        assert_eq!(
+            props_in(&entries[..1], &[("PrivateTmp", "yes"), ("PrivateTmp", "no")]),
+            [("ReadWritePaths", "-/tmp/claude-1000".to_owned())]
+        );
+    }
+
+    #[test]
+    fn directories_the_unit_replaces_take_bind_mounts() {
+        assert_eq!(
+            props_in(&[(Access::Write, "/dev/kvm")], &[("PrivateDevices", "yes")]),
+            [("BindPaths", "-/dev/kvm".to_owned())]
+        );
+        assert_eq!(
+            props_in(&[(Access::Read, "/home/u/.gitconfig")], &[("ProtectHome", "tmpfs")]),
+            [("BindReadOnlyPaths", "-/home/u/.gitconfig".to_owned())]
+        );
+        assert_eq!(
+            props_in(
+                &[(Access::Write, "/srv/a"), (Access::Write, "/opt/b")],
+                &[("TemporaryFileSystem", "/srv:ro /opt")]
+            ),
+            [
+                ("BindPaths", "-/opt/b".to_owned()),
+                ("BindPaths", "-/srv/a".to_owned()),
+            ]
+        );
+        // Read-only is a restriction a nested grant can lift.
+        assert_eq!(
+            props_in(&[(Access::Write, "/home/u/p")], &[("ProtectHome", "read-only")]),
+            [("ReadWritePaths", "-/home/u/p".to_owned())]
+        );
+    }
+
+    /// Nothing can be mounted inside an inaccessible directory, so a grant
+    /// there is reported rather than silently dropped by systemd.
+    #[test]
+    fn grants_inside_an_inaccessible_directory_are_unreachable() {
+        let found = mounts(
+            &[
+                (Access::Deny, "/secret"),
+                (Access::Read, "/secret/a"),
+                (Access::Deny, "/denied"),
+                (Access::Write, "/denied"),
+                (Access::Write, "/home/u/p"),
+                (Access::Write, "/srv/x"),
+                (Access::Hide, "/srv/x/y"),
+            ],
+            &[("ProtectHome", "yes"), ("InaccessiblePaths", "-/srv")],
+        );
+        assert_eq!(
+            found.unreachable,
+            ["/home/u/p", "/secret/a", "/srv/x"].map(PathBuf::from)
+        );
     }
 
     #[test]

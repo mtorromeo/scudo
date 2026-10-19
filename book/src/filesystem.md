@@ -4,8 +4,8 @@ The `filesystem` table says what the command may do with a path, in four lists:
 
 | List | Meaning | Becomes |
 |------|---------|---------|
-| `write` | read and write | `ReadWritePaths=`, or `BindPaths=` inside a hidden directory |
-| `read` | read only | `ReadOnlyPaths=`, or `BindReadOnlyPaths=` inside a hidden directory |
+| `write` | read and write | `ReadWritePaths=`, or `BindPaths=` inside a hidden or replaced directory |
+| `read` | read only | `ReadOnlyPaths=`, or `BindReadOnlyPaths=` inside a hidden or replaced directory |
 | `hide` | replaced by an empty, throwaway directory | `TemporaryFileSystem=` |
 | `deny` | no access at all | `InaccessiblePaths=` |
 
@@ -21,6 +21,8 @@ Writing the lists rather than the systemd properties is what lets profiles writt
 
 - **A path named more than once gets the most permissive access** among them: `write` beats `read`, which beats `hide`, which beats `deny`. Which profile came first does not matter, so a profile that only reads a directory cannot take writing away from one that writes it.
 - **What is granted inside a hidden directory is mounted back in.** A path under a `TemporaryFileSystem=` is not there to be made read-only, so `read` and `write` turn into bind mounts there — even when the `hide` comes from a different profile than the grant.
+- **So is what is granted inside a directory the unit replaces.** The `systemd` table can hide directories too: `PrivateTmp=` gives the unit its own `/tmp` and `/var/tmp`, `PrivateDevices=` its own `/dev`, `ProtectHome=tmpfs` empties `/home`, `/root` and `/run/user`, and a `TemporaryFileSystem=` written by hand counts like a `hide`. With `PrivateTmp = true`, `write = ["/tmp/claude-1000"]` becomes `BindPaths=-/tmp/claude-1000`. Read-only settings (`ProtectSystem=`, `ProtectHome=read-only`) are not replacements: a nested `ReadWritePaths=` lifts them.
+- **Nothing can be granted inside an inaccessible directory.** systemd mounts nothing under an `InaccessiblePaths=`, not even a bind mount, so a `read` or `write` under a `deny`, under `systemd.InaccessiblePaths` or under `ProtectHome=yes` has no effect, and scudo warns about it. Use `hide` instead: it is what lets paths inside be given back.
 
 Every entry is made absolute against the current directory, and an entry that expands to nothing (an absent `$arg_*`) is dropped. Paths that do not exist are skipped rather than failing the command (they are passed with systemd's `-` prefix): a tool's config directory often does not exist yet.
 

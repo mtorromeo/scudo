@@ -5,13 +5,14 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use toml::Value;
+use tracing::warn;
 
 use crate::{
     config::{ArgDecls, Fallback, Profile, ValidatedConfigMap, VarDecls, command_line},
     logging::{Level, LogConfig},
     policy::{
         Access, DbusConfig, FilesystemConfig, FilesystemPolicy, NetworkConfig, NetworkOverrides,
-        NetworkPolicy, Policy, mount_properties,
+        NetworkPolicy, Policy, UnitMounts, mount_properties,
     },
 };
 
@@ -368,7 +369,21 @@ fn build_args(
         .map(|(_, path)| path.clone())
         .collect();
     let derived = derived_paths(&profile, vars)?;
-    for (key, val) in mount_properties(entries) {
+    let mut unit = UnitMounts::default();
+    for (key, val) in &profile.systemd {
+        for value in value_to_strings(val, vars, is_path_property(key))? {
+            unit.add(key, &value);
+        }
+    }
+    let mounts = mount_properties(entries, &unit);
+    for path in &mounts.unreachable {
+        warn!(
+            "{} is granted inside a directory the sandbox makes inaccessible, where systemd \
+             cannot mount it: the grant has no effect",
+            path.display()
+        );
+    }
+    for (key, val) in mounts.properties {
         args.push("-p".into());
         args.push(format_property(key, &val));
     }
@@ -1294,6 +1309,21 @@ mod tests {
             &[],
         );
         assert_eq!(r, ["-p", "ReadOnlyPaths=-/x"]);
+    }
+
+    /// `PrivateTmp=` gives the unit a `/tmp` of its own, where only a bind
+    /// mount brings a directory of the host's back.
+    #[test]
+    fn a_grant_under_a_private_tmp_is_bind_mounted() {
+        let profile = "[app]\nmatch = \"app\"\nfilesystem.write = [\"/tmp/claude-1000\"]\n";
+        assert_eq!(
+            systemd_args(&format!("{profile}systemd.PrivateTmp = true\n"), "app", &[]),
+            ["-p", "BindPaths=-/tmp/claude-1000", "-p", "PrivateTmp=yes"]
+        );
+        assert_eq!(
+            systemd_args(profile, "app", &[]),
+            ["-p", "ReadWritePaths=-/tmp/claude-1000"]
+        );
     }
 
     #[test]
