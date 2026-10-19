@@ -331,7 +331,9 @@ where
     // A listed directory is itself what the grant on it overrides; one the
     // unit replaces is gone even when the grant names it.
     let inside = |path: &Path, listed: &[&Path], unit: &[PathBuf]| {
-        listed.iter().any(|dir| *dir != path && path.starts_with(dir))
+        listed
+            .iter()
+            .any(|dir| *dir != path && path.starts_with(dir))
             || unit.iter().any(|dir| path.starts_with(dir))
     };
 
@@ -450,7 +452,10 @@ mod tests {
         }
         // The last value said is the one systemd keeps.
         assert_eq!(
-            props_in(&entries[..1], &[("PrivateTmp", "yes"), ("PrivateTmp", "no")]),
+            props_in(
+                &entries[..1],
+                &[("PrivateTmp", "yes"), ("PrivateTmp", "no")]
+            ),
             [("ReadWritePaths", "-/tmp/claude-1000".to_owned())]
         );
     }
@@ -462,7 +467,10 @@ mod tests {
             [("BindPaths", "-/dev/kvm".to_owned())]
         );
         assert_eq!(
-            props_in(&[(Access::Read, "/home/u/.gitconfig")], &[("ProtectHome", "tmpfs")]),
+            props_in(
+                &[(Access::Read, "/home/u/.gitconfig")],
+                &[("ProtectHome", "tmpfs")]
+            ),
             [("BindReadOnlyPaths", "-/home/u/.gitconfig".to_owned())]
         );
         assert_eq!(
@@ -477,7 +485,10 @@ mod tests {
         );
         // Read-only is a restriction a nested grant can lift.
         assert_eq!(
-            props_in(&[(Access::Write, "/home/u/p")], &[("ProtectHome", "read-only")]),
+            props_in(
+                &[(Access::Write, "/home/u/p")],
+                &[("ProtectHome", "read-only")]
+            ),
             [("ReadWritePaths", "-/home/u/p".to_owned())]
         );
     }

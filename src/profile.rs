@@ -1029,7 +1029,10 @@ mod tests {
             "MemoryMax=1G"
         ));
         assert!(systemd_args(src, "npm", &["install", "x"]).is_empty());
-        assert!(has_arg(&systemd_args(src, "python3", &["-c", "1"]), "CPUQuota=10%"));
+        assert!(has_arg(
+            &systemd_args(src, "python3", &["-c", "1"]),
+            "CPUQuota=10%"
+        ));
         assert!(systemd_args(src, "python3x", &[]).is_empty());
     }
 
@@ -1061,7 +1064,11 @@ mod tests {
         assert_eq!(matched("npm", &["login"]), ["npm", "npm-auth"]);
         assert_eq!(matched("npm", &["install", "publish"]), ["npm"]);
         for command_args in [&["build"][..], &["run", "--", "install"], &["installer"]] {
-            assert_eq!(matched("cargo", command_args), ["cargo"], "{command_args:?}");
+            assert_eq!(
+                matched("cargo", command_args),
+                ["cargo"],
+                "{command_args:?}"
+            );
         }
     }
 
@@ -1794,7 +1801,11 @@ mod tests {
             cwd.join("dst").to_string_lossy()
         );
         assert!(has_arg(
-            &path_args("BindPaths", "-$SCUDO_TEST_BIND_SRC:$SCUDO_TEST_BIND_DST", &[]),
+            &path_args(
+                "BindPaths",
+                "-$SCUDO_TEST_BIND_SRC:$SCUDO_TEST_BIND_DST",
+                &[]
+            ),
             &expected
         ));
     }

@@ -1018,14 +1018,18 @@ mod tests {
     fn match_takes_one_glob_or_several() {
         let map = load(&["[a]\nmatch = \"curl\"\n[b]\nmatch = [\"zed\", \"code*\"]\n"]);
         assert_eq!(map.0["a"].patterns.len(), 1);
-        assert!(map.0["b"].patterns.iter().any(|p| p.matches("code-oss", "code-oss")));
+        assert!(
+            map.0["b"]
+                .patterns
+                .iter()
+                .any(|p| p.matches("code-oss", "code-oss"))
+        );
     }
 
     #[test]
     fn a_pattern_says_what_it_is_and_what_it_matches() {
-        let line = |p: &str, name: &str, line: &str| {
-            CommandPattern::new(p).unwrap().matches(name, line)
-        };
+        let line =
+            |p: &str, name: &str, line: &str| CommandPattern::new(p).unwrap().matches(name, line);
         // A glob without a space: the name alone, whole.
         assert!(line("git", "git", "git push"));
         assert!(!line("git", "gitk", "gitk"));
@@ -1319,7 +1323,10 @@ mod tests {
         assert!(!map.is_delegable("risky"));
         assert!(!map.is_delegable("code"));
         assert!(map.refuses_delegation("risky"));
-        assert!(!map.refuses_delegation("code"), "saying nothing refuses nothing");
+        assert!(
+            !map.refuses_delegation("code"),
+            "saying nothing refuses nothing"
+        );
         assert!(!map.refuses_delegation("npm"));
     }
 
