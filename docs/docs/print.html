@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a9232d5f.js";
+            window.path_to_searchindex_js = "searchindex-961e4924.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -459,6 +459,9 @@ Options:
       --deny-dest &lt;DEST&gt;                Deny a destination, even one a profile allows (repeatable, comma-separated)
       --allow-port &lt;PORT[/PROTO]&gt;       Allow a port or range, optionally `/tcp` or `/udp`, even one a profile denies (repeatable, comma-separated)
       --deny-port &lt;PORT[/PROTO]&gt;        Deny a port or range, optionally `/tcp` or `/udp`, even one a profile allows (repeatable, comma-separated)
+      --fs-hide &lt;PATH&gt;                  Hide a directory behind an empty one, even one a profile grants (repeatable)
+      --fs-read &lt;PATH&gt;                  Make a path read-only, even one a profile hides or makes writable (repeatable)
+      --fs-write &lt;PATH&gt;                 Make a path writable, even one a profile hides or makes read-only (repeatable)
       --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
       --tui-prefix &lt;KEY&gt;                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
   -h, --help                            Print help
@@ -570,7 +573,8 @@ every user’s package managers.</p>
 <tr><td><code>pip</code>, <code>uv</code>, <code>poetry</code></td><td>their commands</td><td><code>supply-chain</code>, the tool’s config read-only</td></tr>
 <tr><td><code>cargo</code></td><td><code>cargo</code></td><td><code>supply-chain</code>, <code>~/.cargo</code> and <code>~/.rustup</code> read-only except the registry, credentials denied</td></tr>
 <tr><td><code>composer</code>, <code>go</code>, <code>ruby</code></td><td>their commands</td><td><code>supply-chain</code> and the tool’s cache</td></tr>
-<tr><td><code>npm-publish</code>, <code>cargo-install</code></td><td>—</td><td>What publishing or installing needs on top; for <code>--profile</code></td></tr>
+<tr><td><code>cargo-install</code></td><td><code>cargo install</code>, <code>cargo binstall</code>, <code>cargo install-update</code>, <code>cargo-binstall</code>, <code>cargo-install-update</code></td><td><code>cargo</code>, with all of <code>~/.cargo</code> writable except the credentials; not <code>delegable</code></td></tr>
+<tr><td><code>npm-auth</code></td><td><code>npm publish</code>, <code>npm login</code></td><td><code>~/.npmrc</code> writable on top of <code>npm</code>; not <code>delegable</code></td></tr>
 <tr><td><code>agents</code></td><td><code>claude</code>, <code>opencode</code></td><td><code>git-project</code>, writing <code>.git</code> and the agent’s own state; <a href="#delegating-commands">delegates</a> every <code>delegable</code> profile</td></tr>
 </tbody>
 </table>
@@ -583,18 +587,20 @@ tokens and browser profiles to anyone who reads them. Each profile gives back wh
 needs, which is usually its cache and its configuration.</li>
 <li><strong>The session’s sockets are hidden with it, in the base every profile extends.</strong> <code>ssh-agent</code>, <code>gpg-agent</code>, the keyring and the
 container sockets let a program act as you without reading a single secret, and connecting to
-a socket needs no write access, so a read-only runtime directory is not enough. Only two
-entries of scudo’s own come back, read-only: <code>bpfd.sock</code>, so that network policies can be
-enforced, and <code>shims</code>, so that a command started inside is still wrapped. Do not give back
-the whole <code>$XDG_RUNTIME_DIR/scudo</code>: it also holds the session bus proxies of other sandboxes,
-and writing to it would let a command replace the daemon’s socket.</li>
+a socket needs no write access, so a read-only runtime directory is not enough. Only one
+entry of scudo’s own comes back, read-only: <code>shims</code>, so that a command started inside is
+still wrapped. The sockets scudo needs in there — <code>scudo-bpfd</code>’s when a policy needs the
+daemon, the broker’s when the sandbox <a href="#delegating-commands">delegates</a> — it
+mounts by itself, read-only. Do not give back the whole <code>$XDG_RUNTIME_DIR/scudo</code>: it also
+holds the session bus proxies and the brokers of other sandboxes.</li>
 <li><strong><code>.git</code> is read-only for build and install tools.</strong> Hooks, <code>core.hooksPath</code> and
 <code>core.fsmonitor</code> are run by git outside any sandbox, so a writable <code>.git</code> is a way out. The
 agent, which commits, gets it back.</li>
 <li><strong>Directories on <code>PATH</code> stay read-only</strong>: <code>~/.local/bin</code>, <code>~/.cargo/bin</code>, Composer’s
 <code>vendor/bin</code>. A build script that could write there would replace <code>npm</code> or <code>git</code> with
-something that runs unsandboxed the next time. Installing into them is what the explicit
-<code>cargo-install</code> profile is for.</li>
+something that runs unsandboxed the next time. Installing into them is what the
+<code>cargo-install</code> profile is for: it matches <code>cargo install</code> on its arguments, and says
+<code>delegable = false</code> so that a sandbox delegating <code>cargo</code> cannot install through it.</li>
 <li><strong><code>$XDG_RUNTIME_DIR</code> is never written by a base profile.</strong> The most permissive access to a
 path wins (<a href="#filesystem-access">Filesystem access</a>), so a base that wrote it
 would undo the hiding in every profile built on it. A profile that needs one socket, an
@@ -650,18 +656,18 @@ vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 # write $XDG_RUNTIME_DIR here or in a profile everything extends: the most
 # permissive access wins, and nothing would be hidden.
 #
-# Only two things of scudo's own come back, both read-only: the daemon that
-# enforces network policies, and the FUSE shim, so that commands run from
-# inside are still wrapped. Never give back the whole $XDG_RUNTIME_DIR/scudo:
-# it also holds the session bus proxies of other sandboxes, and written to, the
-# daemon's socket could be replaced.
+# Only one thing of scudo's own comes back, read-only: the FUSE shim, so that
+# commands run from inside are still wrapped. The sockets scudo itself needs
+# in there — the daemon's, when a policy needs it, and the broker's, when the
+# sandbox delegates — are mounted by scudo on its own. Never give back the
+# whole $XDG_RUNTIME_DIR/scudo: it also holds the session bus proxies and the
+# brokers of other sandboxes.
 [sandbox]
 systemd.WorkingDirectory = "/"
 systemd.PrivateTmp = true
 filesystem.read = [
   "/",
   "$HOME/.local/bin",
-  "$XDG_RUNTIME_DIR/scudo/bpfd.sock",
   "$XDG_RUNTIME_DIR/scudo/shims",
 ]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
@@ -705,16 +711,17 @@ filesystem.read = ["${PROJECT_DIR:-$PWD}/.git"]
 # a second file without the token, and add to [npm]:
 #   systemd.Environment = ["NPM_CONFIG_USERCONFIG=$HOME/.config/scudo/npm/npmrc"]
 #   filesystem.read = ["$HOME/.config/scudo/npm/npmrc"]
-# and to [npm-publish], which would otherwise inherit that variable:
+# and to [npm-auth], which would otherwise inherit that variable:
 #   systemd.Environment = ["NPM_CONFIG_USERCONFIG=$HOME/.npmrc"]
 [npm]
 extend = "supply-chain"
 match = ["npm", "npx"]
 filesystem.write = ["$HOME/.npm"]
 
-# Explicit only: `scudo -p npm-publish -- npm publish`, which needs the token.
-[npm-publish]
-filesystem.read = ["$HOME/.npmrc"]
+[npm-auth]
+match = ['/^npm (publish|login)( |$)/']
+delegable = false
+filesystem.write = ["$HOME/.npmrc"]
 
 [pnpm]
 extend = "npm"
@@ -772,9 +779,15 @@ filesystem.write = [
 ]
 filesystem.deny = ["$HOME/.cargo/credentials", "$HOME/.cargo/credentials.toml"]
 
-# Explicit only: `scudo -p cargo-install -- cargo install …`
+# `cargo install`, `cargo install-update` and `cargo binstall` (with or without a `+toolchain`),
+# and `cargo-binstall`/`cargo-install-update` run directly: what installing needs on top of [cargo].
+# Not delegable, though it extends a profile that is: a sandbox that delegates
+# `cargo` must not get to install into ~/.cargo/bin, outside of it, by asking.
 [cargo-install]
-filesystem.write = ["$HOME/.cargo/bin", "$HOME/.cargo/binary-cache", "$HOME/.cargo/binstall"]
+extend = "cargo"
+match = ['/^cargo( \+\S+ |[ -])?(b?install|install-update)( |$)/']
+delegable = false
+filesystem.write = ["$HOME/.cargo"]
 
 # ── Others ──────────────────────────────────────────────────────────────────
 # COMPOSER_HOME is ~/.config/composer; its vendor/bin is on PATH, so it is
@@ -852,10 +865,11 @@ Trust this config file? [y/N]
 <tr><th>Field</th><th>Type</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>match</code></td><td>string or array of strings</td><td>Glob(s) matched against the command name; any one is enough. See <a href="#match-patterns">Match patterns</a>. Absent = the profile never matches a command on its own and is reachable only through <code>extend</code> or <code>--profile</code>.</td></tr>
+<tr><td><code>match</code></td><td>string or array of strings</td><td>Glob(s) or <code>/regex/flags</code> matched against the command name, or against the whole command line when the pattern holds a space; any one is enough. See <a href="#match-patterns">Match patterns</a>. Absent = the profile never matches a command on its own and is reachable only through <code>extend</code> or <code>--profile</code>.</td></tr>
 <tr><td><code>extend</code></td><td>string or array of strings</td><td>Profile(s) applied before this one, left to right; see <a href="#combining-profiles">Combining profiles</a></td></tr>
 <tr><td><code>delegate</code></td><td><code>true</code>, string or array of strings</td><td>Profiles whose commands, started from inside this sandbox, run in a sandbox of their own: <code>true</code> for every <code>delegable</code> one, or their names. See <a href="#delegating-commands">Delegating commands</a></td></tr>
 <tr><td><code>delegable</code></td><td>bool</td><td>Whether a sandbox may have this profile’s commands run under it on its request; inherited through <code>extend</code> (default: <code>false</code>). See <a href="#delegating-commands">Delegating commands</a></td></tr>
+<tr><td><code>replace</code></td><td>array of strings</td><td>Fields that replace, instead of adding to, what a same-named profile from a lower-priority config file says; only <code>"match"</code> for now. See <a href="#same-named-profiles-across-files">Same-named profiles across files</a></td></tr>
 <tr><td><code>inherit</code></td><td>bool</td><td>Whether this profile adds to a same-named profile from a lower-priority config file (<code>true</code>, the default) or replaces it (<code>false</code>); see <a href="#same-named-profiles-across-files">Same-named profiles across files</a></td></tr>
 <tr><td><code>exec</code></td><td>string</td><td>Absolute path of the binary to execute, bypassing PATH resolution</td></tr>
 <tr><td><code>verbose</code></td><td>bool</td><td>Shorthand for <code>log.level = "debug"</code>, which among other things prints the full <code>systemd-run</code> command before executing (default: <code>false</code>)</td></tr>
@@ -882,7 +896,7 @@ vars.PROJECT_DIR = { lookup = ".git", fallback = "cwd" }
 
 # Base profiles — no `match`, so they are never matched directly, only used via extend
 [sandbox]
-filesystem.read = ["/", "$XDG_RUNTIME_DIR/scudo/bpfd.sock", "$XDG_RUNTIME_DIR/scudo/shims"]
+filesystem.read = ["/", "$XDG_RUNTIME_DIR/scudo/shims"]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
 filesystem.write = ["/tmp", "$HOME/.cache"]
 systemd.PrivateTmp = true
@@ -945,7 +959,13 @@ filesystem.write = ["$HOME/.pnpm-store"]
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="matching-and-combining-profiles"><a class="header" href="#matching-and-combining-profiles">Matching and combining profiles</a></h1>
 <h2 id="match-patterns"><a class="header" href="#match-patterns">Match patterns</a></h2>
-<p><code>match</code> holds one glob, or an array of them, compared against the name of the command — its last path component, so <code>/usr/bin/curl</code> is <code>curl</code>. Any one of them matching is enough.</p>
+<p><code>match</code> holds one pattern, or an array of them. Any one of them matching is enough.</p>
+<ul>
+<li>A pattern written <code>/…/</code> is a regular expression (<a href="https://docs.rs/regex/latest/regex/#syntax"><code>regex</code> syntax</a>), optionally followed by flags as in sed: <code>i</code> (case-insensitive), <code>m</code> (multi-line), <code>s</code> (<code>.</code> matches newlines), <code>x</code> (verbose), <code>U</code> (swap greedy and lazy). It is not anchored: it matches anywhere unless it says <code>^…$</code>. The last <code>/</code> closes it, so a <code>/</code> inside needs no escaping, and an unknown flag is an error. Write regexes in single quotes, as TOML literal strings, so that backslashes reach the regex as written (<code>"\S"</code> is not a valid TOML string).</li>
+<li>Any other pattern is a glob, which has to match the whole text.</li>
+<li>A pattern holding a space is compared with the <strong>command line</strong>: the command’s name, then its arguments, joined by single spaces (no quoting). Any other pattern is compared with the <strong>name</strong> alone.</li>
+</ul>
+<p>The name is the command’s last path component, so <code>/usr/bin/curl</code> is <code>curl</code>, also at the start of the command line.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -957,6 +977,9 @@ filesystem.write = ["$HOME/.pnpm-store"]
 <tr><td><code>match = ["zed", "zeditor"]</code></td><td>either <code>zed</code> or <code>zeditor</code></td></tr>
 <tr><td><code>match = "code*"</code></td><td><code>code</code>, <code>code-oss</code>, <code>code-insiders</code>, …</td></tr>
 <tr><td><code>match = "*"</code></td><td>every command: a catch-all default</td></tr>
+<tr><td><code>match = "git push*"</code></td><td><code>git push</code>, <code>git push origin main</code>, … but not <code>git status</code></td></tr>
+<tr><td><code>match = '/^python3?$/'</code></td><td><code>python</code> or <code>python3</code>, not <code>python3.12</code></td></tr>
+<tr><td><code>match = '/^npm( \S+)* (-g|--global)( |$)/'</code></td><td><code>npm</code> run with <code>-g</code> or <code>--global</code> anywhere among its arguments</td></tr>
 </tbody>
 </table>
 </div>
@@ -1019,7 +1042,14 @@ systemd.BindPaths = ["$PWD"]         # → /base, ~/.cargo, ~/.composer, $PWD
 [cargo]
 filesystem.write = ["$SCUDO_CONFIG_DIR/target"]
 </code></pre>
-<p>To replace the lower-priority profile instead, set <code>inherit = false</code>:</p>
+<p>To replace only its <code>match</code> patterns and keep adding to the rest, list <code>match</code> in <code>replace</code>. With <code>replace = ["match"]</code> and no <code>match</code>, the profile no longer matches anything and becomes a base:</p>
+<pre><code class="language-toml"># the system-wide profile matches "cargo" and "rustc"
+[cargo]
+replace = ["match"]
+match = "cargo"
+filesystem.write = ["$SCUDO_CONFIG_DIR/target"]
+</code></pre>
+<p>To replace the lower-priority profile as a whole, set <code>inherit = false</code>:</p>
 <pre><code class="language-toml">[cargo]
 inherit = false
 match = "cargo"
@@ -1148,10 +1178,11 @@ args.include = ["-I", "--include"]
 systemd.BindReadOnlyPaths = ["$arg_include"]
 # rsync -I ./src  →  BindReadOnlyPaths=/abs/cwd/src
 </code></pre>
-<p>Only the <strong>expanded variable value</strong> is canonicalized — literal text in the template is left untouched. This means systemd special prefix characters (<code>-</code>, <code>+</code>, <code>!</code>, <code>!!</code>) can be used freely in the literal part:</p>
+<p>Only the <strong>expanded variable value</strong> is canonicalized — literal text in the template is left untouched — and only when the variable opens a path: at the start of the value, after systemd’s prefix characters (<code>-</code>, <code>+</code>, <code>!</code>, <code>!!</code>, <code>~</code>), or after a <code>:</code> or a space separating paths. So prefixes can be used freely in the literal part, and a variable inside a path component is inserted as it is:</p>
 <pre><code class="language-toml">[app]
-systemd.ReadWritePaths = ["-$arg_1"]
+systemd.ReadWritePaths = ["-$arg_1", "-/tmp/claude-$UID"]
 # ./relative  →  -/abs/cwd/relative   ('-' is literal, path is made absolute)
+# UID=1000    →  -/tmp/claude-1000    (the variable is part of a component)
 </code></pre>
 <p>A <a href="#default-values">default value</a> taking a variable’s place counts as the variable’s value, literal text included: <code>${arg_1:-out}</code> becomes <code>/abs/cwd/out</code> when no argument is given.</p>
 <p>Absolute paths are passed through unchanged. Canonicalization is purely lexical (it does not require the path to exist).</p>
@@ -1164,8 +1195,8 @@ systemd.ReadWritePaths = ["-$arg_1"]
 <tr><th>List</th><th>Meaning</th><th>Becomes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>write</code></td><td>read and write</td><td><code>ReadWritePaths=</code>, or <code>BindPaths=</code> inside a hidden directory</td></tr>
-<tr><td><code>read</code></td><td>read only</td><td><code>ReadOnlyPaths=</code>, or <code>BindReadOnlyPaths=</code> inside a hidden directory</td></tr>
+<tr><td><code>write</code></td><td>read and write</td><td><code>ReadWritePaths=</code>, or <code>BindPaths=</code> inside a hidden or replaced directory</td></tr>
+<tr><td><code>read</code></td><td>read only</td><td><code>ReadOnlyPaths=</code>, or <code>BindReadOnlyPaths=</code> inside a hidden or replaced directory</td></tr>
 <tr><td><code>hide</code></td><td>replaced by an empty, throwaway directory</td><td><code>TemporaryFileSystem=</code></td></tr>
 <tr><td><code>deny</code></td><td>no access at all</td><td><code>InaccessiblePaths=</code></td></tr>
 </tbody>
@@ -1181,9 +1212,26 @@ write = ["$PROJECT_DIR", "$HOME/.claude"]
 <ul>
 <li><strong>A path named more than once gets the most permissive access</strong> among them: <code>write</code> beats <code>read</code>, which beats <code>hide</code>, which beats <code>deny</code>. Which profile came first does not matter, so a profile that only reads a directory cannot take writing away from one that writes it.</li>
 <li><strong>What is granted inside a hidden directory is mounted back in.</strong> A path under a <code>TemporaryFileSystem=</code> is not there to be made read-only, so <code>read</code> and <code>write</code> turn into bind mounts there — even when the <code>hide</code> comes from a different profile than the grant.</li>
+<li><strong>So is what is granted inside a directory the unit replaces.</strong> The <code>systemd</code> table can hide directories too: <code>PrivateTmp=</code> gives the unit its own <code>/tmp</code> and <code>/var/tmp</code>, <code>PrivateDevices=</code> its own <code>/dev</code>, <code>ProtectHome=tmpfs</code> empties <code>/home</code>, <code>/root</code> and <code>/run/user</code>, and a <code>TemporaryFileSystem=</code> written by hand counts like a <code>hide</code>. With <code>PrivateTmp = true</code>, <code>write = ["/tmp/claude-1000"]</code> becomes <code>BindPaths=-/tmp/claude-1000</code>. Read-only settings (<code>ProtectSystem=</code>, <code>ProtectHome=read-only</code>) are not replacements: a nested <code>ReadWritePaths=</code> lifts them.</li>
+<li><strong>Nothing can be granted inside an inaccessible directory.</strong> systemd mounts nothing under an <code>InaccessiblePaths=</code>, not even a bind mount, so a <code>read</code> or <code>write</code> under a <code>deny</code>, under <code>systemd.InaccessiblePaths</code> or under <code>ProtectHome=yes</code> has no effect, and scudo warns about it. Use <code>hide</code> instead: it is what lets paths inside be given back.</li>
 </ul>
 <p>Every entry is made absolute against the current directory, and an entry that expands to nothing (an absent <code>$arg_*</code>) is dropped. Paths that do not exist are skipped rather than failing the command (they are passed with systemd’s <code>-</code> prefix): a tool’s config directory often does not exist yet.</p>
 <p>Properties written by hand in the <code>systemd</code> table are passed as they are, next to the ones generated here.</p>
+<h2 id="from-the-command-line"><a class="header" href="#from-the-command-line">From the command line</a></h2>
+<p><code>--fs-hide</code>, <code>--fs-read</code> and <code>--fs-write</code> change the access to a path for one run, without
+touching the config. Each takes one path and is repeatable; there is no comma-separated form,
+since a comma is a valid character in a path:</p>
+<pre><code>scudo --fs-hide ~/.ssh --fs-write ~/.cache/pip --fs-read /srv/data pip install .
+</code></pre>
+<p>They are applied after every profile, those selected with <code>--profile</code> included, and they have
+<strong>the last word</strong> on the paths they name: whatever the profiles listed for that same path is
+replaced, not merged. Without that, hiding a directory a profile reads would change nothing,
+since the most permissive access wins. Only the path itself is replaced: what the profiles grant
+below it stays, and is bind-mounted back in if the flag hid the directory, as with <code>hide</code>. So
+<code>--fs-hide $HOME</code> next to a profile that writes <code>$HOME/.claude</code> still leaves <code>.claude</code> writable.</p>
+<p>The paths are taken as written — the shell has already expanded them — and made absolute
+against the current directory. Giving the same path two accesses at once is an error. With no
+profile matched, the flags alone are enough to run the command in a sandbox.</p>
 <h2 id="seeing-what-the-filesystem-restrictions-hid"><a class="header" href="#seeing-what-the-filesystem-restrictions-hid">Seeing what the filesystem restrictions hid</a></h2>
 <p><code>ReadOnlyPaths=</code>, <code>TemporaryFileSystem=</code>, <code>InaccessiblePaths=</code>, <code>ProtectHome=</code> and <code>PrivateTmp=</code>
 are applied by systemd, by rearranging the unit’s mount namespace. scudo has no part in the
@@ -1390,7 +1438,7 @@ profile applies.</li>
 <code>delegable</code>) hands the command to a broker outside, which runs it in a sandbox of its own: see
 <a href="#delegating-commands">Delegating commands</a>.</li>
 <li>Restrictions asked for on the command line (<code>--profile</code>, <code>-P</code>, <code>--allow-dest</code>,
-<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>), <code>--delegate</code>, <code>--no-delegate</code> and <code>--tui</code> cannot be had
+<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>, <code>--fs-hide</code>, <code>--fs-read</code>, <code>--fs-write</code>), <code>--delegate</code>, <code>--no-delegate</code> and <code>--tui</code> cannot be had
 inside, so they fail the command rather than being dropped. <code>--confirm</code> still asks.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -1420,7 +1468,12 @@ delegate = true
 </code></pre>
 <p><strong><code>delegable = true</code></strong> is what the tool’s profile says: it may be run on someone else’s
 request. It is inherited through <code>extend</code>, so it can be set once on a base profile, and
-<code>delegable = false</code> takes it back for a profile that extends one. Mark only profiles meant to
+<code>delegable = false</code> takes it back for a profile that extends one. A profile that says
+<code>delegable = false</code>, itself or through what it extends, also stops every delegated run it
+matches, even when another profile matching the same command is delegable: the run fails
+rather than get what that profile grants. That is how <code>cargo-install</code> in the
+<a href="#recommended-configuration">recommended configuration</a> keeps a sandbox that delegates
+<code>cargo</code> from installing into <code>~/.cargo/bin</code> by asking for <code>cargo install</code>. Mark only profiles meant to
 contain what they run. Delegation hands over whatever the profile grants, so a profile that
 grants much — an editor writing its config, anything with the container socket — would turn
 every sandbox that may delegate to it into one that grants as much.</p>
@@ -1428,7 +1481,7 @@ every sandbox that may delegate to it into one that grants as much.</p>
 is <code>delegable</code> and has a <code>match</code>. It can also be given a name or a list of names, to delegate
 only those. A name that does not exist, has no <code>match</code> or is not <code>delegable</code> is an error.
 Both forms accumulate when profiles are combined.</p>
-<p>A command is delegated when its name matches a delegated profile, and it then runs exactly as
+<p>A command is delegated when a delegated profile matches it (by name, or by the whole command line for a pattern that holds a space), and it then runs exactly as
 it would have from a terminal, under every profile that matches it. It runs in a sandbox
 <em>beside</em> the agent’s, not inside it, so the agent’s profile no longer has to carry each
 tool’s caches and credentials: it can stay as narrow as the agent itself needs.</p>
@@ -1514,8 +1567,11 @@ and so is one whose caller is killed.</p>
 <p>The request is the agent’s, and its command line is the agent’s to write, so nothing in it
 gets to widen what the delegated sandbox may do:</p>
 <ul>
-<li><strong>Only the command’s name chooses the profiles.</strong> <code>--profile</code>, <code>--no-match</code>, <code>-P</code> and the
-network flags are refused.</li>
+<li><strong>Only the command line chooses the profiles</strong>, through the profiles’ own <code>match</code> patterns.
+<code>--profile</code>, <code>--no-match</code>, <code>-P</code>, the network flags and the filesystem flags are refused. Since the arguments are
+the agent’s to write, a pattern on the command line can be dodged (<code>--global</code> for <code>-g</code>,
+<code>git -C . push</code> for <code>git push</code>): it can choose what to delegate, but never keep a command
+from being delegated.</li>
 <li><strong>The working directory comes from the kernel</strong>, not from the request. It has to be the
 very same directory outside the sandbox, which rules out a private <code>/tmp</code> or a hidden
 <code>$HOME</code>. It also has to lie inside something the agent can already write.</li>
@@ -1650,7 +1706,7 @@ and <code>deny</code> beating <code>allow</code> is a property of how the two ar
 rules sit. That makes merging two profiles’ lists a plain union: commutative, idempotent, and
 impossible to get wrong by reordering. Entries take <code>$VAR</code> and <code>$arg_*</code> expansions like any
 other profile value, and each of the four lists adds to the one it inherits.</p>
-<h2 id="from-the-command-line"><a class="header" href="#from-the-command-line">From the command line</a></h2>
+<h2 id="from-the-command-line-1"><a class="header" href="#from-the-command-line-1">From the command line</a></h2>
 <p><code>--allow-dest</code>, <code>--deny-dest</code>, <code>--allow-port</code> and <code>--deny-port</code> change the rules for one run,
 without touching the config. They take the same values as <code>dest</code> and <code>ports</code>, are repeatable
 and accept comma-separated lists:</p>
@@ -1799,6 +1855,9 @@ that shim — running inside the unit, in the final cgroup — claims the token 
 execs the real command. The cgroup does not exist before the unit starts, so registering
 earlier is impossible, and attaching afterwards would leave a window in which the command runs
 unfiltered.</p>
+<p>Since the shim reaches the daemon from inside the unit, scudo bind-mounts the daemon’s socket
+there, read-only, whenever a policy needs it. A profile that hides <code>$XDG_RUNTIME_DIR</code> does not
+have to give it back, and nothing inside can replace it.</p>
 <svg class="diagram" viewbox="0 0 820 560" role="img" aria-labelledby="dg-bpfd-title">
 <title id="dg-bpfd-title">How a sandbox with a network policy starts: scudo registers the policy and gets a token, the shim inside the unit claims it, and only then the command runs</title>
 <defs><marker id="dg-bpfd-arrow" viewbox="0 0 10 10" refx="9" refy="5" markerwidth="7" markerheight="7" orient="auto-start-reverse"><path class="head" d="M0 0 10 5 0 10z" /></marker></defs>
