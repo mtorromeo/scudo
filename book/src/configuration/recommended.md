@@ -46,7 +46,7 @@ every user's package managers.
 | `cargo` | `cargo` | `supply-chain`, `~/.cargo` and `~/.rustup` read-only except the registry, credentials denied |
 | `composer`, `go`, `ruby` | their commands | `supply-chain` and the tool's cache |
 | `cargo-install` | `cargo install`, `cargo binstall`, `cargo install-update`, `cargo-binstall`, `cargo-install-update` | `cargo`, with all of `~/.cargo` writable except the credentials; not `delegable` |
-| `npm-publish` | `npm publish` | `~/.npmrc` readable on top of `npm`; not `delegable` |
+| `npm-auth` | `npm publish`, `npm login` | `~/.npmrc` writable on top of `npm`; not `delegable` |
 | `agents` | `claude`, `opencode` | `git-project`, writing `.git` and the agent's own state; [delegates](../delegation.md#delegating-commands) every `delegable` profile |
 
 Several pages of this documentation build their examples on these profiles.

@@ -106,10 +106,10 @@ extend = "supply-chain"
 match = ["npm", "npx"]
 filesystem.write = ["$HOME/.npm"]
 
-[npm-publish]
-match = ['/^npm publish( |$)/']
+[npm-auth]
+match = ['/^npm (publish|login)( |$)/']
 delegable = false
-filesystem.read = ["$HOME/.npmrc"]
+filesystem.write = ["$HOME/.npmrc"]
 
 [pnpm]
 extend = "npm"
