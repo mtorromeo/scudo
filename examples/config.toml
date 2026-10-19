@@ -99,7 +99,7 @@ filesystem.read = ["${PROJECT_DIR:-$PWD}/.git"]
 # a second file without the token, and add to [npm]:
 #   systemd.Environment = ["NPM_CONFIG_USERCONFIG=$HOME/.config/scudo/npm/npmrc"]
 #   filesystem.read = ["$HOME/.config/scudo/npm/npmrc"]
-# and to [npm-publish], which would otherwise inherit that variable:
+# and to [npm-auth], which would otherwise inherit that variable:
 #   systemd.Environment = ["NPM_CONFIG_USERCONFIG=$HOME/.npmrc"]
 [npm]
 extend = "supply-chain"

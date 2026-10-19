@@ -945,7 +945,7 @@ mod tests {
         assert!(map.is_delegable("npm"));
         assert!(!map.is_delegable("agents"));
         assert!(map.refuses_delegation("cargo-install"));
-        assert!(map.refuses_delegation("npm-publish"));
+        assert!(map.refuses_delegation("npm-auth"));
     }
 
     /// A typo in the reserved table has to be an error, or the setting silently

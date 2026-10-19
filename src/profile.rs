@@ -1026,7 +1026,8 @@ mod tests {
         }
         assert_eq!(matched("cargo-binstall", &["ripgrep"]), ["cargo-install"]);
         assert_eq!(matched("cargo-install-update", &["-a"]), ["cargo-install"]);
-        assert_eq!(matched("npm", &["publish"]), ["npm", "npm-publish"]);
+        assert_eq!(matched("npm", &["publish"]), ["npm", "npm-auth"]);
+        assert_eq!(matched("npm", &["login"]), ["npm", "npm-auth"]);
         assert_eq!(matched("npm", &["install", "publish"]), ["npm"]);
         for command_args in [&["build"][..], &["run", "--", "install"], &["installer"]] {
             assert_eq!(matched("cargo", command_args), ["cargo"], "{command_args:?}");
