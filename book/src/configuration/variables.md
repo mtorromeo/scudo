@@ -144,12 +144,13 @@ systemd.BindReadOnlyPaths = ["$arg_include"]
 # rsync -I ./src  →  BindReadOnlyPaths=/abs/cwd/src
 ```
 
-Only the **expanded variable value** is canonicalized — literal text in the template is left untouched. This means systemd special prefix characters (`-`, `+`, `!`, `!!`) can be used freely in the literal part:
+Only the **expanded variable value** is canonicalized — literal text in the template is left untouched — and only when the variable opens a path: at the start of the value, after systemd's prefix characters (`-`, `+`, `!`, `!!`, `~`), or after a `:` or a space separating paths. So prefixes can be used freely in the literal part, and a variable inside a path component is inserted as it is:
 
 ```toml
 [app]
-systemd.ReadWritePaths = ["-$arg_1"]
+systemd.ReadWritePaths = ["-$arg_1", "-/tmp/claude-$UID"]
 # ./relative  →  -/abs/cwd/relative   ('-' is literal, path is made absolute)
+# UID=1000    →  -/tmp/claude-1000    (the variable is part of a component)
 ```
 
 A [default value](#default-values) taking a variable's place counts as the variable's value, literal text included: `${arg_1:-out}` becomes `/abs/cwd/out` when no argument is given.

@@ -303,8 +303,18 @@ fn make_absolute(path: &str) -> String {
     std::path::absolute(path).map_or_else(|_| path.to_owned(), |p| p.to_string_lossy().into_owned())
 }
 
+/// Whether a variable appended to `partial` would open a path: nothing but
+/// systemd's prefix characters follows the last `:` (`src:dst[:opts]`) or
+/// whitespace (lists, `path weight`).
+fn starts_path(partial: &str) -> bool {
+    partial
+        .rsplit(|c: char| c == ':' || c.is_whitespace())
+        .next()
+        .is_none_or(|tail| tail.chars().all(|c| matches!(c, '-' | '+' | '!' | '~')))
+}
+
 /// Returns `true` for systemd unit properties whose values are filesystem paths.
-/// Variable expansions within these properties are automatically made absolute.
+/// A variable expansion that opens a path within these properties is made absolute.
 fn is_path_property(key: &str) -> bool {
     matches!(
         key,
@@ -656,9 +666,10 @@ fn value_to_strings(val: &Value, vars: &Vars, is_path: bool) -> Result<Vec<Strin
 ///   `$arg_*` with no value, a lookup variable that finds nothing (its own fallback
 ///   is not consulted), a missing environment variable. `DEFAULT` is itself a
 ///   template, expanded only when it is used, so defaults can chain.
-/// - When `is_path` is `true`, every expanded variable value is made absolute using the
-///   process's current directory. Only the variable expansion is canonicalized; literal
-///   text in the template is left untouched, except in a default taking a variable's place.
+/// - When `is_path` is `true`, a variable value that opens a path (see [`starts_path`])
+///   is made absolute using the process's current directory; one inside a path component,
+///   as in `/tmp/app-$UID`, is inserted as it is. Literal text in the template is left
+///   untouched, except in a default taking a variable's place.
 ///
 /// Returns a `Vec<String>` (usually one element; N elements when an array arg causes
 /// explosion; none when a lookup variable is skipped).
@@ -680,10 +691,6 @@ fn expand_vars(s: &str, vars: &Vars, is_path: bool) -> Result<Vec<String>> {
         };
 
         let values = match resolve_var(name, vars, default.is_some())? {
-            Resolved::Values(values) if is_path => values
-                .into_iter()
-                .map(|v| if v.is_empty() { v } else { make_absolute(&v) })
-                .collect(),
             Resolved::Values(values) => values,
             Resolved::Skip => return Ok(Vec::new()),
             Resolved::Unset => match default {
@@ -692,17 +699,19 @@ fn expand_vars(s: &str, vars: &Vars, is_path: bool) -> Result<Vec<String>> {
                     if values.is_empty() {
                         return Ok(Vec::new());
                     }
-                    if is_path {
-                        values
-                            .into_iter()
-                            .map(|v| if v.is_empty() { v } else { make_absolute(&v) })
-                            .collect()
-                    } else {
-                        values
-                    }
+                    values
                 }
                 None => vec![String::new()],
             },
+        };
+        // Decided per partial result: an earlier array variable can leave them
+        // ending differently.
+        let push = |existing: &mut String, val: &str| {
+            if is_path && !val.is_empty() && starts_path(existing) {
+                existing.push_str(&make_absolute(val));
+            } else {
+                existing.push_str(val);
+            }
         };
 
         if values.len() > 1 {
@@ -715,14 +724,14 @@ fn expand_vars(s: &str, vars: &Vars, is_path: bool) -> Result<Vec<String>> {
             for existing in &results {
                 for val in &values {
                     let mut new = existing.clone();
-                    new.push_str(val);
+                    push(&mut new, val);
                     new_results.push(new);
                 }
             }
             results = new_results;
         } else {
             for r in &mut results {
-                r.push_str(values.first().map_or("", String::as_str));
+                push(r, values.first().map_or("", String::as_str));
             }
         }
     }
@@ -1669,6 +1678,51 @@ mod tests {
             &path_args("ReadWritePaths", "-$SCUDO_TEST_DASH_PATH", &[]),
             &format!("ReadWritePaths={expected}")
         ));
+    }
+
+    #[test]
+    fn a_var_inside_a_path_component_is_not_made_absolute() {
+        // SAFETY: test-only env var
+        unsafe { std::env::set_var("SCUDO_TEST_UID", "1000") }
+        assert!(has_arg(
+            &path_args("ReadWritePaths", "-/tmp/claude-$SCUDO_TEST_UID", &[]),
+            "ReadWritePaths=-/tmp/claude-1000"
+        ));
+    }
+
+    #[test]
+    fn each_side_of_a_bind_is_made_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        // SAFETY: test-only env vars
+        unsafe { std::env::set_var("SCUDO_TEST_BIND_SRC", "src") }
+        // SAFETY: test-only env vars
+        unsafe { std::env::set_var("SCUDO_TEST_BIND_DST", "dst") }
+        let expected = format!(
+            "BindPaths=-{}:{}",
+            cwd.join("src").to_string_lossy(),
+            cwd.join("dst").to_string_lossy()
+        );
+        assert!(has_arg(
+            &path_args("BindPaths", "-$SCUDO_TEST_BIND_SRC:$SCUDO_TEST_BIND_DST", &[]),
+            &expected
+        ));
+    }
+
+    #[test]
+    fn a_var_right_after_an_array_arg_is_not_made_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        // SAFETY: test-only env var
+        unsafe { std::env::set_var("SCUDO_TEST_SUFFIX", "x") }
+        let out = systemd_args(
+            "[app]\nmatch = \"app\"\nargs.dir = [\"-C\"]\n\
+             systemd.BindPaths = \"$arg_dir$SCUDO_TEST_SUFFIX\"\n",
+            "app",
+            &["-C", "a", "-C", "b"],
+        );
+        for dir in ["a", "b"] {
+            let expected = format!("BindPaths={}x", cwd.join(dir).to_string_lossy());
+            assert!(has_arg(&out, &expected), "{expected} not in {out:?}");
+        }
     }
 
     // ── logging, reporting and network ────────────────────────────────────────
