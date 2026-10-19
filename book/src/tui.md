@@ -1,9 +1,10 @@
 # Terminal UI
 
-`--tui` runs the command inside scudo rather than in place of it: a full terminal on the left,
-and on the right a live list of what the sandbox turned away. That list comes from
-`scudo-bpfd`, so it stays empty unless `scudo-bpfd.socket` is enabled and active in
-`systemctl --user` (see [Installation](installation.md#enabling-scudo-bpfd)).
+With `--tui`, scudo stays running instead of executing into the command. The screen splits in
+two. The left side is a full terminal running the command, and the right side is a panel that
+lists what the sandbox blocked. The list comes from `scudo-bpfd`, so it stays empty unless
+`scudo-bpfd.socket` is enabled and active in `systemctl --user`. See
+[Installation](installation.md#enabling-scudo-bpfd).
 
 ```console
 $ scudo --tui -- curl https://example.com/
@@ -22,131 +23,108 @@ $ scudo --tui -- bash
  ^A  ? for help                        terminal │ blocked 3
 ```
 
-The command's terminal is the only part of the screen left unpainted, so what shows through
-it is the host terminal's own background; everything else — the panel, its two headings, the
-status bar — carries scudo's own dark theme.
+scudo paints the panel, its headings and the status bar with its own dark theme. It leaves the
+command's terminal unpainted, so that area shows the host terminal's background.
 
-Every line carries a mark, and the mark answers two questions at once. Its **shape** says
-which half of the sandbox the line came from — a round `●` for the network, a square `■` for
-the filesystem — and its **colour** says whether the sandbox is the reason: the warm tint for
-something it refused, the dim one for a path that was not there outside it either, which is
-hidden until `^A m` asks for it. Both the glyphs and the two tints are part of the theme, so
-they hold their meaning on a 256-colour terminal and on a sixteen-colour one.
+A shell works as it does anywhere else. `Ctrl-C` and `Ctrl-Z` go to the command as bytes.
+scudo does not treat them as signals for itself.
 
-The headings sit above their lists rather than in them, so they stay put while the lists
-scroll, and each list has a scrollbar down its right edge once there is more of it than there
-is room.
-
-The left panel is a terminal in full: colours, resizing, scrollback, the mouse, and job
-control. A shell runs in it as it would anywhere, `Ctrl-C` and `Ctrl-Z` included — in this
-mode they are bytes for the command, not signals for scudo.
-
-Piping works, and means what it means everywhere else:
+Piping works the same as without the UI:
 
 ```console
 $ cat Cargo.toml | scudo --tui -- less
 ```
 
-When scudo's own standard input is not a terminal it belongs to the command, which reads it
-instead of the panel's terminal — a pipe is meant for the command, and handing it an empty
-terminal in its place would make the same command line mean two different things inside and
-outside the UI. Only what the command *writes* is drawn in the panel.
+If scudo's standard input is not a terminal, scudo passes it to the command. The command reads
+the pipe, not the panel's terminal, so a command line does the same thing with and without
+`--tui`. The panel shows only what the command writes.
 
-Two consequences, both of them the ones the mode already has outside the UI. `systemd-run`
-falls back from `--pty` to `--pipe` when it is not given a terminal on all three descriptors,
-so a command with something piped into it has no controlling terminal of its own: it is not
-told when the panel is resized, and the keys pressed in the UI reach it only if it opens a
-terminal for itself, as `less` does. And a command given nothing to read gets nothing:
-`scudo --tui -- bash < /dev/null` ends at once rather than opening a shell.
+This has two consequences, and both also apply without the UI. First, `systemd-run` switches
+from `--pty` to `--pipe` unless all three standard descriptors are terminals. A command that
+reads from a pipe therefore has no controlling terminal. It gets no resize notifications, and
+it receives keys from the UI only if it opens a terminal itself, as `less` does. Second, a
+command with empty input reads nothing: `scudo --tui -- bash < /dev/null` exits at once.
 
-Asking for the UI also turns denial reporting on for the run, the same way `--verbose` does;
-without it the right panel would have nothing to show. When there is nothing to report the
-panel says which of the reasons applies — no network policy, a policy that took the network
-away entirely, or a sandbox that could not be watched — rather than sitting empty.
+`--tui` turns on denial reporting for the run, as `--verbose` does, because the panel has
+nothing to show without it. When there is nothing to report, the panel gives the reason. The
+profile may have no network policy, the policy may remove the network entirely, or scudo may
+have failed to watch the sandbox.
 
-The mode is only available when scudo is invoked by its own name. Called through a symlink or
-the FUSE shim, everything after the command name belongs to the command, so `--tui` is passed
-straight through to it.
+`--tui` works only when you call scudo by its own name. Through a symlink or the FUSE shim,
+every argument after the command name belongs to the command, so scudo passes `--tui` on to it.
 
 ## Keys
 
-Every key goes to the command except the prefix, `Ctrl-A` by default, which introduces one of
-scudo's own:
+Every key goes to the command except the prefix, `Ctrl-A` by default. The key after the prefix
+is a scudo command:
 
 | Key | Effect |
 |-----|--------|
-| `^A q` | leave, stopping the command if it is still running |
+| `^A q` | quit, stopping the command if it is still running |
 | `^A ^A` | send `Ctrl-A` to the command |
-| `^A Tab` | move between the terminal and the panel's two lists |
-| `^A PgUp` | read the scrollback — arrows, `PgUp`/`PgDn`, `Home`/`End`, `Esc` to return |
-| `^A r` | set how wide the panel is — arrows by one, `h`/`l` by five, `=` back to automatic, `Esc` to return |
+| `^A Tab` | move focus between the terminal and the panel's two lists |
+| `^A PgUp` | read the scrollback with the arrows, `PgUp`/`PgDn` and `Home`/`End`; `Esc` returns |
+| `^A r` | resize the panel with the arrows by one column and `h`/`l` by five; `=` restores automatic width, `Esc` returns |
 | `^A w` | show or hide the panel |
-| `^A s` | show or hide what scudo decided: the profiles that matched and the command line it built |
-| `^A m` | show or hide paths that were missing outside the sandbox too — see [file access reporting](filesystem.md#seeing-what-the-filesystem-restrictions-hid) |
-| `^A /` | keep only the lines matching a pattern |
-| `^A \` | the same, keeping out what matches instead |
-| `^A n` | the network only, or everything again |
-| `^A f` | the filesystem only, or everything again |
-| `^A ?` | the list above |
+| `^A s` | show or hide the profiles that matched and the command line scudo built |
+| `^A m` | show or hide paths that were missing outside the sandbox too; see [file access reporting](filesystem.md#seeing-what-the-filesystem-restrictions-hid) |
+| `^A /` | show only lines that match a pattern |
+| `^A \` | hide lines that match a pattern |
+| `^A n` | toggle between network lines only and all lines |
+| `^A f` | toggle between filesystem lines only and all lines |
+| `^A ?` | show this table |
 
-With one of the panel's lists focused, the arrows, `PgUp`/`PgDn` and `Home`/`End` move that
-list instead of reaching the command; every other key still reaches it, so the focus never
-swallows what was typed. The tally is read from the top down and the running list from its
-newest line back, and each stops at its own last line.
+When one of the panel's lists has focus, the arrows, `PgUp`/`PgDn` and `Home`/`End` scroll that
+list. Every other key still goes to the command. The tally scrolls from the top down, the recent
+list from its newest line back, and each stops at its last line.
 
-## Narrowing the panel
+To change the prefix, set `tui.prefix` in `[scudo]` or pass `--tui-prefix`. Write it as `C-a`,
+`M-x` or `F12`. The prefix must include a modifier, because a bare character would become
+impossible to type in the command.
 
-A build or a package manager names thousands of paths, and the handful worth looking at go
-under. Two ways of cutting the panel down, which can be used together:
+## Filtering the panel
 
-`^A /` opens a field for a **regular expression** — the same engine the profile matchers use —
-and keeps only the lines that match it; `^A \` opens the same field on the other side, keeping
-out what matches instead. The pattern applies as it is typed: `Tab` turns it round without
-retyping it, `Ctrl-U` clears it, `Enter` keeps it and gives the keyboard back, and `Esc`
-leaves the field putting back whatever was in force before it was opened. Case is ignored
-unless the pattern says otherwise with `(?-i)`. A pattern is unfinished for most of the time
-it is being written, so while it does not compile nothing is narrowed by it and the status bar
-says why, in red, rather than emptying the lists at every intermediate keystroke.
+A build or a package manager can produce thousands of paths. Two filters reduce the panel to
+the lines you care about, and you can combine them.
 
-`^A n` and `^A f` cut the panel to the network or to the filesystem alone; the same key again
-puts everything back. The heading of each list shows what is in force — `[net] /usr` — so a
-panel that is narrow because it was asked to be never looks like a panel with nothing in it.
+`^A /` opens a field for a regular expression and shows only the lines that match it. scudo
+uses the same regex engine as the profile matchers. `^A \` opens the same field but hides the
+matching lines instead. In the field:
 
-Both are **views and only views**. What is on screen has no bearing on the line printed when
-the UI closes, or on the `blocked N` count in the status bar: those are statements about the
-run, and a run does not change because of what was being looked at while it happened.
+- the filter updates as you type;
+- `Tab` switches between showing and hiding matches;
+- `Ctrl-U` clears the pattern;
+- `Enter` keeps the pattern and returns the keyboard to the command;
+- `Esc` closes the field and restores the filter that was active before.
 
-Change the prefix with `tui.prefix` in `[scudo]` or with `--tui-prefix`; it is written as
-`C-a`, `M-x` or `F12`, and must carry a modifier, since a bare character would be taken away
-from the command with no way to type it.
+Matching ignores case unless the pattern starts with `(?-i)`. While the pattern does not
+compile, scudo ignores it and shows the error in red in the status bar, so the lists do not
+empty out on every keystroke.
 
-Programs that ask the terminal about itself get an answer. scudo is the terminal here, so it
-answers what it can: what kind of terminal it is, whether it is working, where the cursor is,
-and — from the terminal it is itself drawing on, asked once when the UI starts — what colour
-the foreground, background and cursor are. Anything else goes unanswered, as on any terminal
-that does not implement it; the device-attributes reply is what tells a program to stop waiting
-for the rest. Without this a program like `bat`, which asks about the background colour to
-choose a light or dark theme, waits out its own timeout — a full second — on every run.
+`^A n` shows only network lines and `^A f` only filesystem lines. Pressing the same key again
+shows everything. The heading of each list names the active filters, for example
+`[net] /usr`, so you can tell a filtered list from an empty one.
 
-The mouse is handed to the program in the terminal only while that program asks for it, so
-selecting and copying with the mouse keeps working everywhere else — at the cost of taking
-whole screen rows, panel included, since scudo is drawing one screen.
+Filters change only what the panel displays. The `blocked N` count in the status bar and the
+summary printed when the UI closes always cover the whole run.
 
-When the command exits the UI stays up, and stays usable: the scrollback still scrolls, the
-lists still scroll, the panel can still be shown, hidden and resized, and `^A ?` still opens
-the help. Only the keys that were bytes for the command change hands — with nothing left to
-type at, the plain arrows, `PgUp`/`PgDn` and `Home`/`End` read the scrollback without a mode
-being asked for first, `Tab` moves between the terminal and the panel's lists, and `q`, `Esc`
-or `^d` close. scudo exits with the command's own code, and the closing summary of what was
-blocked is printed to stderr once the terminal has been given back, so it lands in the
-scrollback you keep.
+## After the command exits
 
-## How wide the panel is
+The UI stays open when the command exits. You can still scroll the scrollback and the lists,
+show, hide and resize the panel, and open the help with `^A ?`. Keys that went to the command
+now work without the prefix:
 
-By default the panel takes a quarter of the screen, never narrower than 34 columns and never
-wider than 60 — past that it has all the room its contents can use, and the rest would be
-taken from the terminal for nothing. On a 120-column window that is the same 34 columns it
-always was; on a 240-column one it is 60.
+- the arrows, `PgUp`/`PgDn` and `Home`/`End` scroll the scrollback;
+- `Tab` moves focus between the terminal and the lists;
+- `q`, `Esc` or `Ctrl-D` close the UI.
+
+scudo exits with the command's exit code. After it restores the terminal, it prints the summary
+of what the sandbox blocked to stderr, so the summary stays in your scrollback.
+
+## Panel width
+
+By default the panel takes a quarter of the screen width, with a minimum of 34 columns and a
+maximum of 60. The panel's contents never need more than 60 columns.
 
 | screen | panel |
 |--------|-------|
@@ -155,23 +133,10 @@ always was; on a 240-column one it is 60.
 | 200 | 50 |
 | 240 and wider | 60 |
 
-`^A r` sets it by hand. The keys move the **edge** between the two panels, not the panel's
-width, so `←` and `h` widen the panel that sits to the right of that edge and `→` and `l`
-narrow it; the arrows move it a column at a time and the letters five at a time. The command
-inside is told about its new size as it happens, so a full-screen program redraws itself while
-you are still moving the edge.
-
-A width set this way is **remembered**, in `$XDG_CONFIG_HOME/scudo/state.toml`, and applies to
-the next run. It also stops following the screen: resizing the window no longer moves it.
-`=` in the resize mode puts it back to automatic, and that too is remembered.
-
-That file is state, not configuration — scudo writes it, and nothing in it was typed by hand.
-There is deliberately no `panel_width` in `[scudo.tui]`: two sources for one width could only
-ever differ in order to disagree, and a config that still names it will say so rather than be
-quietly ignored.
-
-The panel is dropped altogether when the window is too narrow to leave the terminal 40
-columns: a shell wrapping into nonsense costs more than the panel shows.
+`^A r` sets the width by hand. The keys move the border between the terminal and the panel.
+`←` and `h` move it left and widen the panel, `→` and `l` move it right and narrow it. The
+arrows move it by one column, the letters by five. scudo sends the new size to the command as
+the border moves, so a full-screen program redraws while you resize.
 
 ## Settings
 
