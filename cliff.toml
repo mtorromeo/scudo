@@ -78,10 +78,10 @@ commit_parsers = [
   { message = "^fix", group = "<!-- 1 -->Bug fixes" },
   { message = "^perf", group = "<!-- 2 -->Performance" },
   { message = "^refactor", group = "<!-- 3 -->Refactoring" },
-  { message = "^docs", group = "<!-- 4 -->Documentation" },
-  { message = "^(build|packaging|ci)", group = "<!-- 5 -->Build and packaging" },
-  { message = "^test", group = "<!-- 6 -->Tests" },
-  { message = "^(chore|style)", skip = true },
+  { message = "^(build|packaging|ci)", group = "<!-- 4 -->Build and packaging" },
+  { message = "^test", group = "<!-- 5 -->Tests" },
+  # The book follows main and is published with each release.
+  { message = "^(chore|style|docs)", skip = true },
 ]
 
 [bump]
