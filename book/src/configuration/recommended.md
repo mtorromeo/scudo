@@ -37,7 +37,7 @@ every user's package managers.
 
 | Profile | Matches | What it is |
 |---------|---------|------------|
-| `sandbox` | — | Everything read-only, `$HOME` and `$XDG_RUNTIME_DIR` replaced by empty directories, a private `/tmp`; `~/.cache`, `~/.local/bin` (read-only) and scudo's own daemon socket and FUSE shim (read-only) given back |
+| `sandbox` | — | Everything read-only, `$HOME` and `$XDG_RUNTIME_DIR` replaced by empty directories, a private `/tmp`; `~/.cache`, `~/.local/bin` (read-only) and scudo's own daemon socket and FUSE shim (read-only) given back; variables named `*_SECRET`, `*_TOKEN` or `*_KEY` kept out |
 | `git-project` | — | `sandbox`, plus the [project](variables.md#lookup-variables) writable and `/var` denied |
 | `no-net` | — | No network beyond `localhost`; for `--profile` |
 | `supply-chain` | — | `git-project`, with the project's `.git` read-only; `delegable` |

@@ -1,5 +1,9 @@
 use std::{
-    ffi::OsStr, io::IsTerminal as _, os::unix::process::CommandExt as _, path::Path, process::Stdio,
+    ffi::{OsStr, OsString},
+    io::IsTerminal as _,
+    os::unix::process::CommandExt as _,
+    path::Path,
+    process::Stdio,
 };
 
 use anyhow::{Context as _, Result};
@@ -35,10 +39,11 @@ pub struct Options<'a> {
     /// said before still went to the stderr it was started with. A delegated
     /// run uses it for the requester's stderr; see [`crate::broker`].
     pub stderr: Option<i32>,
-    /// Variables to copy from this process's environment into the unit. Only
-    /// the names go on the command line: `systemd-run` reads the values from
-    /// the environment it inherits, so they are not echoed with it.
-    pub env: &'a [String],
+    /// Variables, by name or glob, not to copy from this process's
+    /// environment into the unit; see [`copied_env`].
+    pub deny_env: &'a [String],
+    /// Variables copied even though `deny_env` matches them.
+    pub allow_env: &'a [String],
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -62,12 +67,16 @@ pub fn build(
     if let Some(unit) = options.unit {
         cmd.arg(format!("--unit={unit}"));
     }
-    // One that is not set is left out rather than set empty: a profile shared
-    // by several projects names what only some of them define.
-    for name in options.env {
-        if std::env::var_os(name).is_some() {
-            cmd.arg(format!("--setenv={name}"));
-        }
+    // Only the names go on the command line: `systemd-run` reads the values
+    // from the environment it inherits, so they are not echoed with it.
+    let set_by_unit = environment_names(systemd_args);
+    for name in copied_env(
+        std::env::vars_os().map(|(name, _)| name),
+        options.deny_env,
+        options.allow_env,
+        &set_by_unit,
+    ) {
+        cmd.arg(format!("--setenv={name}"));
     }
     cmd.args(systemd_args);
 
@@ -82,6 +91,78 @@ pub fn build(
     }
     cmd.arg(command).args(args);
     Ok(cmd)
+}
+
+/// Variables that never cross into the unit, whatever `allow_env` says: those
+/// the service manager sets for the unit it runs scudo in, which would describe
+/// that unit instead of the sandbox, and scudo's own between broker and run.
+const NEVER_COPIED: &[&str] = &[
+    "NOTIFY_SOCKET",
+    "LISTEN_FDS",
+    "LISTEN_PID",
+    "LISTEN_FDNAMES",
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "MANAGERPID",
+    "MAINPID",
+    "SYSTEMD_EXEC_PID",
+    "WATCHDOG_PID",
+    "WATCHDOG_USEC",
+    "MONITOR_*",
+    "TRIGGER_*",
+    crate::broker::SPEC_ENV,
+    crate::broker::FD_ENV,
+    crate::broker::DELEGATE_ENV,
+];
+
+/// The names among `present` to copy into the unit, sorted: every variable
+/// unless `deny` matches it and `allow` does not.
+///
+/// What the unit sets itself with `Environment=` (`set_by_unit`) is left out:
+/// `--setenv` would win over it, and a value a profile or scudo fixed is not
+/// for the caller's environment to replace. So is a name no shell could have
+/// set, such as bash's exported functions.
+fn copied_env(
+    present: impl Iterator<Item = OsString>,
+    deny: &[String],
+    allow: &[String],
+    set_by_unit: &[&str],
+) -> Vec<String> {
+    fn compile(patterns: &[impl AsRef<str>]) -> Vec<glob::Pattern> {
+        // Every pattern was checked when it was read.
+        patterns
+            .iter()
+            .filter_map(|pattern| glob::Pattern::new(pattern.as_ref()).ok())
+            .collect()
+    }
+    let never = compile(NEVER_COPIED);
+    let deny = compile(deny);
+    let allow = compile(allow);
+    let any = |patterns: &[glob::Pattern], name: &str| patterns.iter().any(|p| p.matches(name));
+    let mut names: Vec<String> = present
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| crate::config::is_var_name(name))
+        .filter(|name| !any(&never, name) && !set_by_unit.contains(&name.as_str()))
+        .filter(|name| !any(&deny, name) || any(&allow, name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The names the unit's `Environment=` assignments set, in any of the forms
+/// [`property_value`] recognises. A value holds assignments separated by
+/// spaces, each of which may be quoted.
+fn environment_names(systemd_args: &[String]) -> Vec<&str> {
+    property_values(systemd_args, "Environment")
+        .flat_map(str::split_whitespace)
+        .filter_map(|assignment| {
+            assignment
+                .trim_start_matches(['"', '\''])
+                .split_once('=')
+                .map(|(name, _)| name)
+        })
+        .collect()
 }
 
 /// A command line as it would be typed into a shell.
@@ -284,10 +365,17 @@ pub fn sets_property(systemd_args: &[String], key: &str) -> bool {
 /// one, which is the one systemd keeps for a single-valued property.
 #[must_use]
 pub fn property_value<'a>(systemd_args: &'a [String], key: &str) -> Option<&'a str> {
-    let value_of = |property: &'a str| property.strip_prefix(key)?.strip_prefix('=');
+    property_values(systemd_args, key).last()
+}
+
+/// Every value `systemd_args` give the unit property `key`, in order.
+fn property_values<'a, 'k>(
+    systemd_args: &'a [String],
+    key: &'k str,
+) -> impl Iterator<Item = &'a str> + use<'a, 'k> {
+    let value_of = move |property: &'a str| property.strip_prefix(key)?.strip_prefix('=');
     let mut flagged = false;
-    let mut last = None;
-    for arg in systemd_args {
+    systemd_args.iter().filter_map(move |arg| {
         let value = if flagged {
             value_of(arg)
         } else {
@@ -296,9 +384,8 @@ pub fn property_value<'a>(systemd_args: &'a [String], key: &str) -> Option<&'a s
                 .and_then(value_of)
         };
         flagged = matches!(arg.as_str(), "-p" | "--property");
-        last = value.or(last);
-    }
-    last
+        value
+    })
 }
 
 #[cfg(test)]
@@ -321,7 +408,8 @@ mod tests {
             dbus_proxy: None,
             unit,
             stderr: None,
-            env: &[],
+            deny_env: &[],
+            allow_env: &[],
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")
@@ -387,10 +475,89 @@ mod tests {
         assert_eq!(property_value(&args, "MemoryMax"), None);
     }
 
+    fn names(names: &[&str]) -> std::vec::IntoIter<OsString> {
+        names
+            .iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn patterns(patterns: &[&str]) -> Vec<String> {
+        patterns.iter().map(ToString::to_string).collect()
+    }
+
     #[test]
-    fn only_the_variables_that_are_set_are_copied() {
+    fn every_variable_is_copied_unless_denied() {
+        let present = &[
+            "PATH",
+            "HOME",
+            "GH_TOKEN",
+            "NPM_TOKEN",
+            "LC_ALL",
+            "BASH_FUNC_f%%",
+        ];
+        assert_eq!(
+            copied_env(names(present), &[], &[], &[]),
+            ["GH_TOKEN", "HOME", "LC_ALL", "NPM_TOKEN", "PATH"]
+        );
+        // An allow with nothing denied changes nothing.
+        assert_eq!(
+            copied_env(names(present), &[], &patterns(&["PATH"]), &[]).len(),
+            5
+        );
+        assert_eq!(
+            copied_env(names(present), &patterns(&["*_TOKEN"]), &[], &[]),
+            ["HOME", "LC_ALL", "PATH"]
+        );
+        assert_eq!(
+            copied_env(
+                names(present),
+                &patterns(&["*"]),
+                &patterns(&["PATH", "LC_*", "NPM_TOKEN"]),
+                &[]
+            ),
+            ["LC_ALL", "NPM_TOKEN", "PATH"]
+        );
+    }
+
+    #[test]
+    fn what_the_unit_sets_or_the_manager_set_is_never_copied() {
+        let present = &[
+            "NOTIFY_SOCKET",
+            "MONITOR_UNIT",
+            "SCUDO_DELEGATE",
+            "FOO",
+            "BAR",
+        ];
+        let allow = patterns(&["*"]);
+        assert_eq!(
+            copied_env(names(present), &patterns(&["*"]), &allow, &["FOO"]),
+            ["BAR"]
+        );
+    }
+
+    #[test]
+    fn the_names_environment_assignments_set() {
+        let args: Vec<String> = [
+            "-p",
+            "Environment=A=1",
+            "--property=Environment=B=2 C=3",
+            "-pEnvironment=\"D=x y\"",
+            "-p",
+            "EnvironmentFile=/x",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(environment_names(&args), ["A", "B", "C", "D"]);
+    }
+
+    #[test]
+    fn the_copied_variables_go_on_the_command_line_by_name() {
         let log = LogConfig::default();
-        let env = ["PATH".to_owned(), "SCUDO_TEST_SURELY_UNSET".to_owned()];
+        let deny = patterns(&["*"]);
+        let allow = patterns(&["PATH", "SCUDO_TEST_SURELY_UNSET"]);
         let options = Options {
             verbose: false,
             confirm: false,
@@ -400,15 +567,16 @@ mod tests {
             dbus_proxy: None,
             unit: None,
             stderr: None,
-            env: &env,
+            deny_env: &deny,
+            allow_env: &allow,
         };
         let args: Vec<String> = build(Path::new("/bin/true"), &[], &[], &options)
             .expect("the command builds")
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.contains(&"--setenv=PATH".to_owned()));
-        assert!(!args.iter().any(|a| a.contains("SCUDO_TEST_SURELY_UNSET")));
+        let setenv: Vec<&String> = args.iter().filter(|a| a.starts_with("--setenv")).collect();
+        assert_eq!(setenv, ["--setenv=PATH"]);
     }
 
     #[test]

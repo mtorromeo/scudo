@@ -153,8 +153,6 @@ pub enum Fallback {
     Error,
 }
 
-/// Check the names a `vars` table declares and what they look for, so a
-/// mistake is reported when the config is read.
 /// Whether `name` follows the environment variable rules.
 pub fn is_var_name(name: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -162,6 +160,22 @@ pub fn is_var_name(name: &str) -> bool {
         .is_match(name)
 }
 
+/// Whether `pattern` is a variable name, or a glob that only variable names
+/// could match: what `allow_env` and `deny_env` take.
+pub fn is_var_pattern(pattern: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    is_var_name(pattern)
+        || (RE
+            .get_or_init(|| {
+                Regex::new(r"^[A-Za-z0-9_\[\]!-]*[*?\[][A-Za-z0-9_*?\[\]!-]*$")
+                    .expect("regex is valid")
+            })
+            .is_match(pattern)
+            && glob::Pattern::new(pattern).is_ok())
+}
+
+/// Check the names a `vars` table declares and what they look for, so a
+/// mistake is reported when the config is read.
 fn validate_vars(vars: &VarDecls) -> Result<()> {
     for (name, decl) in vars {
         if !is_var_name(name) || name.starts_with("arg_") || name == CONFIG_DIR_VAR {
@@ -221,10 +235,14 @@ pub struct ProfileConfig {
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
-    /// Environment variables copied from scudo's own environment into the
-    /// unit, by name. One that is not set is left out.
+    /// Environment variables, by name or glob, kept out of the unit: every
+    /// other one is copied from scudo's own environment.
     #[serde(default, deserialize_with = "one_or_many")]
-    pub env: Vec<String>,
+    pub deny_env: Vec<String>,
+    /// Environment variables, by name or glob, copied into the unit even
+    /// though `deny_env` matches them.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub allow_env: Vec<String>,
     /// The `$arg_*` variables filled from the command's flags.
     #[serde(default)]
     pub args: ArgDecls,
@@ -403,7 +421,8 @@ pub struct Profile {
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
-    pub env: Vec<String>,
+    pub deny_env: Vec<String>,
+    pub allow_env: Vec<String>,
     pub args: ArgDecls,
     pub vars: VarDecls,
     pub network: Option<toml::Table>,
@@ -428,7 +447,8 @@ impl Profile {
         self.exec = other.exec.clone().or(self.exec.take());
         self.verbose = other.verbose.or(self.verbose);
         self.confirm = other.confirm.or(self.confirm);
-        union(&mut self.env, &other.env);
+        union(&mut self.deny_env, &other.deny_env);
+        union(&mut self.allow_env, &other.allow_env);
         self.args
             .extend(other.args.iter().map(|(k, v)| (k.clone(), v.clone())));
         self.vars
@@ -485,8 +505,13 @@ impl Profile {
             .validate()
             .with_context(|| format!("profile '{name}'"))?;
         validate_vars(&config.vars).with_context(|| format!("profile '{name}'"))?;
-        if let Some(var) = config.env.iter().find(|var| !is_var_name(var)) {
-            bail!("profile '{name}': env: '{var}' is not a valid variable name");
+        for (key, patterns) in [
+            ("deny_env", &config.deny_env),
+            ("allow_env", &config.allow_env),
+        ] {
+            if let Some(var) = patterns.iter().find(|var| !is_var_pattern(var)) {
+                bail!("profile '{name}': {key}: '{var}' is not a variable name or pattern");
+            }
         }
         let patterns = config
             .r#match
@@ -504,7 +529,8 @@ impl Profile {
             exec: config.exec,
             verbose: config.verbose,
             confirm: config.confirm,
-            env: config.env,
+            deny_env: config.deny_env,
+            allow_env: config.allow_env,
             args: config.args,
             vars: config.vars,
             network: config.network,
@@ -1254,13 +1280,19 @@ mod tests {
     }
 
     #[test]
-    fn env_names_follow_the_variable_rules() {
-        let map = load(&["[a]\nenv = \"TOKEN\"\n"]);
-        assert_eq!(map.0["a"].env, ["TOKEN"]);
-        for decl in ["env = [\"1X\"]", "env = [\"A=1\"]", "env = [\"\"]"] {
-            let (profiles, _) = split(&format!("[a]\n{decl}\n")).unwrap();
-            ValidatedConfigMap::try_from(profiles).expect_err(decl);
+    fn env_patterns_are_variable_names_or_globs() {
+        let map =
+            load(&["[a]\ndeny_env = \"*\"\nallow_env = [\"TOKEN\", \"AWS_*\", \"LC_[A-Z]*\"]\n"]);
+        assert_eq!(map.0["a"].deny_env, ["*"]);
+        assert_eq!(map.0["a"].allow_env, ["TOKEN", "AWS_*", "LC_[A-Z]*"]);
+        for key in ["deny_env", "allow_env"] {
+            for value in ["1X", "A=1", "A=*", "", "a b", "[a", "A*/"] {
+                let decl = format!("{key} = [\"{value}\"]");
+                let (profiles, _) = split(&format!("[a]\n{decl}\n")).unwrap();
+                ValidatedConfigMap::try_from(profiles).expect_err(&decl);
+            }
         }
+        split("[a]\nenv = \"TOKEN\"\n").expect_err("env is no key");
     }
 
     #[test]

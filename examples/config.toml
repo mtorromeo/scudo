@@ -60,6 +60,8 @@ filesystem.read = [
 ]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
 filesystem.write = ["/tmp", "$HOME/.cache"]
+# Credentials exported in the shell, or by the desktop session, stay outside.
+deny_env = ["*_SECRET", "*_TOKEN", "*_KEY"]
 
 # Works on the project it was started in. /var is denied, since nothing a
 # project tool needs lives there and service data often does.

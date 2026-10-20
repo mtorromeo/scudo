@@ -101,9 +101,13 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     fs_write: Vec<String>,
 
-    /// Copy an environment variable into the sandbox, as `env` in a profile does (repeatable, comma-separated).
-    #[arg(short = 'E', long, value_name = "NAME", value_delimiter = ',')]
-    env: Vec<String>,
+    /// Keep environment variables out of the sandbox, by name or glob, as `deny_env` in a profile does (repeatable, comma-separated).
+    #[arg(long, value_name = "PATTERN", value_delimiter = ',')]
+    deny_env: Vec<String>,
+
+    /// Copy environment variables into the sandbox even when denied, as `allow_env` in a profile does (repeatable, comma-separated).
+    #[arg(short = 'E', long, value_name = "PATTERN", value_delimiter = ',')]
+    allow_env: Vec<String>,
 
     // Reachable only when scudo is invoked by name, and nothing checks: the
     // argv[0] dispatch rewrites a symlinked call into `scudo -- <command> …`,
@@ -323,7 +327,8 @@ impl Delegation {
             || !args.fs_hide.is_empty()
             || !args.fs_read.is_empty()
             || !args.fs_write.is_empty()
-            || !args.env.is_empty()
+            || !args.deny_env.is_empty()
+            || !args.allow_env.is_empty()
             || args.delegate
             || args.no_delegate
             || args.confirm
@@ -384,6 +389,19 @@ fn log_broker_event(event: scudo::broker::Event) {
     } else {
         debug!("{event}");
     }
+}
+
+/// Add what `flag` gave on the command line to the profiles' `patterns`.
+fn add_env_patterns(flag: &str, given: &[String], patterns: &mut Vec<String>) -> Result<()> {
+    for pattern in given {
+        if !scudo::config::is_var_pattern(pattern) {
+            anyhow::bail!("{flag}: '{pattern}' is not a variable name or pattern");
+        }
+        if !patterns.contains(pattern) {
+            patterns.push(pattern.clone());
+        }
+    }
+    Ok(())
 }
 
 /// The run itself, from the config to `systemd-run`: from a terminal, or for a
@@ -468,14 +486,8 @@ fn run_sandboxed(
     if args.confirm {
         resolved.confirm = true;
     }
-    for name in &args.env {
-        if !scudo::config::is_var_name(name) {
-            anyhow::bail!("--env: '{name}' is not a valid variable name");
-        }
-        if !resolved.env.contains(name) {
-            resolved.env.push(name.clone());
-        }
-    }
+    add_env_patterns("--deny-env", &args.deny_env, &mut resolved.deny_env)?;
+    add_env_patterns("--allow-env", &args.allow_env, &mut resolved.allow_env)?;
 
     for line in &resolved.match_log {
         debug!("{line}");
@@ -673,7 +685,8 @@ fn run_sandboxed(
         dbus_proxy: dbus_proxy.as_ref(),
         unit: unit.as_deref(),
         stderr: delegation.map(|_| scudo::broker::REQUESTER_STDERR),
-        env: &resolved.env,
+        deny_env: &resolved.deny_env,
+        allow_env: &resolved.allow_env,
     };
 
     #[cfg(feature = "tui")]
@@ -755,7 +768,8 @@ fn refuse_nested_flags(args: &Args) -> Result<()> {
         ("--fs-hide", !args.fs_hide.is_empty()),
         ("--fs-read", !args.fs_read.is_empty()),
         ("--fs-write", !args.fs_write.is_empty()),
-        ("--env", !args.env.is_empty()),
+        ("--deny-env", !args.deny_env.is_empty()),
+        ("--allow-env", !args.allow_env.is_empty()),
         ("--delegate", args.delegate),
         ("--no-delegate", args.no_delegate),
         ("--tui", tui),

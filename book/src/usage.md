@@ -26,7 +26,8 @@ Options:
       --fs-hide <PATH>                  Hide a directory behind an empty one, even one a profile grants (repeatable)
       --fs-read <PATH>                  Make a path read-only, even one a profile hides or makes writable (repeatable)
       --fs-write <PATH>                 Make a path writable, even one a profile hides or makes read-only (repeatable)
-  -E, --env <NAME>                      Copy an environment variable into the sandbox, as `env` in a profile does (repeatable, comma-separated)
+      --deny-env <PATTERN>              Keep environment variables out of the sandbox, by name or glob, as `deny_env` in a profile does (repeatable, comma-separated)
+  -E, --allow-env <PATTERN>             Copy environment variables into the sandbox even when denied, as `allow_env` in a profile does (repeatable, comma-separated)
       --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
       --tui-prefix <KEY>                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
   -h, --help                            Print help

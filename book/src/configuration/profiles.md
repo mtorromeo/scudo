@@ -13,7 +13,8 @@ Each TOML section defines a profile. The section name identifies the profile for
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
-| `env` | string or array of strings | Environment variables copied into the sandbox from the environment scudo runs in, by name; see [Environment](#environment) |
+| `deny_env` | string or array of strings | Environment variables, by name or glob, kept out of the sandbox; see [Environment](#environment) |
+| `allow_env` | string or array of strings | Environment variables, by name or glob, passed on even though `deny_env` matches them; see [Environment](#environment) |
 | `args` | table | Maps `$arg_*` variable names to the flag(s) that fill them; see [Command argument variables](variables.md#command-argument-variables) |
 | `vars` | table | Variables naming a directory found by looking up the tree; see [Lookup variables](variables.md#lookup-variables) |
 | `filesystem` | table | Which paths the command may write, read, not see or not touch; see [Filesystem access](../filesystem.md#filesystem-access) |
@@ -30,23 +31,48 @@ Any other key is a typo and scudo says so instead of ignoring it.
 
 ## Environment
 
-The command does not inherit the environment it is started from: `systemd-run` gives the unit the service manager's environment (`systemctl --user show-environment`) and nothing of the shell's. So a variable set by direnv, or exported in the terminal, is missing inside the sandbox unless a profile names it in `env`:
+The command gets the environment scudo is started with, as it would without scudo: every variable is passed on to the unit with `systemd-run --setenv=NAME`. `deny_env` keeps variables out, and `allow_env` lets back in some of what `deny_env` keeps out. Both take names or globs (`*`, `?`, `[A-Z]`), and a variable `allow_env` matches is passed on whatever `deny_env` says:
 
 ```toml
-[npx]
-match = "npx"
-env = ["SENTRY_ACCESS_TOKEN", "NODE_OPTIONS"]
+# Credentials stay outside, as in the recommended configuration's `sandbox`.
+[sandbox]
+deny_env = ["*_SECRET", "*_TOKEN", "*_KEY"]
+
+# A profile that extends it lets back in the one it needs.
+[sentry-wizard]
+match = "npx @sentry/wizard*"
+extend = "sandbox"
+allow_env = "SENTRY_ACCESS_TOKEN"
 ```
 
-`--env` (`-E`) does the same for one run, adding to what the profiles name:
+The alternative is to keep out everything but what is named, which leaves nothing to a naming convention:
+
+```toml
+[supply-chain]
+deny_env = "*"
+allow_env = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
+  "LANG", "LANGUAGE", "LC_*", "TZ", "XDG_*",
+]
+```
+
+`--deny-env` and `--allow-env` (`-E`) do the same for one run, adding to what the profiles say:
 
 ```sh
-scudo -E SENTRY_ACCESS_TOKEN,NODE_OPTIONS npx @sentry/wizard
+scudo --deny-env '*' -E PATH,HOME,TERM,SENTRY_ACCESS_TOKEN npx @sentry/wizard
 ```
 
-Each name is passed on with its value at the time scudo runs. A variable that is not set is left out rather than set empty, so a profile shared by several projects can name what only some of them define. `env` lists add up across combined profiles like any other list.
+The lists add up across combined profiles like any other list, so any profile can deny a variable and any profile can allow it back.
 
-Only the names appear on the `systemd-run` command line that scudo prints, but the values become properties of the unit: while the command runs, `systemctl --user show` on the unit shows them to your own user. `systemd.Environment = ["NAME=value"]` sets a fixed value instead, and `$NAME` expands there as in any other value.
+Some variables are never passed on:
+
+- those a profile or scudo sets in the unit with `Environment=`: `systemd.Environment = ["NAME=value"]` sets a fixed value that the caller's environment does not replace, and `$NAME` expands there as in any other value;
+- those systemd sets for the unit scudo itself runs in (`NOTIFY_SOCKET`, `LISTEN_*`, `INVOCATION_ID`, `JOURNAL_STREAM`, `MANAGERPID`, …), which describe that unit and not the sandbox, and those scudo uses between a [broker](../delegation.md#delegating-commands) and the run it starts;
+- names that are not valid variable names, such as the `BASH_FUNC_name%%` bash exports functions with.
+
+`deny_env` only decides what scudo passes on. The unit also gets the service manager's own environment (`systemctl --user show-environment`) and what systemd sets for every unit (`INVOCATION_ID`, `HOME`, `PATH`, …), even with `deny_env = "*"`. To remove one of those, name it in `systemd.UnsetEnvironment`, which takes names but no globs.
+
+Only the names appear on the `systemd-run` command line that scudo prints, but the values become properties of the unit: while the command runs, `systemctl --user show` on the unit shows them to your own user.
 
 ## Example
 

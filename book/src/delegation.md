@@ -139,7 +139,7 @@ The request is the agent's, and its command line is the agent's to write, so not
 gets to widen what the delegated sandbox may do:
 
 - **Only the command line chooses the profiles**, through the profiles' own `match` patterns.
-  `--profile`, `--no-match`, `-P`, `--env`, the network flags and the filesystem flags are refused. Since the arguments are
+  `--profile`, `--no-match`, `-P`, `--deny-env`, `--allow-env`, the network flags and the filesystem flags are refused. Since the arguments are
   the agent's to write, a pattern on the command line can be dodged (`--global` for `-g`,
   `git -C . push` for `git push`): it can choose what to delegate, but never keep a command
   from being delegated.
@@ -155,8 +155,13 @@ gets to widen what the delegated sandbox may do:
 - **Nothing is asked.** The delegated command's standard input is the agent's, so a
   `.scudo.toml` that is not trusted yet, or a profile with `confirm = true`, is an error
   rather than a `[y/N]` the agent could answer.
-- **The agent's environment is not passed on**, as with any `systemd-run`. Variables in the
-  profiles expand, and `env` copies, from the environment scudo was started with.
+- **The agent's environment is not passed on.** Variables in the profiles expand, and the
+  delegated command gets the variables `deny_env` lets through, from the environment the
+  broker was started with: the one the sandbox around the agent was started from. A
+  `delegable` profile should keep at least the credentials out, as `sandbox` in the
+  [recommended configuration](configuration/recommended.md#recommended-configuration) does,
+  or all of it with `deny_env = "*"` and an `allow_env` for what the command needs
+  (see [Environment](configuration/profiles.md#environment)).
 - **A delegated command has to be sandboxed.** If its profiles add up to nothing, it is
   refused rather than run outside every sandbox.
 

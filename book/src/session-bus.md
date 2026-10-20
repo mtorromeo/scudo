@@ -106,5 +106,5 @@ which is as much freedom as writing to `cgroup.procs`.
   `delegable`) hands the command to a broker outside, which runs it in a sandbox of its own: see
   [Delegating commands](delegation.md#delegating-commands).
 - Restrictions asked for on the command line (`--profile`, `-P`, `--allow-dest`,
-  `--deny-dest`, `--allow-port`, `--deny-port`, `--fs-hide`, `--fs-read`, `--fs-write`), `--env`, `--delegate`, `--no-delegate` and `--tui` cannot be had
+  `--deny-dest`, `--allow-port`, `--deny-port`, `--fs-hide`, `--fs-read`, `--fs-write`, `--deny-env`), `--allow-env`, `--delegate`, `--no-delegate` and `--tui` cannot be had
   inside, so they fail the command rather than being dropped. `--confirm` still asks.
