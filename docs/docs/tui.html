@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-961e4924.js";
+            window.path_to_searchindex_js = "searchindex-f5bb2dfc.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -183,10 +183,11 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="terminal-ui"><a class="header" href="#terminal-ui">Terminal UI</a></h1>
-<p><code>--tui</code> runs the command inside scudo rather than in place of it: a full terminal on the left,
-and on the right a live list of what the sandbox turned away. That list comes from
-<code>scudo-bpfd</code>, so it stays empty unless <code>scudo-bpfd.socket</code> is enabled and active in
-<code>systemctl --user</code> (see <a href="installation.html#enabling-scudo-bpfd">Installation</a>).</p>
+<p>With <code>--tui</code>, scudo stays running instead of executing into the command. The screen splits in
+two. The left side is a full terminal running the command, and the right side is a panel that
+lists what the sandbox blocked. The list comes from <code>scudo-bpfd</code>, so it stays empty unless
+<code>scudo-bpfd.socket</code> is enabled and active in <code>systemctl --user</code>. See
+<a href="installation.html#enabling-scudo-bpfd">Installation</a>.</p>
 <pre><code class="language-console">$ scudo --tui -- curl https://example.com/
 $ scudo --tui -- bash
 </code></pre>
@@ -200,113 +201,93 @@ $ scudo --tui -- bash
                                      │   4s ■ blocked open of /…│
  ^A  ? for help                        terminal │ blocked 3
 </code></pre>
-<p>The command’s terminal is the only part of the screen left unpainted, so what shows through
-it is the host terminal’s own background; everything else — the panel, its two headings, the
-status bar — carries scudo’s own dark theme.</p>
-<p>Every line carries a mark, and the mark answers two questions at once. Its <strong>shape</strong> says
-which half of the sandbox the line came from — a round <code>●</code> for the network, a square <code>■</code> for
-the filesystem — and its <strong>colour</strong> says whether the sandbox is the reason: the warm tint for
-something it refused, the dim one for a path that was not there outside it either, which is
-hidden until <code>^A m</code> asks for it. Both the glyphs and the two tints are part of the theme, so
-they hold their meaning on a 256-colour terminal and on a sixteen-colour one.</p>
-<p>The headings sit above their lists rather than in them, so they stay put while the lists
-scroll, and each list has a scrollbar down its right edge once there is more of it than there
-is room.</p>
-<p>The left panel is a terminal in full: colours, resizing, scrollback, the mouse, and job
-control. A shell runs in it as it would anywhere, <code>Ctrl-C</code> and <code>Ctrl-Z</code> included — in this
-mode they are bytes for the command, not signals for scudo.</p>
-<p>Piping works, and means what it means everywhere else:</p>
+<p>scudo paints the panel, its headings and the status bar with its own dark theme. It leaves the
+command’s terminal unpainted, so that area shows the host terminal’s background.</p>
+<p>A shell works as it does anywhere else. <code>Ctrl-C</code> and <code>Ctrl-Z</code> go to the command as bytes.
+scudo does not treat them as signals for itself.</p>
+<p>Piping works the same as without the UI:</p>
 <pre><code class="language-console">$ cat Cargo.toml | scudo --tui -- less
 </code></pre>
-<p>When scudo’s own standard input is not a terminal it belongs to the command, which reads it
-instead of the panel’s terminal — a pipe is meant for the command, and handing it an empty
-terminal in its place would make the same command line mean two different things inside and
-outside the UI. Only what the command <em>writes</em> is drawn in the panel.</p>
-<p>Two consequences, both of them the ones the mode already has outside the UI. <code>systemd-run</code>
-falls back from <code>--pty</code> to <code>--pipe</code> when it is not given a terminal on all three descriptors,
-so a command with something piped into it has no controlling terminal of its own: it is not
-told when the panel is resized, and the keys pressed in the UI reach it only if it opens a
-terminal for itself, as <code>less</code> does. And a command given nothing to read gets nothing:
-<code>scudo --tui -- bash &lt; /dev/null</code> ends at once rather than opening a shell.</p>
-<p>Asking for the UI also turns denial reporting on for the run, the same way <code>--verbose</code> does;
-without it the right panel would have nothing to show. When there is nothing to report the
-panel says which of the reasons applies — no network policy, a policy that took the network
-away entirely, or a sandbox that could not be watched — rather than sitting empty.</p>
-<p>The mode is only available when scudo is invoked by its own name. Called through a symlink or
-the FUSE shim, everything after the command name belongs to the command, so <code>--tui</code> is passed
-straight through to it.</p>
+<p>If scudo’s standard input is not a terminal, scudo passes it to the command. The command reads
+the pipe, not the panel’s terminal, so a command line does the same thing with and without
+<code>--tui</code>. The panel shows only what the command writes.</p>
+<p>This has two consequences, and both also apply without the UI. First, <code>systemd-run</code> switches
+from <code>--pty</code> to <code>--pipe</code> unless all three standard descriptors are terminals. A command that
+reads from a pipe therefore has no controlling terminal. It gets no resize notifications, and
+it receives keys from the UI only if it opens a terminal itself, as <code>less</code> does. Second, a
+command with empty input reads nothing: <code>scudo --tui -- bash &lt; /dev/null</code> exits at once.</p>
+<p><code>--tui</code> turns on denial reporting for the run, as <code>--verbose</code> does, because the panel has
+nothing to show without it. When there is nothing to report, the panel gives the reason. The
+profile may have no network policy, the policy may remove the network entirely, or scudo may
+have failed to watch the sandbox.</p>
+<p><code>--tui</code> works only when you call scudo by its own name. Through a symlink or the FUSE shim,
+every argument after the command name belongs to the command, so scudo passes <code>--tui</code> on to it.</p>
 <h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
-<p>Every key goes to the command except the prefix, <code>Ctrl-A</code> by default, which introduces one of
-scudo’s own:</p>
+<p>Every key goes to the command except the prefix, <code>Ctrl-A</code> by default. The key after the prefix
+is a scudo command:</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th>Key</th><th>Effect</th></tr>
 </thead>
 <tbody>
-<tr><td><code>^A q</code></td><td>leave, stopping the command if it is still running</td></tr>
+<tr><td><code>^A q</code></td><td>quit, stopping the command if it is still running</td></tr>
 <tr><td><code>^A ^A</code></td><td>send <code>Ctrl-A</code> to the command</td></tr>
-<tr><td><code>^A Tab</code></td><td>move between the terminal and the panel’s two lists</td></tr>
-<tr><td><code>^A PgUp</code></td><td>read the scrollback — arrows, <code>PgUp</code>/<code>PgDn</code>, <code>Home</code>/<code>End</code>, <code>Esc</code> to return</td></tr>
-<tr><td><code>^A r</code></td><td>set how wide the panel is — arrows by one, <code>h</code>/<code>l</code> by five, <code>=</code> back to automatic, <code>Esc</code> to return</td></tr>
+<tr><td><code>^A Tab</code></td><td>move focus between the terminal and the panel’s two lists</td></tr>
+<tr><td><code>^A PgUp</code></td><td>read the scrollback with the arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code>; <code>Esc</code> returns</td></tr>
+<tr><td><code>^A r</code></td><td>resize the panel with the arrows by one column and <code>h</code>/<code>l</code> by five; <code>=</code> restores automatic width, <code>Esc</code> returns</td></tr>
 <tr><td><code>^A w</code></td><td>show or hide the panel</td></tr>
-<tr><td><code>^A s</code></td><td>show or hide what scudo decided: the profiles that matched and the command line it built</td></tr>
-<tr><td><code>^A m</code></td><td>show or hide paths that were missing outside the sandbox too — see <a href="filesystem.html#seeing-what-the-filesystem-restrictions-hid">file access reporting</a></td></tr>
-<tr><td><code>^A /</code></td><td>keep only the lines matching a pattern</td></tr>
-<tr><td><code>^A \</code></td><td>the same, keeping out what matches instead</td></tr>
-<tr><td><code>^A n</code></td><td>the network only, or everything again</td></tr>
-<tr><td><code>^A f</code></td><td>the filesystem only, or everything again</td></tr>
-<tr><td><code>^A ?</code></td><td>the list above</td></tr>
+<tr><td><code>^A s</code></td><td>show or hide the profiles that matched and the command line scudo built</td></tr>
+<tr><td><code>^A m</code></td><td>show or hide paths that were missing outside the sandbox too; see <a href="filesystem.html#seeing-what-the-filesystem-restrictions-hid">file access reporting</a></td></tr>
+<tr><td><code>^A /</code></td><td>show only lines that match a pattern</td></tr>
+<tr><td><code>^A \</code></td><td>hide lines that match a pattern</td></tr>
+<tr><td><code>^A n</code></td><td>toggle between network lines only and all lines</td></tr>
+<tr><td><code>^A f</code></td><td>toggle between filesystem lines only and all lines</td></tr>
+<tr><td><code>^A ?</code></td><td>show this table</td></tr>
 </tbody>
 </table>
 </div>
-<p>With one of the panel’s lists focused, the arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code> move that
-list instead of reaching the command; every other key still reaches it, so the focus never
-swallows what was typed. The tally is read from the top down and the running list from its
-newest line back, and each stops at its own last line.</p>
-<h2 id="narrowing-the-panel"><a class="header" href="#narrowing-the-panel">Narrowing the panel</a></h2>
-<p>A build or a package manager names thousands of paths, and the handful worth looking at go
-under. Two ways of cutting the panel down, which can be used together:</p>
-<p><code>^A /</code> opens a field for a <strong>regular expression</strong> — the same engine the profile matchers use —
-and keeps only the lines that match it; <code>^A \</code> opens the same field on the other side, keeping
-out what matches instead. The pattern applies as it is typed: <code>Tab</code> turns it round without
-retyping it, <code>Ctrl-U</code> clears it, <code>Enter</code> keeps it and gives the keyboard back, and <code>Esc</code>
-leaves the field putting back whatever was in force before it was opened. Case is ignored
-unless the pattern says otherwise with <code>(?-i)</code>. A pattern is unfinished for most of the time
-it is being written, so while it does not compile nothing is narrowed by it and the status bar
-says why, in red, rather than emptying the lists at every intermediate keystroke.</p>
-<p><code>^A n</code> and <code>^A f</code> cut the panel to the network or to the filesystem alone; the same key again
-puts everything back. The heading of each list shows what is in force — <code>[net] /usr</code> — so a
-panel that is narrow because it was asked to be never looks like a panel with nothing in it.</p>
-<p>Both are <strong>views and only views</strong>. What is on screen has no bearing on the line printed when
-the UI closes, or on the <code>blocked N</code> count in the status bar: those are statements about the
-run, and a run does not change because of what was being looked at while it happened.</p>
-<p>Change the prefix with <code>tui.prefix</code> in <code>[scudo]</code> or with <code>--tui-prefix</code>; it is written as
-<code>C-a</code>, <code>M-x</code> or <code>F12</code>, and must carry a modifier, since a bare character would be taken away
-from the command with no way to type it.</p>
-<p>Programs that ask the terminal about itself get an answer. scudo is the terminal here, so it
-answers what it can: what kind of terminal it is, whether it is working, where the cursor is,
-and — from the terminal it is itself drawing on, asked once when the UI starts — what colour
-the foreground, background and cursor are. Anything else goes unanswered, as on any terminal
-that does not implement it; the device-attributes reply is what tells a program to stop waiting
-for the rest. Without this a program like <code>bat</code>, which asks about the background colour to
-choose a light or dark theme, waits out its own timeout — a full second — on every run.</p>
-<p>The mouse is handed to the program in the terminal only while that program asks for it, so
-selecting and copying with the mouse keeps working everywhere else — at the cost of taking
-whole screen rows, panel included, since scudo is drawing one screen.</p>
-<p>When the command exits the UI stays up, and stays usable: the scrollback still scrolls, the
-lists still scroll, the panel can still be shown, hidden and resized, and <code>^A ?</code> still opens
-the help. Only the keys that were bytes for the command change hands — with nothing left to
-type at, the plain arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code> read the scrollback without a mode
-being asked for first, <code>Tab</code> moves between the terminal and the panel’s lists, and <code>q</code>, <code>Esc</code>
-or <code>^d</code> close. scudo exits with the command’s own code, and the closing summary of what was
-blocked is printed to stderr once the terminal has been given back, so it lands in the
-scrollback you keep.</p>
-<h2 id="how-wide-the-panel-is"><a class="header" href="#how-wide-the-panel-is">How wide the panel is</a></h2>
-<p>By default the panel takes a quarter of the screen, never narrower than 34 columns and never
-wider than 60 — past that it has all the room its contents can use, and the rest would be
-taken from the terminal for nothing. On a 120-column window that is the same 34 columns it
-always was; on a 240-column one it is 60.</p>
+<p>When one of the panel’s lists has focus, the arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code> scroll that
+list. Every other key still goes to the command. The tally scrolls from the top down, the recent
+list from its newest line back, and each stops at its last line.</p>
+<p>To change the prefix, set <code>tui.prefix</code> in <code>[scudo]</code> or pass <code>--tui-prefix</code>. Write it as <code>C-a</code>,
+<code>M-x</code> or <code>F12</code>. The prefix must include a modifier, because a bare character would become
+impossible to type in the command.</p>
+<h2 id="filtering-the-panel"><a class="header" href="#filtering-the-panel">Filtering the panel</a></h2>
+<p>A build or a package manager can produce thousands of paths. Two filters reduce the panel to
+the lines you care about, and you can combine them.</p>
+<p><code>^A /</code> opens a field for a regular expression and shows only the lines that match it. scudo
+uses the same regex engine as the profile matchers. <code>^A \</code> opens the same field but hides the
+matching lines instead. In the field:</p>
+<ul>
+<li>the filter updates as you type;</li>
+<li><code>Tab</code> switches between showing and hiding matches;</li>
+<li><code>Ctrl-U</code> clears the pattern;</li>
+<li><code>Enter</code> keeps the pattern and returns the keyboard to the command;</li>
+<li><code>Esc</code> closes the field and restores the filter that was active before.</li>
+</ul>
+<p>Matching ignores case unless the pattern starts with <code>(?-i)</code>. While the pattern does not
+compile, scudo ignores it and shows the error in red in the status bar, so the lists do not
+empty out on every keystroke.</p>
+<p><code>^A n</code> shows only network lines and <code>^A f</code> only filesystem lines. Pressing the same key again
+shows everything. The heading of each list names the active filters, for example
+<code>[net] /usr</code>, so you can tell a filtered list from an empty one.</p>
+<p>Filters change only what the panel displays. The <code>blocked N</code> count in the status bar and the
+summary printed when the UI closes always cover the whole run.</p>
+<h2 id="after-the-command-exits"><a class="header" href="#after-the-command-exits">After the command exits</a></h2>
+<p>The UI stays open when the command exits. You can still scroll the scrollback and the lists,
+show, hide and resize the panel, and open the help with <code>^A ?</code>. Keys that went to the command
+now work without the prefix:</p>
+<ul>
+<li>the arrows, <code>PgUp</code>/<code>PgDn</code> and <code>Home</code>/<code>End</code> scroll the scrollback;</li>
+<li><code>Tab</code> moves focus between the terminal and the lists;</li>
+<li><code>q</code>, <code>Esc</code> or <code>Ctrl-D</code> close the UI.</li>
+</ul>
+<p>scudo exits with the command’s exit code. After it restores the terminal, it prints the summary
+of what the sandbox blocked to stderr, so the summary stays in your scrollback.</p>
+<h2 id="panel-width"><a class="header" href="#panel-width">Panel width</a></h2>
+<p>By default the panel takes a quarter of the screen width, with a minimum of 34 columns and a
+maximum of 60. The panel’s contents never need more than 60 columns.</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -320,20 +301,10 @@ always was; on a 240-column one it is 60.</p>
 </tbody>
 </table>
 </div>
-<p><code>^A r</code> sets it by hand. The keys move the <strong>edge</strong> between the two panels, not the panel’s
-width, so <code>←</code> and <code>h</code> widen the panel that sits to the right of that edge and <code>→</code> and <code>l</code>
-narrow it; the arrows move it a column at a time and the letters five at a time. The command
-inside is told about its new size as it happens, so a full-screen program redraws itself while
-you are still moving the edge.</p>
-<p>A width set this way is <strong>remembered</strong>, in <code>$XDG_CONFIG_HOME/scudo/state.toml</code>, and applies to
-the next run. It also stops following the screen: resizing the window no longer moves it.
-<code>=</code> in the resize mode puts it back to automatic, and that too is remembered.</p>
-<p>That file is state, not configuration — scudo writes it, and nothing in it was typed by hand.
-There is deliberately no <code>panel_width</code> in <code>[scudo.tui]</code>: two sources for one width could only
-ever differ in order to disagree, and a config that still names it will say so rather than be
-quietly ignored.</p>
-<p>The panel is dropped altogether when the window is too narrow to leave the terminal 40
-columns: a shell wrapping into nonsense costs more than the panel shows.</p>
+<p><code>^A r</code> sets the width by hand. The keys move the border between the terminal and the panel.
+<code>←</code> and <code>h</code> move it left and widen the panel, <code>→</code> and <code>l</code> move it right and narrow it. The
+arrows move it by one column, the letters by five. scudo sends the new size to the command as
+the border moves, so a full-screen program redraws while you resize.</p>
 <h2 id="settings"><a class="header" href="#settings">Settings</a></h2>
 <pre><code class="language-toml">[scudo]
 tui.prefix = "C-b"          # default "C-a"

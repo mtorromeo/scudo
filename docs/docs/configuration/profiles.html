@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-961e4924.js";
+            window.path_to_searchindex_js = "../searchindex-f5bb2dfc.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-6da527ae.js"></script>
@@ -199,6 +199,7 @@
 <tr><td><code>exec</code></td><td>string</td><td>Absolute path of the binary to execute, bypassing PATH resolution</td></tr>
 <tr><td><code>verbose</code></td><td>bool</td><td>Shorthand for <code>log.level = "debug"</code>, which among other things prints the full <code>systemd-run</code> command before executing (default: <code>false</code>)</td></tr>
 <tr><td><code>confirm</code></td><td>bool</td><td>Prompt for confirmation before executing (default: <code>false</code>); silently skipped in non-interactive shells</td></tr>
+<tr><td><code>env</code></td><td>string or array of strings</td><td>Environment variables copied into the sandbox from the environment scudo runs in, by name; see <a href="#environment">Environment</a></td></tr>
 <tr><td><code>args</code></td><td>table</td><td>Maps <code>$arg_*</code> variable names to the flag(s) that fill them; see <a href="variables.html#command-argument-variables">Command argument variables</a></td></tr>
 <tr><td><code>vars</code></td><td>table</td><td>Variables naming a directory found by looking up the tree; see <a href="variables.html#lookup-variables">Lookup variables</a></td></tr>
 <tr><td><code>filesystem</code></td><td>table</td><td>Which paths the command may write, read, not see or not touch; see <a href="../filesystem.html#filesystem-access">Filesystem access</a></td></tr>
@@ -212,6 +213,17 @@
 <p>Every key of the <code>systemd</code> table is passed directly to <code>systemd-run</code> as <code>-p Key=value</code>. Use the exact systemd unit property names (PascalCase). Values can be strings, booleans (<code>true</code>/<code>false</code> → <code>yes</code>/<code>no</code>), integers, or arrays. Write it either as a sub-table header (<code>[curl.systemd]</code>) or with dotted keys (<code>systemd.MemoryMax = "256M"</code>).</p>
 <p>The command starts in the current directory, unless <code>WorkingDirectory</code> is set (in the table or with <code>-P</code>): then <code>systemd-run</code> is not given <code>-d</code> and the property decides.</p>
 <p>Any other key is a typo and scudo says so instead of ignoring it.</p>
+<h2 id="environment"><a class="header" href="#environment">Environment</a></h2>
+<p>The command does not inherit the environment it is started from: <code>systemd-run</code> gives the unit the service manager’s environment (<code>systemctl --user show-environment</code>) and nothing of the shell’s. So a variable set by direnv, or exported in the terminal, is missing inside the sandbox unless a profile names it in <code>env</code>:</p>
+<pre><code class="language-toml">[npx]
+match = "npx"
+env = ["SENTRY_ACCESS_TOKEN", "NODE_OPTIONS"]
+</code></pre>
+<p><code>--env</code> (<code>-E</code>) does the same for one run, adding to what the profiles name:</p>
+<pre><code class="language-sh">scudo -E SENTRY_ACCESS_TOKEN,NODE_OPTIONS npx @sentry/wizard
+</code></pre>
+<p>Each name is passed on with its value at the time scudo runs. A variable that is not set is left out rather than set empty, so a profile shared by several projects can name what only some of them define. <code>env</code> lists add up across combined profiles like any other list.</p>
+<p>Only the names appear on the <code>systemd-run</code> command line that scudo prints, but the values become properties of the unit: while the command runs, <code>systemctl --user show</code> on the unit shows them to your own user. <code>systemd.Environment = ["NAME=value"]</code> sets a fixed value instead, and <code>$NAME</code> expands there as in any other value.</p>
 <h2 id="example"><a class="header" href="#example">Example</a></h2>
 <p>The bases here are those of the <a href="recommended.html#recommended-configuration">recommended configuration</a>,
 cut down to what the example needs.</p>

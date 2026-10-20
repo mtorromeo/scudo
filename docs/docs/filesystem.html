@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-961e4924.js";
+            window.path_to_searchindex_js = "searchindex-f5bb2dfc.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -275,6 +275,12 @@ shows the missing paths greyed beside the ones that were really taken away. On j
 path, operation, error and outside verdict are fields of their own:</p>
 <pre><code class="language-console">$ journalctl -t scudo F_OUTSIDE=present -o json | jq -r .F_PATH
 </code></pre>
+<p>The daemon looks outside after the call has returned, so a file can appear in between. Many
+programs check for a path and then create it, such as a lock file or a cache directory. If
+the directory is one the sandbox shares with the outside, the command’s own file may already
+be there when the daemon looks, and a path that was simply missing is reported as hidden by the
+sandbox, at <code>warn</code>. Such a report only names a wrong cause. Nothing is enforced from it, and
+the access itself really did fail with <code>ENOENT</code>.</p>
 <p>Only calls that name a path are watched: <code>open</code>, <code>openat</code>, <code>openat2</code>, <code>creat</code>, <code>stat</code>, <code>lstat</code>,
 <code>newfstatat</code>, <code>statx</code>, <code>access</code>, <code>faccessat</code>, <code>faccessat2</code>, <code>readlink</code>, <code>readlinkat</code>, <code>execve</code>,
 <code>execveat</code>, <code>unlink</code>, <code>unlinkat</code>, <code>rmdir</code>, <code>mkdir</code>, <code>mkdirat</code>, <code>rename</code>, <code>renameat</code>,
