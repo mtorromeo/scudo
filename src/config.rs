@@ -155,11 +155,16 @@ pub enum Fallback {
 
 /// Check the names a `vars` table declares and what they look for, so a
 /// mistake is reported when the config is read.
-fn validate_vars(vars: &VarDecls) -> Result<()> {
+/// Whether `name` follows the environment variable rules.
+pub fn is_var_name(name: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new("^[A-Za-z_][A-Za-z0-9_]*$").expect("regex is valid"));
+    RE.get_or_init(|| Regex::new("^[A-Za-z_][A-Za-z0-9_]*$").expect("regex is valid"))
+        .is_match(name)
+}
+
+fn validate_vars(vars: &VarDecls) -> Result<()> {
     for (name, decl) in vars {
-        if !re.is_match(name) || name.starts_with("arg_") || name == CONFIG_DIR_VAR {
+        if !is_var_name(name) || name.starts_with("arg_") || name == CONFIG_DIR_VAR {
             bail!("vars: '{name}' is not a valid variable name");
         }
         if decl.lookup.is_empty() {
@@ -216,6 +221,10 @@ pub struct ProfileConfig {
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
+    /// Environment variables copied from scudo's own environment into the
+    /// unit, by name. One that is not set is left out.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub env: Vec<String>,
     /// The `$arg_*` variables filled from the command's flags.
     #[serde(default)]
     pub args: ArgDecls,
@@ -394,6 +403,7 @@ pub struct Profile {
     pub exec: Option<String>,
     pub verbose: Option<bool>,
     pub confirm: Option<bool>,
+    pub env: Vec<String>,
     pub args: ArgDecls,
     pub vars: VarDecls,
     pub network: Option<toml::Table>,
@@ -418,6 +428,7 @@ impl Profile {
         self.exec = other.exec.clone().or(self.exec.take());
         self.verbose = other.verbose.or(self.verbose);
         self.confirm = other.confirm.or(self.confirm);
+        union(&mut self.env, &other.env);
         self.args
             .extend(other.args.iter().map(|(k, v)| (k.clone(), v.clone())));
         self.vars
@@ -474,6 +485,9 @@ impl Profile {
             .validate()
             .with_context(|| format!("profile '{name}'"))?;
         validate_vars(&config.vars).with_context(|| format!("profile '{name}'"))?;
+        if let Some(var) = config.env.iter().find(|var| !is_var_name(var)) {
+            bail!("profile '{name}': env: '{var}' is not a valid variable name");
+        }
         let patterns = config
             .r#match
             .iter()
@@ -490,6 +504,7 @@ impl Profile {
             exec: config.exec,
             verbose: config.verbose,
             confirm: config.confirm,
+            env: config.env,
             args: config.args,
             vars: config.vars,
             network: config.network,
@@ -1235,6 +1250,16 @@ mod tests {
             "vars.X = { lookup = \".git\", fallback = \"nope\" }",
         ] {
             split(&format!("[a]\n{decl}\n")).expect_err(decl);
+        }
+    }
+
+    #[test]
+    fn env_names_follow_the_variable_rules() {
+        let map = load(&["[a]\nenv = \"TOKEN\"\n"]);
+        assert_eq!(map.0["a"].env, ["TOKEN"]);
+        for decl in ["env = [\"1X\"]", "env = [\"A=1\"]", "env = [\"\"]"] {
+            let (profiles, _) = split(&format!("[a]\n{decl}\n")).unwrap();
+            ValidatedConfigMap::try_from(profiles).expect_err(decl);
         }
     }
 

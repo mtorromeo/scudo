@@ -24,6 +24,8 @@ pub struct ResolvedProfile {
     /// line's say: the caller layers that on top.
     pub log: LogConfig,
     pub confirm: bool,
+    /// The variables to copy from scudo's environment into the unit, by name.
+    pub env: Vec<String>,
     pub match_log: Vec<String>,
     /// Policies to hand to `scudo-bpfd` before the command starts.
     pub policies: Vec<Policy>,
@@ -433,6 +435,7 @@ fn build_args(
         exec: profile.exec,
         log,
         confirm: profile.confirm.unwrap_or(false),
+        env: profile.env,
         match_log,
         policies,
         dbus: profile.dbus,
@@ -1287,6 +1290,27 @@ mod tests {
         network.dest.allow = ["*.crates.io", "api.anthropic.com"]
         systemd.MemoryMax = "4G"
     "#;
+
+    #[test]
+    fn env_names_accumulate_and_are_no_unit_property() {
+        let src = r#"
+            [base]
+            env = ["A", "B"]
+
+            [npx]
+            match = "npx"
+            extend = "base"
+            env = "B"
+
+            [sentry]
+            match = "npx"
+            env = ["SENTRY_ACCESS_TOKEN"]
+        "#;
+        let resolved = resolve(&configs_from_toml(src), "npx", &[]).unwrap();
+        assert_eq!(resolved.env, ["A", "B", "SENTRY_ACCESS_TOKEN"]);
+        // Copying variables alone asks for no sandbox.
+        assert_eq!(resolved.systemd_args, Vec::<String>::new());
+    }
 
     #[test]
     fn independent_profiles_combine_on_the_most_permissive_access() {

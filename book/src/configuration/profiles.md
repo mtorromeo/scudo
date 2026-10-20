@@ -13,6 +13,7 @@ Each TOML section defines a profile. The section name identifies the profile for
 | `exec` | string | Absolute path of the binary to execute, bypassing PATH resolution |
 | `verbose` | bool | Shorthand for `log.level = "debug"`, which among other things prints the full `systemd-run` command before executing (default: `false`) |
 | `confirm` | bool | Prompt for confirmation before executing (default: `false`); silently skipped in non-interactive shells |
+| `env` | string or array of strings | Environment variables copied into the sandbox from the environment scudo runs in, by name; see [Environment](#environment) |
 | `args` | table | Maps `$arg_*` variable names to the flag(s) that fill them; see [Command argument variables](variables.md#command-argument-variables) |
 | `vars` | table | Variables naming a directory found by looking up the tree; see [Lookup variables](variables.md#lookup-variables) |
 | `filesystem` | table | Which paths the command may write, read, not see or not touch; see [Filesystem access](../filesystem.md#filesystem-access) |
@@ -26,6 +27,26 @@ Every key of the `systemd` table is passed directly to `systemd-run` as `-p Key=
 The command starts in the current directory, unless `WorkingDirectory` is set (in the table or with `-P`): then `systemd-run` is not given `-d` and the property decides.
 
 Any other key is a typo and scudo says so instead of ignoring it.
+
+## Environment
+
+The command does not inherit the environment it is started from: `systemd-run` gives the unit the service manager's environment (`systemctl --user show-environment`) and nothing of the shell's. So a variable set by direnv, or exported in the terminal, is missing inside the sandbox unless a profile names it in `env`:
+
+```toml
+[npx]
+match = "npx"
+env = ["SENTRY_ACCESS_TOKEN", "NODE_OPTIONS"]
+```
+
+`--env` (`-E`) does the same for one run, adding to what the profiles name:
+
+```sh
+scudo -E SENTRY_ACCESS_TOKEN,NODE_OPTIONS npx @sentry/wizard
+```
+
+Each name is passed on with its value at the time scudo runs. A variable that is not set is left out rather than set empty, so a profile shared by several projects can name what only some of them define. `env` lists add up across combined profiles like any other list.
+
+Only the names appear on the `systemd-run` command line that scudo prints, but the values become properties of the unit: while the command runs, `systemctl --user show` on the unit shows them to your own user. `systemd.Environment = ["NAME=value"]` sets a fixed value instead, and `$NAME` expands there as in any other value.
 
 ## Example
 

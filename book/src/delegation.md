@@ -139,7 +139,7 @@ The request is the agent's, and its command line is the agent's to write, so not
 gets to widen what the delegated sandbox may do:
 
 - **Only the command line chooses the profiles**, through the profiles' own `match` patterns.
-  `--profile`, `--no-match`, `-P`, the network flags and the filesystem flags are refused. Since the arguments are
+  `--profile`, `--no-match`, `-P`, `--env`, the network flags and the filesystem flags are refused. Since the arguments are
   the agent's to write, a pattern on the command line can be dodged (`--global` for `-g`,
   `git -C . push` for `git push`): it can choose what to delegate, but never keep a command
   from being delegated.
@@ -156,7 +156,7 @@ gets to widen what the delegated sandbox may do:
   `.scudo.toml` that is not trusted yet, or a profile with `confirm = true`, is an error
   rather than a `[y/N]` the agent could answer.
 - **The agent's environment is not passed on**, as with any `systemd-run`. Variables in the
-  profiles expand with the environment scudo was started with.
+  profiles expand, and `env` copies, from the environment scudo was started with.
 - **A delegated command has to be sandboxed.** If its profiles add up to nothing, it is
   refused rather than run outside every sandbox.
 

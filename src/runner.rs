@@ -35,6 +35,10 @@ pub struct Options<'a> {
     /// said before still went to the stderr it was started with. A delegated
     /// run uses it for the requester's stderr; see [`crate::broker`].
     pub stderr: Option<i32>,
+    /// Variables to copy from this process's environment into the unit. Only
+    /// the names go on the command line: `systemd-run` reads the values from
+    /// the environment it inherits, so they are not echoed with it.
+    pub env: &'a [String],
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -57,6 +61,13 @@ pub fn build(
     cmd.args(["--user", "--wait", flags]);
     if let Some(unit) = options.unit {
         cmd.arg(format!("--unit={unit}"));
+    }
+    // One that is not set is left out rather than set empty: a profile shared
+    // by several projects names what only some of them define.
+    for name in options.env {
+        if std::env::var_os(name).is_some() {
+            cmd.arg(format!("--setenv={name}"));
+        }
     }
     cmd.args(systemd_args);
 
@@ -310,6 +321,7 @@ mod tests {
             dbus_proxy: None,
             unit,
             stderr: None,
+            env: &[],
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")
@@ -373,6 +385,30 @@ mod tests {
             Some("private")
         );
         assert_eq!(property_value(&args, "MemoryMax"), None);
+    }
+
+    #[test]
+    fn only_the_variables_that_are_set_are_copied() {
+        let log = LogConfig::default();
+        let env = ["PATH".to_owned(), "SCUDO_TEST_SURELY_UNSET".to_owned()];
+        let options = Options {
+            verbose: false,
+            confirm: false,
+            log: &log,
+            shim_token: None,
+            log_denials: false,
+            dbus_proxy: None,
+            unit: None,
+            stderr: None,
+            env: &env,
+        };
+        let args: Vec<String> = build(Path::new("/bin/true"), &[], &[], &options)
+            .expect("the command builds")
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--setenv=PATH".to_owned()));
+        assert!(!args.iter().any(|a| a.contains("SCUDO_TEST_SURELY_UNSET")));
     }
 
     #[test]
