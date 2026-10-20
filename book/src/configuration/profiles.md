@@ -31,7 +31,9 @@ Any other key is a typo and scudo says so instead of ignoring it.
 
 ## Environment
 
-The command gets the environment scudo is started with, as it would without scudo: every variable is passed on to the unit with `systemd-run --setenv=NAME`. `deny_env` keeps variables out, and `allow_env` lets back in some of what `deny_env` keeps out. Both take names or globs (`*`, `?`, `[A-Z]`), and a variable `allow_env` matches is passed on whatever `deny_env` says:
+The command gets the environment scudo is started with, as it would without scudo. `systemd-run` starts the unit from the service manager's environment (`systemctl --user show-environment`), so scudo changes that one into its own: a variable the manager has with a different value, or not at all, is passed on with `systemd-run --setenv=NAME`, and one the manager has but scudo's environment does not is removed with `UnsetEnvironment=`.
+
+`deny_env` keeps variables out, wherever they come from: what it matches is neither passed on nor left in from the manager's environment. `allow_env` lets back in some of what `deny_env` keeps out. Both take names or globs (`*`, `?`, `[A-Z]`), and a variable `allow_env` matches is passed on whatever `deny_env` says:
 
 ```toml
 # Credentials stay outside, as in the recommended configuration's `sandbox`.
@@ -70,7 +72,9 @@ Some variables are never passed on:
 - those systemd sets for the unit scudo itself runs in (`NOTIFY_SOCKET`, `LISTEN_*`, `INVOCATION_ID`, `JOURNAL_STREAM`, `MANAGERPID`, …), which describe that unit and not the sandbox, and those scudo uses between a [broker](../delegation.md#delegating-commands) and the run it starts;
 - names that are not valid variable names, such as the `BASH_FUNC_name%%` bash exports functions with.
 
-`deny_env` only decides what scudo passes on. The unit also gets the service manager's own environment (`systemctl --user show-environment`) and what systemd sets for every unit (`INVOCATION_ID`, `HOME`, `PATH`, …), even with `deny_env = "*"`. To remove one of those, name it in `systemd.UnsetEnvironment`, which takes names but no globs.
+Some variables are never taken away, since the command would get them in any unit: those a profile or scudo sets with `Environment=`, and those systemd sets for every unit it starts (`INVOCATION_ID`, `SYSTEMD_EXEC_PID`, `MEMORY_PRESSURE_WATCH`, and `HOME`, `USER`, `PATH` when the manager's environment lacks them), even with `deny_env = "*"`. `systemd.UnsetEnvironment` removes them by name.
+
+To read the manager's environment scudo runs `busctl --user`. When that fails, every variable is passed on with `--setenv` and none is removed, unless `deny_env` or `--deny-env` names any, which makes it an error: what is denied could not be taken out.
 
 Only the names appear on the `systemd-run` command line that scudo prints, but the values become properties of the unit: while the command runs, `systemctl --user show` on the unit shows them to your own user.
 

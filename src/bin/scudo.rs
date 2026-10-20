@@ -391,6 +391,23 @@ fn log_broker_event(event: scudo::broker::Event) {
     }
 }
 
+/// The service manager's environment, which the unit starts from, so that
+/// only what differs goes on the command line. Without it, what `deny_env`
+/// names could not be taken out of the unit: then it is an error.
+fn manager_environment(deny_env: &[String]) -> Result<Vec<String>> {
+    match scudo::runner::manager_environment() {
+        Ok(env) => Ok(env),
+        Err(err) if deny_env.is_empty() => {
+            debug!("reading the service manager's environment: {err:#}");
+            Ok(Vec::new())
+        }
+        Err(err) => {
+            Err(err
+                .context("reading the service manager's environment, to keep `deny_env` out of it"))
+        }
+    }
+}
+
 /// Add what `flag` gave on the command line to the profiles' `patterns`.
 fn add_env_patterns(flag: &str, given: &[String], patterns: &mut Vec<String>) -> Result<()> {
     for pattern in given {
@@ -674,6 +691,11 @@ fn run_sandboxed(
         warn!("{warning}");
     }
 
+    let manager_env = if unsandboxed {
+        Vec::new()
+    } else {
+        manager_environment(&resolved.deny_env)?
+    };
     let options = scudo::runner::Options {
         // `systemd-run`'s own chatter would go to the requester of a delegated
         // run, which asked for the command and not for that.
@@ -687,6 +709,7 @@ fn run_sandboxed(
         stderr: delegation.map(|_| scudo::broker::REQUESTER_STDERR),
         deny_env: &resolved.deny_env,
         allow_env: &resolved.allow_env,
+        manager_env: &manager_env,
     };
 
     #[cfg(feature = "tui")]
@@ -694,6 +717,7 @@ fn run_sandboxed(
         let cmd = if unsandboxed {
             let mut cmd = std::process::Command::new(&bin);
             cmd.args(&args.command_args);
+            scudo::runner::remove_denied_env(&mut cmd, &resolved.deny_env, &resolved.allow_env);
             cmd
         } else {
             scudo::runner::build(&bin, &args.command_args, &resolved.systemd_args, &options)?
@@ -721,9 +745,10 @@ fn run_sandboxed(
     }
 
     if unsandboxed {
-        let err = std::process::Command::new(&bin)
-            .args(&args.command_args)
-            .exec();
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.args(&args.command_args);
+        scudo::runner::remove_denied_env(&mut cmd, &resolved.deny_env, &resolved.allow_env);
+        let err = cmd.exec();
         return Err(anyhow::Error::from(err).context("exec failed"));
     }
 

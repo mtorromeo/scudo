@@ -40,10 +40,13 @@ pub struct Options<'a> {
     /// run uses it for the requester's stderr; see [`crate::broker`].
     pub stderr: Option<i32>,
     /// Variables, by name or glob, not to copy from this process's
-    /// environment into the unit; see [`copied_env`].
+    /// environment into the unit; see [`EnvRules::unit_changes`].
     pub deny_env: &'a [String],
     /// Variables copied even though `deny_env` matches them.
     pub allow_env: &'a [String],
+    /// The service manager's environment, as `NAME=value`, which the unit
+    /// starts from; see [`manager_environment`].
+    pub manager_env: &'a [String],
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -70,13 +73,17 @@ pub fn build(
     // Only the names go on the command line: `systemd-run` reads the values
     // from the environment it inherits, so they are not echoed with it.
     let set_by_unit = environment_names(systemd_args);
-    for name in copied_env(
-        std::env::vars_os().map(|(name, _)| name),
-        options.deny_env,
-        options.allow_env,
-        &set_by_unit,
-    ) {
+    let env = EnvRules {
+        deny: &compile(options.deny_env),
+        allow: &compile(options.allow_env),
+        set_by_unit: &set_by_unit,
+    };
+    let (copied, unset) = env.unit_changes(std::env::vars_os(), options.manager_env);
+    for name in copied {
         cmd.arg(format!("--setenv={name}"));
+    }
+    if !unset.is_empty() {
+        cmd.arg(format!("--property=UnsetEnvironment={}", unset.join(" ")));
     }
     cmd.args(systemd_args);
 
@@ -115,39 +122,135 @@ const NEVER_COPIED: &[&str] = &[
     crate::broker::DELEGATE_ENV,
 ];
 
-/// The names among `present` to copy into the unit, sorted: every variable
-/// unless `deny` matches it and `allow` does not.
-///
-/// What the unit sets itself with `Environment=` (`set_by_unit`) is left out:
-/// `--setenv` would win over it, and a value a profile or scudo fixed is not
-/// for the caller's environment to replace. So is a name no shell could have
-/// set, such as bash's exported functions.
-fn copied_env(
-    present: impl Iterator<Item = OsString>,
-    deny: &[String],
-    allow: &[String],
-    set_by_unit: &[&str],
-) -> Vec<String> {
-    fn compile(patterns: &[impl AsRef<str>]) -> Vec<glob::Pattern> {
-        // Every pattern was checked when it was read.
-        patterns
-            .iter()
-            .filter_map(|pattern| glob::Pattern::new(pattern.as_ref()).ok())
-            .collect()
+/// Every pattern was checked when it was read.
+fn compile(patterns: &[impl AsRef<str>]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern.as_ref()).ok())
+        .collect()
+}
+
+fn matches_any(patterns: &[glob::Pattern], name: &str) -> bool {
+    patterns.iter().any(|pattern| pattern.matches(name))
+}
+
+/// What decides which variables the command gets.
+struct EnvRules<'a> {
+    deny: &'a [glob::Pattern],
+    allow: &'a [glob::Pattern],
+    /// What the unit sets itself with `Environment=`: a value a profile or
+    /// scudo fixed is not for the caller's environment to replace, nor to take
+    /// away.
+    set_by_unit: &'a [&'a str],
+}
+
+impl EnvRules<'_> {
+    fn denied(&self, name: &str) -> bool {
+        matches_any(self.deny, name) && !matches_any(self.allow, name)
     }
-    let never = compile(NEVER_COPIED);
-    let deny = compile(deny);
-    let allow = compile(allow);
-    let any = |patterns: &[glob::Pattern], name: &str| patterns.iter().any(|p| p.matches(name));
-    let mut names: Vec<String> = present
-        .filter_map(|name| name.into_string().ok())
-        .filter(|name| crate::config::is_var_name(name))
-        .filter(|name| !any(&never, name) && !set_by_unit.contains(&name.as_str()))
-        .filter(|name| !any(&deny, name) || any(&allow, name))
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names
+
+    /// Whether the unit's value of `name` is left to what it would be anyway.
+    fn untouchable(&self, name: &str) -> bool {
+        thread_local! {
+            static NEVER: Vec<glob::Pattern> = compile(NEVER_COPIED);
+        }
+        // A name no shell could have set, such as bash's exported functions,
+        // is no name `systemd-run` takes either.
+        !crate::config::is_var_name(name)
+            || self.set_by_unit.contains(&name)
+            || NEVER.with(|never| matches_any(never, name))
+    }
+
+    /// What to change of the environment the unit starts from, the service
+    /// manager's (`manager`, as `NAME=value`), so that the command gets
+    /// `present` less what is denied: the names to copy with `--setenv`,
+    /// sorted, and the names to take away with `UnsetEnvironment=`, sorted.
+    ///
+    /// A variable the manager already has with the same value is not copied
+    /// again; one the manager has and the command should not, because it is
+    /// denied or because `present` lacks it, is unset. `UnsetEnvironment=`
+    /// is applied last, over every other source, so it is never given what
+    /// the unit sets itself.
+    fn unit_changes(
+        &self,
+        present: impl Iterator<Item = (OsString, OsString)>,
+        manager: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let manager: std::collections::HashMap<&str, &str> = manager
+            .iter()
+            .filter_map(|assignment| assignment.split_once('='))
+            .collect();
+        let present: std::collections::BTreeMap<String, OsString> = present
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value)))
+            .filter(|(name, _)| !self.untouchable(name) && !self.denied(name))
+            .collect();
+        let copied = present
+            .iter()
+            .filter(|&(name, value)| manager.get(name.as_str()).copied() != value.to_str())
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut unset: Vec<String> = manager
+            .keys()
+            .filter(|&&name| !self.untouchable(name) && !present.contains_key(name))
+            .map(|&name| name.to_owned())
+            .collect();
+        unset.sort_unstable();
+        (copied, unset)
+    }
+}
+
+/// Take what `deny_env` keeps out from a command run as it is, outside any
+/// sandbox: there is no unit, and no manager's environment, to account for.
+pub fn remove_denied_env(
+    cmd: &mut std::process::Command,
+    deny_env: &[String],
+    allow_env: &[String],
+) {
+    if deny_env.is_empty() {
+        return;
+    }
+    let rules = EnvRules {
+        deny: &compile(deny_env),
+        allow: &compile(allow_env),
+        set_by_unit: &[],
+    };
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|name| rules.denied(name)) {
+            cmd.env_remove(name);
+        }
+    }
+}
+
+/// The service manager's environment, as `NAME=value`: what every unit it
+/// starts begins with, before `--setenv` and `Environment=`.
+///
+/// Read with `busctl` rather than `systemctl show-environment`, which quotes
+/// the values it prints.
+pub fn manager_environment() -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Property {
+        data: Vec<String>,
+    }
+    let output = std::process::Command::new("busctl")
+        .args([
+            "--user",
+            "--json=short",
+            "get-property",
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager",
+            "Environment",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("running busctl")?;
+    if !output.status.success() {
+        anyhow::bail!("busctl failed: {}", output.status);
+    }
+    let property: Property =
+        serde_json::from_slice(&output.stdout).context("reading busctl's answer")?;
+    Ok(property.data)
 }
 
 /// The names the unit's `Environment=` assignments set, in any of the forms
@@ -410,6 +513,7 @@ mod tests {
             stderr: None,
             deny_env: &[],
             allow_env: &[],
+            manager_env: &[],
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")
@@ -475,10 +579,9 @@ mod tests {
         assert_eq!(property_value(&args, "MemoryMax"), None);
     }
 
-    fn names(names: &[&str]) -> std::vec::IntoIter<OsString> {
-        names
-            .iter()
-            .map(OsString::from)
+    fn vars(vars: &[(&str, &str)]) -> std::vec::IntoIter<(OsString, OsString)> {
+        vars.iter()
+            .map(|&(name, value)| (OsString::from(name), OsString::from(value)))
             .collect::<Vec<_>>()
             .into_iter()
     }
@@ -487,54 +590,86 @@ mod tests {
         patterns.iter().map(ToString::to_string).collect()
     }
 
+    /// What `unit_changes` gives for `present` and `manager`.
+    fn changes(
+        present: &[(&str, &str)],
+        manager: &[&str],
+        deny: &[&str],
+        allow: &[&str],
+        set_by_unit: &[&str],
+    ) -> (Vec<String>, Vec<String>) {
+        let rules = EnvRules {
+            deny: &compile(deny),
+            allow: &compile(allow),
+            set_by_unit,
+        };
+        rules.unit_changes(vars(present), &patterns(manager))
+    }
+
+    const SHELL: &[(&str, &str)] = &[
+        ("PATH", "/bin"),
+        ("HOME", "/home/u"),
+        ("GH_TOKEN", "t"),
+        ("NPM_TOKEN", "n"),
+        ("LC_ALL", "C"),
+        ("BASH_FUNC_f%%", "() { :; }"),
+    ];
+
     #[test]
     fn every_variable_is_copied_unless_denied() {
-        let present = &[
-            "PATH",
-            "HOME",
-            "GH_TOKEN",
-            "NPM_TOKEN",
-            "LC_ALL",
-            "BASH_FUNC_f%%",
-        ];
+        let copied = |deny: &[&str], allow: &[&str]| changes(SHELL, &[], deny, allow, &[]).0;
         assert_eq!(
-            copied_env(names(present), &[], &[], &[]),
+            copied(&[], &[]),
             ["GH_TOKEN", "HOME", "LC_ALL", "NPM_TOKEN", "PATH"]
         );
         // An allow with nothing denied changes nothing.
+        assert_eq!(copied(&[], &["PATH"]).len(), 5);
+        assert_eq!(copied(&["*_TOKEN"], &[]), ["HOME", "LC_ALL", "PATH"]);
         assert_eq!(
-            copied_env(names(present), &[], &patterns(&["PATH"]), &[]).len(),
-            5
-        );
-        assert_eq!(
-            copied_env(names(present), &patterns(&["*_TOKEN"]), &[], &[]),
-            ["HOME", "LC_ALL", "PATH"]
-        );
-        assert_eq!(
-            copied_env(
-                names(present),
-                &patterns(&["*"]),
-                &patterns(&["PATH", "LC_*", "NPM_TOKEN"]),
-                &[]
-            ),
+            copied(&["*"], &["PATH", "LC_*", "NPM_TOKEN"]),
             ["LC_ALL", "NPM_TOKEN", "PATH"]
         );
     }
 
     #[test]
-    fn what_the_unit_sets_or_the_manager_set_is_never_copied() {
-        let present = &[
-            "NOTIFY_SOCKET",
-            "MONITOR_UNIT",
-            "SCUDO_DELEGATE",
-            "FOO",
-            "BAR",
+    fn what_the_manager_has_already_is_not_copied_again() {
+        let manager = &["PATH=/bin", "HOME=/elsewhere", "LANG=C"];
+        let (copied, unset) = changes(SHELL, manager, &[], &[], &[]);
+        assert_eq!(copied, ["GH_TOKEN", "HOME", "LC_ALL", "NPM_TOKEN"]);
+        // Unset in the shell, so unset in the unit too.
+        assert_eq!(unset, ["LANG"]);
+    }
+
+    #[test]
+    fn what_is_denied_is_taken_from_the_managers_environment() {
+        let manager = &["PATH=/bin", "GH_TOKEN=t", "API_KEY=k", "HOME=/home/u"];
+        let shell = &[
+            ("PATH", "/bin"),
+            ("GH_TOKEN", "t"),
+            ("API_KEY", "k"),
+            ("HOME", "/home/u"),
         ];
-        let allow = patterns(&["*"]);
-        assert_eq!(
-            copied_env(names(present), &patterns(&["*"]), &allow, &["FOO"]),
-            ["BAR"]
-        );
+        let (copied, unset) = changes(shell, manager, &["*"], &["PATH", "HOME"], &[]);
+        assert_eq!(copied, Vec::<String>::new());
+        assert_eq!(unset, ["API_KEY", "GH_TOKEN"]);
+    }
+
+    #[test]
+    fn what_the_unit_sets_or_the_manager_set_is_left_alone() {
+        let shell = &[
+            ("NOTIFY_SOCKET", "/x"),
+            ("MONITOR_UNIT", "u"),
+            ("SCUDO_DELEGATE", "{}"),
+            ("FOO", "shell"),
+            ("BAR", "b"),
+        ];
+        let manager = &["FOO=manager", "INVOCATION_ID=1", "QUX=q"];
+        let (copied, unset) = changes(shell, manager, &["*"], &["*"], &["FOO"]);
+        assert_eq!(copied, ["BAR"]);
+        // FOO is the unit's to set, INVOCATION_ID systemd's.
+        assert_eq!(unset, ["QUX"]);
+        let (_, unset) = changes(shell, manager, &["*"], &[], &["FOO"]);
+        assert_eq!(unset, ["QUX"]);
     }
 
     #[test]
@@ -554,10 +689,12 @@ mod tests {
     }
 
     #[test]
-    fn the_copied_variables_go_on_the_command_line_by_name() {
+    fn the_changes_go_on_the_command_line_by_name() {
         let log = LogConfig::default();
         let deny = patterns(&["*"]);
-        let allow = patterns(&["PATH", "SCUDO_TEST_SURELY_UNSET"]);
+        let allow = patterns(&["PATH", "HOME", "SCUDO_TEST_SURELY_UNSET"]);
+        let path = std::env::var("PATH").expect("PATH is set");
+        let manager = [format!("PATH={path}"), "SCUDO_TEST_SECRET=x".to_owned()];
         let options = Options {
             verbose: false,
             confirm: false,
@@ -569,14 +706,22 @@ mod tests {
             stderr: None,
             deny_env: &deny,
             allow_env: &allow,
+            manager_env: &manager,
         };
         let args: Vec<String> = build(Path::new("/bin/true"), &[], &[], &options)
             .expect("the command builds")
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let setenv: Vec<&String> = args.iter().filter(|a| a.starts_with("--setenv")).collect();
-        assert_eq!(setenv, ["--setenv=PATH"]);
+        let env: Vec<&String> = args
+            .iter()
+            .filter(|a| a.starts_with("--setenv") || a.contains("UnsetEnvironment"))
+            .collect();
+        let mut expected = vec!["--property=UnsetEnvironment=SCUDO_TEST_SECRET"];
+        if std::env::var_os("HOME").is_some() {
+            expected.insert(0, "--setenv=HOME");
+        }
+        assert_eq!(env, expected);
     }
 
     #[test]

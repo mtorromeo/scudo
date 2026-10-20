@@ -32,7 +32,7 @@ cargo make release [VERSION]
 - Resolution flattens the whole `extend` graph into one merge order (each profile after its bases, shared bases applied once) and merges each profile once. Merging branches separately would resolve `"..."` early and make one branch's list replace its sibling's.
 - Unit properties live only in the `systemd` sub-table, so every other key is known and an unknown one is rejected as a typo. `network` is kept as raw TOML (for `"..."` splicing); `log` is parsed at load time and merged field by field with `.or()`.
 - Single-valued properties a profile sets are never overwritten by what scudo adds (only warned about); lists are appended to.
-- The environment is copied whole with `--setenv=NAME` (`runner::copied_env`), minus `deny_env` unless `allow_env` matches. `--setenv` beats `-p Environment=` whatever the order, so names the unit sets there are skipped. The manager's own environment is out of reach and only documented.
+- The environment is scudo's own, minus `deny_env` unless `allow_env` matches (`runner::EnvRules`). The unit starts from the manager's (read with `busctl`, whose values are unquoted): only what differs goes to `--setenv`, what the manager has and should not goes to `UnsetEnvironment=`. `--setenv` beats `-p Environment=` and `UnsetEnvironment=` beats everything, so names the unit sets with `Environment=` are left out of both. Unsandboxed, `deny_env` is applied to the exec directly.
 
 ## Network (`scudo-bpfd`)
 
