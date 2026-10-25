@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f5bb2dfc.js";
+            window.path_to_searchindex_js = "searchindex-a1825900.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -462,7 +462,8 @@ Options:
       --fs-hide &lt;PATH&gt;                  Hide a directory behind an empty one, even one a profile grants (repeatable)
       --fs-read &lt;PATH&gt;                  Make a path read-only, even one a profile hides or makes writable (repeatable)
       --fs-write &lt;PATH&gt;                 Make a path writable, even one a profile hides or makes read-only (repeatable)
-  -E, --env &lt;NAME&gt;                      Copy an environment variable into the sandbox, as `env` in a profile does (repeatable, comma-separated)
+      --deny-env &lt;PATTERN&gt;              Keep environment variables out of the sandbox, by name or glob, as `deny_env` in a profile does (repeatable, comma-separated)
+  -E, --allow-env &lt;PATTERN&gt;             Copy environment variables into the sandbox even when denied, as `allow_env` in a profile does (repeatable, comma-separated)
       --tui                             Run the command in scudo's terminal UI, beside a live list of blocks
       --tui-prefix &lt;KEY&gt;                The UI's prefix key, as `C-a`, `M-x` or `F12`. Overrides `[scudo]`
   -h, --help                            Print help
@@ -566,7 +567,7 @@ every user’s package managers.</p>
 <tr><th>Profile</th><th>Matches</th><th>What it is</th></tr>
 </thead>
 <tbody>
-<tr><td><code>sandbox</code></td><td>—</td><td>Everything read-only, <code>$HOME</code> and <code>$XDG_RUNTIME_DIR</code> replaced by empty directories, a private <code>/tmp</code>; <code>~/.cache</code>, <code>~/.local/bin</code> (read-only) and scudo’s own daemon socket and FUSE shim (read-only) given back</td></tr>
+<tr><td><code>sandbox</code></td><td>—</td><td>Everything read-only, <code>$HOME</code> and <code>$XDG_RUNTIME_DIR</code> replaced by empty directories, a private <code>/tmp</code>; <code>~/.cache</code>, <code>~/.local/bin</code> (read-only) and scudo’s own daemon socket and FUSE shim (read-only) given back; variables named <code>*_SECRET</code>, <code>*_TOKEN</code> or <code>*_KEY</code> kept out</td></tr>
 <tr><td><code>git-project</code></td><td>—</td><td><code>sandbox</code>, plus the <a href="#lookup-variables">project</a> writable and <code>/var</code> denied</td></tr>
 <tr><td><code>no-net</code></td><td>—</td><td>No network beyond <code>localhost</code>; for <code>--profile</code></td></tr>
 <tr><td><code>supply-chain</code></td><td>—</td><td><code>git-project</code>, with the project’s <code>.git</code> read-only; <code>delegable</code></td></tr>
@@ -673,6 +674,8 @@ filesystem.read = [
 ]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
 filesystem.write = ["/tmp", "$HOME/.cache"]
+# Credentials exported in the shell, or by the desktop session, stay outside.
+deny_env = ["*_SECRET", "*_TOKEN", "*_KEY"]
 
 # Works on the project it was started in. /var is denied, since nothing a
 # project tool needs lives there and service data often does.
@@ -875,7 +878,8 @@ Trust this config file? [y/N]
 <tr><td><code>exec</code></td><td>string</td><td>Absolute path of the binary to execute, bypassing PATH resolution</td></tr>
 <tr><td><code>verbose</code></td><td>bool</td><td>Shorthand for <code>log.level = "debug"</code>, which among other things prints the full <code>systemd-run</code> command before executing (default: <code>false</code>)</td></tr>
 <tr><td><code>confirm</code></td><td>bool</td><td>Prompt for confirmation before executing (default: <code>false</code>); silently skipped in non-interactive shells</td></tr>
-<tr><td><code>env</code></td><td>string or array of strings</td><td>Environment variables copied into the sandbox from the environment scudo runs in, by name; see <a href="#environment">Environment</a></td></tr>
+<tr><td><code>deny_env</code></td><td>string or array of strings</td><td>Environment variables, by name or glob, kept out of the sandbox; see <a href="#environment">Environment</a></td></tr>
+<tr><td><code>allow_env</code></td><td>string or array of strings</td><td>Environment variables, by name or glob, passed on even though <code>deny_env</code> matches them; see <a href="#environment">Environment</a></td></tr>
 <tr><td><code>args</code></td><td>table</td><td>Maps <code>$arg_*</code> variable names to the flag(s) that fill them; see <a href="#command-argument-variables">Command argument variables</a></td></tr>
 <tr><td><code>vars</code></td><td>table</td><td>Variables naming a directory found by looking up the tree; see <a href="#lookup-variables">Lookup variables</a></td></tr>
 <tr><td><code>filesystem</code></td><td>table</td><td>Which paths the command may write, read, not see or not touch; see <a href="#filesystem-access">Filesystem access</a></td></tr>
@@ -890,16 +894,39 @@ Trust this config file? [y/N]
 <p>The command starts in the current directory, unless <code>WorkingDirectory</code> is set (in the table or with <code>-P</code>): then <code>systemd-run</code> is not given <code>-d</code> and the property decides.</p>
 <p>Any other key is a typo and scudo says so instead of ignoring it.</p>
 <h2 id="environment"><a class="header" href="#environment">Environment</a></h2>
-<p>The command does not inherit the environment it is started from: <code>systemd-run</code> gives the unit the service manager’s environment (<code>systemctl --user show-environment</code>) and nothing of the shell’s. So a variable set by direnv, or exported in the terminal, is missing inside the sandbox unless a profile names it in <code>env</code>:</p>
-<pre><code class="language-toml">[npx]
-match = "npx"
-env = ["SENTRY_ACCESS_TOKEN", "NODE_OPTIONS"]
+<p>The command gets the environment scudo is started with, as it would without scudo. <code>systemd-run</code> starts the unit from the service manager’s environment (<code>systemctl --user show-environment</code>), so scudo changes that one into its own: a variable the manager has with a different value, or not at all, is passed on with <code>systemd-run --setenv=NAME</code>, and one the manager has but scudo’s environment does not is removed with <code>UnsetEnvironment=</code>.</p>
+<p><code>deny_env</code> keeps variables out, wherever they come from: what it matches is neither passed on nor left in from the manager’s environment. <code>allow_env</code> lets back in some of what <code>deny_env</code> keeps out. Both take names or globs (<code>*</code>, <code>?</code>, <code>[A-Z]</code>), and a variable <code>allow_env</code> matches is passed on whatever <code>deny_env</code> says:</p>
+<pre><code class="language-toml"># Credentials stay outside, as in the recommended configuration's `sandbox`.
+[sandbox]
+deny_env = ["*_SECRET", "*_TOKEN", "*_KEY"]
+
+# A profile that extends it lets back in the one it needs.
+[sentry-wizard]
+match = "npx @sentry/wizard*"
+extend = "sandbox"
+allow_env = "SENTRY_ACCESS_TOKEN"
 </code></pre>
-<p><code>--env</code> (<code>-E</code>) does the same for one run, adding to what the profiles name:</p>
-<pre><code class="language-sh">scudo -E SENTRY_ACCESS_TOKEN,NODE_OPTIONS npx @sentry/wizard
+<p>The alternative is to keep out everything but what is named, which leaves nothing to a naming convention:</p>
+<pre><code class="language-toml">[supply-chain]
+deny_env = "*"
+allow_env = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
+  "LANG", "LANGUAGE", "LC_*", "TZ", "XDG_*",
+]
 </code></pre>
-<p>Each name is passed on with its value at the time scudo runs. A variable that is not set is left out rather than set empty, so a profile shared by several projects can name what only some of them define. <code>env</code> lists add up across combined profiles like any other list.</p>
-<p>Only the names appear on the <code>systemd-run</code> command line that scudo prints, but the values become properties of the unit: while the command runs, <code>systemctl --user show</code> on the unit shows them to your own user. <code>systemd.Environment = ["NAME=value"]</code> sets a fixed value instead, and <code>$NAME</code> expands there as in any other value.</p>
+<p><code>--deny-env</code> and <code>--allow-env</code> (<code>-E</code>) do the same for one run, adding to what the profiles say:</p>
+<pre><code class="language-sh">scudo --deny-env '*' -E PATH,HOME,TERM,SENTRY_ACCESS_TOKEN npx @sentry/wizard
+</code></pre>
+<p>The lists add up across combined profiles like any other list, so any profile can deny a variable and any profile can allow it back.</p>
+<p>Some variables are never passed on:</p>
+<ul>
+<li>those a profile or scudo sets in the unit with <code>Environment=</code>: <code>systemd.Environment = ["NAME=value"]</code> sets a fixed value that the caller’s environment does not replace, and <code>$NAME</code> expands there as in any other value;</li>
+<li>those systemd sets for the unit scudo itself runs in (<code>NOTIFY_SOCKET</code>, <code>LISTEN_*</code>, <code>INVOCATION_ID</code>, <code>JOURNAL_STREAM</code>, <code>MANAGERPID</code>, …), which describe that unit and not the sandbox, and those scudo uses between a <a href="#delegating-commands">broker</a> and the run it starts;</li>
+<li>names that are not valid variable names, such as the <code>BASH_FUNC_name%%</code> bash exports functions with.</li>
+</ul>
+<p>Some variables are never taken away, since the command would get them in any unit: those a profile or scudo sets with <code>Environment=</code>, and those systemd sets for every unit it starts (<code>INVOCATION_ID</code>, <code>SYSTEMD_EXEC_PID</code>, <code>MEMORY_PRESSURE_WATCH</code>, and <code>HOME</code>, <code>USER</code>, <code>PATH</code> when the manager’s environment lacks them), even with <code>deny_env = "*"</code>. <code>systemd.UnsetEnvironment</code> removes them by name.</p>
+<p>To read the manager’s environment scudo runs <code>busctl --user</code>. When that fails, every variable is passed on with <code>--setenv</code> and none is removed, unless <code>deny_env</code> or <code>--deny-env</code> names any, which makes it an error: what is denied could not be taken out.</p>
+<p>Only the names appear on the <code>systemd-run</code> command line that scudo prints, but the values become properties of the unit: while the command runs, <code>systemctl --user show</code> on the unit shows them to your own user.</p>
 <h2 id="example"><a class="header" href="#example">Example</a></h2>
 <p>The bases here are those of the <a href="#recommended-configuration">recommended configuration</a>,
 cut down to what the example needs.</p>
@@ -1457,7 +1484,7 @@ profile applies.</li>
 <code>delegable</code>) hands the command to a broker outside, which runs it in a sandbox of its own: see
 <a href="#delegating-commands">Delegating commands</a>.</li>
 <li>Restrictions asked for on the command line (<code>--profile</code>, <code>-P</code>, <code>--allow-dest</code>,
-<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>, <code>--fs-hide</code>, <code>--fs-read</code>, <code>--fs-write</code>), <code>--env</code>, <code>--delegate</code>, <code>--no-delegate</code> and <code>--tui</code> cannot be had
+<code>--deny-dest</code>, <code>--allow-port</code>, <code>--deny-port</code>, <code>--fs-hide</code>, <code>--fs-read</code>, <code>--fs-write</code>, <code>--deny-env</code>), <code>--allow-env</code>, <code>--delegate</code>, <code>--no-delegate</code> and <code>--tui</code> cannot be had
 inside, so they fail the command rather than being dropped. <code>--confirm</code> still asks.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -1587,7 +1614,7 @@ and so is one whose caller is killed.</p>
 gets to widen what the delegated sandbox may do:</p>
 <ul>
 <li><strong>Only the command line chooses the profiles</strong>, through the profiles’ own <code>match</code> patterns.
-<code>--profile</code>, <code>--no-match</code>, <code>-P</code>, <code>--env</code>, the network flags and the filesystem flags are refused. Since the arguments are
+<code>--profile</code>, <code>--no-match</code>, <code>-P</code>, <code>--deny-env</code>, <code>--allow-env</code>, the network flags and the filesystem flags are refused. Since the arguments are
 the agent’s to write, a pattern on the command line can be dodged (<code>--global</code> for <code>-g</code>,
 <code>git -C . push</code> for <code>git push</code>): it can choose what to delegate, but never keep a command
 from being delegated.</li>
@@ -1603,8 +1630,13 @@ policy and are not checked.</li>
 <li><strong>Nothing is asked.</strong> The delegated command’s standard input is the agent’s, so a
 <code>.scudo.toml</code> that is not trusted yet, or a profile with <code>confirm = true</code>, is an error
 rather than a <code>[y/N]</code> the agent could answer.</li>
-<li><strong>The agent’s environment is not passed on</strong>, as with any <code>systemd-run</code>. Variables in the
-profiles expand, and <code>env</code> copies, from the environment scudo was started with.</li>
+<li><strong>The agent’s environment is not passed on.</strong> Variables in the profiles expand, and the
+delegated command gets the variables <code>deny_env</code> lets through, from the environment the
+broker was started with: the one the sandbox around the agent was started from. A
+<code>delegable</code> profile should keep at least the credentials out, as <code>sandbox</code> in the
+<a href="#recommended-configuration">recommended configuration</a> does,
+or all of it with <code>deny_env = "*"</code> and an <code>allow_env</code> for what the command needs
+(see <a href="#environment">Environment</a>).</li>
 <li><strong>A delegated command has to be sandboxed.</strong> If its profiles add up to nothing, it is
 refused rather than run outside every sandbox.</li>
 </ul>

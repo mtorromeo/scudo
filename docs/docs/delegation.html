@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f5bb2dfc.js";
+            window.path_to_searchindex_js = "searchindex-a1825900.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-6da527ae.js"></script>
@@ -308,7 +308,7 @@ and so is one whose caller is killed.</p>
 gets to widen what the delegated sandbox may do:</p>
 <ul>
 <li><strong>Only the command line chooses the profiles</strong>, through the profiles’ own <code>match</code> patterns.
-<code>--profile</code>, <code>--no-match</code>, <code>-P</code>, <code>--env</code>, the network flags and the filesystem flags are refused. Since the arguments are
+<code>--profile</code>, <code>--no-match</code>, <code>-P</code>, <code>--deny-env</code>, <code>--allow-env</code>, the network flags and the filesystem flags are refused. Since the arguments are
 the agent’s to write, a pattern on the command line can be dodged (<code>--global</code> for <code>-g</code>,
 <code>git -C . push</code> for <code>git push</code>): it can choose what to delegate, but never keep a command
 from being delegated.</li>
@@ -324,8 +324,13 @@ policy and are not checked.</li>
 <li><strong>Nothing is asked.</strong> The delegated command’s standard input is the agent’s, so a
 <code>.scudo.toml</code> that is not trusted yet, or a profile with <code>confirm = true</code>, is an error
 rather than a <code>[y/N]</code> the agent could answer.</li>
-<li><strong>The agent’s environment is not passed on</strong>, as with any <code>systemd-run</code>. Variables in the
-profiles expand, and <code>env</code> copies, from the environment scudo was started with.</li>
+<li><strong>The agent’s environment is not passed on.</strong> Variables in the profiles expand, and the
+delegated command gets the variables <code>deny_env</code> lets through, from the environment the
+broker was started with: the one the sandbox around the agent was started from. A
+<code>delegable</code> profile should keep at least the credentials out, as <code>sandbox</code> in the
+<a href="configuration/recommended.html#recommended-configuration">recommended configuration</a> does,
+or all of it with <code>deny_env = "*"</code> and an <code>allow_env</code> for what the command needs
+(see <a href="configuration/profiles.html#environment">Environment</a>).</li>
 <li><strong>A delegated command has to be sandboxed.</strong> If its profiles add up to nothing, it is
 refused rather than run outside every sandbox.</li>
 </ul>

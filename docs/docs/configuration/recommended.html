@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-961e4924.js";
+            window.path_to_searchindex_js = "../searchindex-a1825900.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-6da527ae.js"></script>
@@ -218,7 +218,7 @@ every user’s package managers.</p>
 <tr><th>Profile</th><th>Matches</th><th>What it is</th></tr>
 </thead>
 <tbody>
-<tr><td><code>sandbox</code></td><td>—</td><td>Everything read-only, <code>$HOME</code> and <code>$XDG_RUNTIME_DIR</code> replaced by empty directories, a private <code>/tmp</code>; <code>~/.cache</code>, <code>~/.local/bin</code> (read-only) and scudo’s own daemon socket and FUSE shim (read-only) given back</td></tr>
+<tr><td><code>sandbox</code></td><td>—</td><td>Everything read-only, <code>$HOME</code> and <code>$XDG_RUNTIME_DIR</code> replaced by empty directories, a private <code>/tmp</code>; <code>~/.cache</code>, <code>~/.local/bin</code> (read-only) and scudo’s own daemon socket and FUSE shim (read-only) given back; variables named <code>*_SECRET</code>, <code>*_TOKEN</code> or <code>*_KEY</code> kept out</td></tr>
 <tr><td><code>git-project</code></td><td>—</td><td><code>sandbox</code>, plus the <a href="variables.html#lookup-variables">project</a> writable and <code>/var</code> denied</td></tr>
 <tr><td><code>no-net</code></td><td>—</td><td>No network beyond <code>localhost</code>; for <code>--profile</code></td></tr>
 <tr><td><code>supply-chain</code></td><td>—</td><td><code>git-project</code>, with the project’s <code>.git</code> read-only; <code>delegable</code></td></tr>
@@ -325,6 +325,8 @@ filesystem.read = [
 ]
 filesystem.hide = ["$HOME", "$XDG_RUNTIME_DIR"]
 filesystem.write = ["/tmp", "$HOME/.cache"]
+# Credentials exported in the shell, or by the desktop session, stay outside.
+deny_env = ["*_SECRET", "*_TOKEN", "*_KEY"]
 
 # Works on the project it was started in. /var is denied, since nothing a
 # project tool needs lives there and service data often does.
