@@ -3,6 +3,7 @@
 pub mod bpfd;
 pub mod broker;
 pub mod config;
+pub mod dispatch;
 pub mod logging;
 pub mod nested;
 pub mod policy;

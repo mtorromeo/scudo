@@ -47,6 +47,9 @@ pub struct Options<'a> {
     /// The service manager's environment, as `NAME=value`, which the unit
     /// starts from; see [`manager_environment`].
     pub manager_env: &'a [String],
+    /// How the command was found, for a scudo it calls back; see
+    /// [`crate::dispatch`].
+    pub dispatch: Option<&'a str>,
 }
 
 /// Build the `systemd-run` command line, without starting anything.
@@ -82,6 +85,10 @@ pub fn build(
     for name in copied {
         cmd.arg(format!("--setenv={name}"));
     }
+    if let Some(record) = options.dispatch {
+        cmd.env(crate::dispatch::ENV, record);
+        cmd.arg(format!("--setenv={}", crate::dispatch::ENV));
+    }
     if !unset.is_empty() {
         cmd.arg(format!("--property=UnsetEnvironment={}", unset.join(" ")));
     }
@@ -102,7 +109,8 @@ pub fn build(
 
 /// Variables that never cross into the unit, whatever `allow_env` says: those
 /// the service manager sets for the unit it runs scudo in, which would describe
-/// that unit instead of the sandbox, and scudo's own between broker and run.
+/// that unit instead of the sandbox, scudo's own between broker and run, and
+/// the dispatch record, which describes the call that started this scudo.
 const NEVER_COPIED: &[&str] = &[
     "NOTIFY_SOCKET",
     "LISTEN_FDS",
@@ -120,6 +128,7 @@ const NEVER_COPIED: &[&str] = &[
     crate::broker::SPEC_ENV,
     crate::broker::FD_ENV,
     crate::broker::DELEGATE_ENV,
+    crate::dispatch::ENV,
 ];
 
 /// Every pattern was checked when it was read.
@@ -514,6 +523,7 @@ mod tests {
             deny_env: &[],
             allow_env: &[],
             manager_env: &[],
+            dispatch: None,
         };
         build(Path::new("/bin/true"), &[], &systemd_args, &options)
             .expect("the command builds")
@@ -707,6 +717,7 @@ mod tests {
             deny_env: &deny,
             allow_env: &allow,
             manager_env: &manager,
+            dispatch: None,
         };
         let args: Vec<String> = build(Path::new("/bin/true"), &[], &[], &options)
             .expect("the command builds")
@@ -722,6 +733,34 @@ mod tests {
             expected.insert(0, "--setenv=HOME");
         }
         assert_eq!(env, expected);
+    }
+
+    #[test]
+    fn the_dispatch_record_reaches_the_unit_whatever_is_denied() {
+        let log = LogConfig::default();
+        let deny = patterns(&["*"]);
+        let options = Options {
+            verbose: false,
+            confirm: false,
+            log: &log,
+            shim_token: None,
+            log_denials: false,
+            dbus_proxy: None,
+            unit: None,
+            stderr: None,
+            deny_env: &deny,
+            allow_env: &[],
+            manager_env: &[],
+            dispatch: Some("{}"),
+        };
+        let cmd = build(Path::new("/bin/true"), &[], &[], &options).expect("the command builds");
+        let setenv = format!("--setenv={}", crate::dispatch::ENV);
+        assert_eq!(cmd.get_args().filter(|a| *a == setenv.as_str()).count(), 1);
+        assert!(
+            cmd.get_envs().any(
+                |(name, value)| name == crate::dispatch::ENV && value == Some(OsStr::new("{}"))
+            )
+        );
     }
 
     #[test]

@@ -48,3 +48,7 @@ Add the `PATH` export to your shell's init file (`.bashrc`, `.zshrc`, …):
 ```bash
 export PATH="${XDG_RUNTIME_DIR}/scudo/shims:$PATH"
 ```
+
+**Alongside other shims**
+
+Another wrapper installed under the same name, such as a build cache in front of `cargo`, needs no configuration. scudo skips itself in `PATH`, and most such wrappers skip themselves too, so each would keep finding the other. scudo notices a call that comes straight back with the same name, arguments and directory it just dispatched. It skips what it chose last time and runs the next match in `PATH`, so the chain ends at the real command: `cargo` → scudo → wrapper → scudo → `cargo`. When every match in `PATH` leads back to scudo, it fails with an error instead of looping.

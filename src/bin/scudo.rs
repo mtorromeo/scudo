@@ -201,35 +201,6 @@ fn main() {
     }
 }
 
-/// Find the canonicalized command searching in PATH, skipping any entries that are the same as the current executable.
-fn which(command: &str, self_exe: &PathBuf) -> Result<PathBuf> {
-    if command.contains('/')
-        && let Ok(candidate) = std::fs::canonicalize(command)
-        && candidate != *self_exe
-    {
-        if let Ok(absolute) = std::path::absolute(Path::new(command)) {
-            return Ok(absolute);
-        }
-        return Ok(candidate);
-    }
-
-    let command = Path::new(command);
-    let command = command
-        .file_name()
-        .ok_or(anyhow::anyhow!("invalid command: {}", command.display()))?;
-
-    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
-        let candidate = PathBuf::from(dir).join(command);
-        if candidate.is_file()
-            && matches!(std::fs::canonicalize(&candidate), Ok(canonical) if canonical != *self_exe)
-        {
-            return Ok(candidate);
-        }
-    }
-
-    anyhow::bail!("command not found: {}", command.display())
-}
-
 fn run(logging: &scudo::logging::Handle) -> Result<()> {
     let self_exe = std::env::current_exe().and_then(std::fs::canonicalize)?;
     let mut args: Vec<_> = std::env::args().collect();
@@ -275,6 +246,9 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
         return scudo::broker::run_process(&log_broker_event);
     }
 
+    // Before any lookup: whether this call came straight back from one.
+    let dispatch = scudo::dispatch::Dispatch::new(&args.command, &args.command_args);
+
     // Before the config, so that no file anyone else wrote has a say in it.
     if scudo::nested::inside_sealed_sandbox() {
         refuse_nested_flags(&args)?;
@@ -286,8 +260,8 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
                 scudo::broker::Outcome::Exited { code, signal } => exit_like(code, signal),
             }
         }
-        let bin = which(&args.command, &self_exe)?;
-        return run_nested(&bin, &args);
+        let bin = dispatch.which(&args.command, &self_exe)?;
+        return run_nested(&bin, &args, dispatch.record(&bin).as_deref());
     }
 
     let delegation = match args.delegated.as_deref() {
@@ -297,10 +271,17 @@ fn run(logging: &scudo::logging::Handle) -> Result<()> {
     if delegation.is_some() {
         // Whatever goes wrong from here on, the requester has to be told: its
         // stderr is the only place it is looking.
-        return run_sandboxed(&args, &self_exe, logging, &cli_log, delegation.as_ref())
-            .inspect_err(tell_requester);
+        return run_sandboxed(
+            &args,
+            &self_exe,
+            &dispatch,
+            logging,
+            &cli_log,
+            delegation.as_ref(),
+        )
+        .inspect_err(tell_requester);
     }
-    run_sandboxed(&args, &self_exe, logging, &cli_log, None)
+    run_sandboxed(&args, &self_exe, &dispatch, logging, &cli_log, None)
 }
 
 /// What a run on behalf of a sandbox's broker is held to.
@@ -430,11 +411,13 @@ fn add_env_patterns(flag: &str, given: &[String], patterns: &mut Vec<String>) ->
 fn run_sandboxed(
     args: &Args,
     self_exe: &Path,
+    dispatch: &scudo::dispatch::Dispatch,
     logging: &scudo::logging::Handle,
     cli_log: &LogConfig,
     delegation: Option<&Delegation>,
 ) -> Result<()> {
-    let bin = which(&args.command, &self_exe.to_path_buf())?;
+    let bin = dispatch.which(&args.command, self_exe)?;
+    let record = dispatch.record(&bin);
 
     // Before the config: a mistyped rule is the command line's fault, and says
     // so without waiting on anything else.
@@ -710,6 +693,7 @@ fn run_sandboxed(
         deny_env: &resolved.deny_env,
         allow_env: &resolved.allow_env,
         manager_env: &manager_env,
+        dispatch: record.as_deref(),
     };
 
     #[cfg(feature = "tui")]
@@ -718,6 +702,7 @@ fn run_sandboxed(
             let mut cmd = std::process::Command::new(&bin);
             cmd.args(&args.command_args);
             scudo::runner::remove_denied_env(&mut cmd, &resolved.deny_env, &resolved.allow_env);
+            set_dispatch(&mut cmd, record.as_deref());
             cmd
         } else {
             scudo::runner::build(&bin, &args.command_args, &resolved.systemd_args, &options)?
@@ -748,6 +733,7 @@ fn run_sandboxed(
         let mut cmd = std::process::Command::new(&bin);
         cmd.args(&args.command_args);
         scudo::runner::remove_denied_env(&mut cmd, &resolved.deny_env, &resolved.allow_env);
+        set_dispatch(&mut cmd, record.as_deref());
         let err = cmd.exec();
         return Err(anyhow::Error::from(err).context("exec failed"));
     }
@@ -761,7 +747,7 @@ fn run_sandboxed(
 /// The restrictions the command line asks for explicitly cannot be had here,
 /// and are not quietly dropped: they fail instead. `--no-match` only takes
 /// profiles away, which is what happens here anyway.
-fn run_nested(bin: &Path, args: &Args) -> Result<()> {
+fn run_nested(bin: &Path, args: &Args, record: Option<&str>) -> Result<()> {
     debug!(
         "already inside a scudo sandbox that cannot start another one: \
          running '{}' in it as it is",
@@ -769,9 +755,18 @@ fn run_nested(bin: &Path, args: &Args) -> Result<()> {
     );
     let mut cmd = std::process::Command::new(bin);
     cmd.args(&args.command_args);
+    set_dispatch(&mut cmd, record);
     scudo::runner::confirm(&scudo::runner::render(&cmd), args.confirm)?;
     let err = cmd.exec();
     Err(anyhow::Error::from(err).context("exec failed"))
+}
+
+/// Tell the command how it was found, or that nothing was recorded.
+fn set_dispatch(cmd: &mut std::process::Command, record: Option<&str>) {
+    match record {
+        Some(record) => cmd.env(scudo::dispatch::ENV, record),
+        None => cmd.env_remove(scudo::dispatch::ENV),
+    };
 }
 
 /// The restrictions the command line asks for explicitly cannot be had inside
